@@ -2,95 +2,69 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
-All colors MUST be HSL.
-*/
+@import url('https://fonts.googleapis.com/css2?family=Bangers&family=Luckiest+Guy&family=Space+Grotesk:wght@400;500;700&display=swap');
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* Fart Blaster 3000 - Cosmic Toxic Theme */
+    --background: 270 60% 8%;
+    --foreground: 80 90% 85%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card: 270 50% 12%;
+    --card-foreground: 80 90% 85%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover: 270 50% 12%;
+    --popover-foreground: 80 90% 85%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* Toxic green - the fart cloud */
+    --primary: 85 95% 55%;
+    --primary-foreground: 270 60% 8%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    /* Wild purple - cosmic vibes */
+    --secondary: 270 80% 55%;
+    --secondary-foreground: 0 0% 100%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 270 40% 18%;
+    --muted-foreground: 270 20% 70%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    /* Hot pink - the 3000 */
+    --accent: 340 90% 60%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 270 50% 25%;
+    --input: 270 50% 18%;
+    --ring: 85 95% 55%;
 
-    --radius: 0.5rem;
+    --radius: 1rem;
 
-    --sidebar-background: 0 0% 98%;
+    /* Custom tokens */
+    --toxic: 85 95% 55%;
+    --toxic-glow: 85 100% 65%;
+    --cosmic: 270 80% 55%;
+    --cosmic-deep: 270 70% 25%;
+    --hot-pink: 340 90% 60%;
+    --warning-yellow: 50 100% 60%;
 
-    --sidebar-foreground: 240 5.3% 26.1%;
+    --gradient-cosmic: linear-gradient(135deg, hsl(270 70% 15%), hsl(280 60% 20%), hsl(260 65% 12%));
+    --gradient-toxic: linear-gradient(135deg, hsl(85 95% 55%), hsl(100 90% 50%));
+    --gradient-blaster: linear-gradient(180deg, hsl(85 95% 55%) 0%, hsl(270 80% 55%) 50%, hsl(340 90% 60%) 100%);
 
-    --sidebar-primary: 240 5.9% 10%;
+    --shadow-toxic: 0 0 60px hsl(85 100% 55% / 0.6), 0 0 100px hsl(85 100% 55% / 0.3);
+    --shadow-cosmic: 0 0 80px hsl(270 80% 55% / 0.5);
+    --shadow-pink: 0 0 40px hsl(340 90% 60% / 0.5);
+    --shadow-hard: 6px 6px 0 hsl(270 60% 8%);
 
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
-  }
-
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-background: 270 60% 8%;
+    --sidebar-foreground: 80 90% 85%;
+    --sidebar-primary: 85 95% 55%;
+    --sidebar-primary-foreground: 270 60% 8%;
+    --sidebar-accent: 270 40% 18%;
+    --sidebar-accent-foreground: 80 90% 85%;
+    --sidebar-border: 270 50% 25%;
+    --sidebar-ring: 85 95% 55%;
   }
 }
 
@@ -101,5 +75,97 @@ All colors MUST be HSL.
 
   body {
     @apply bg-background text-foreground;
+    font-family: 'Space Grotesk', sans-serif;
+    background-image:
+      radial-gradient(circle at 20% 10%, hsl(270 80% 25% / 0.6) 0%, transparent 40%),
+      radial-gradient(circle at 80% 80%, hsl(85 90% 30% / 0.3) 0%, transparent 40%),
+      radial-gradient(circle at 50% 50%, hsl(340 70% 25% / 0.2) 0%, transparent 60%);
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .display {
+    font-family: 'Luckiest Guy', cursive;
+    letter-spacing: 0.02em;
+  }
+
+  .comic {
+    font-family: 'Bangers', cursive;
+    letter-spacing: 0.05em;
   }
 }
+
+@layer utilities {
+  .text-stroke {
+    -webkit-text-stroke: 2px hsl(var(--background));
+    text-shadow: 4px 4px 0 hsl(var(--background));
+  }
+
+  .text-stroke-thick {
+    -webkit-text-stroke: 4px hsl(var(--background));
+    text-shadow: 6px 6px 0 hsl(var(--background));
+  }
+
+  .bg-cosmic { background: var(--gradient-cosmic); }
+  .bg-toxic { background: var(--gradient-toxic); }
+  .shadow-toxic { box-shadow: var(--shadow-toxic); }
+  .shadow-cosmic { box-shadow: var(--shadow-cosmic); }
+  .shadow-pink { box-shadow: var(--shadow-pink); }
+  .shadow-hard { box-shadow: var(--shadow-hard); }
+
+  .stars-bg {
+    background-image:
+      radial-gradient(2px 2px at 20px 30px, hsl(var(--toxic)), transparent),
+      radial-gradient(2px 2px at 60px 70px, hsl(var(--warning-yellow)), transparent),
+      radial-gradient(1px 1px at 50px 160px, hsl(var(--foreground)), transparent),
+      radial-gradient(1px 1px at 130px 80px, hsl(var(--hot-pink)), transparent),
+      radial-gradient(2px 2px at 90px 200px, hsl(var(--toxic)), transparent);
+    background-size: 200px 200px;
+    background-repeat: repeat;
+  }
+}
+
+@keyframes float-fart {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-20px) rotate(3deg); }
+}
+
+@keyframes blast {
+  0% { transform: scale(1) translateX(0); opacity: 0.8; }
+  100% { transform: scale(1.5) translateX(40px); opacity: 0; }
+}
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
+}
+
+@keyframes pulse-toxic {
+  0%, 100% { box-shadow: 0 0 20px hsl(var(--toxic) / 0.5), 0 0 40px hsl(var(--toxic) / 0.3); }
+  50% { box-shadow: 0 0 40px hsl(var(--toxic) / 0.8), 0 0 80px hsl(var(--toxic) / 0.5); }
+}
+
+@keyframes scroll-x {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translate(0); }
+  25% { transform: translate(-2px, 2px); }
+  50% { transform: translate(2px, -2px); }
+  75% { transform: translate(-2px, -2px); }
+}
+
+@keyframes rise-fart {
+  0% { transform: translateY(100vh) scale(0.5); opacity: 0; }
+  10% { opacity: 0.7; }
+  90% { opacity: 0.7; }
+  100% { transform: translateY(-20vh) scale(1.2); opacity: 0; }
+}
+
+.animate-float-fart { animation: float-fart 3s ease-in-out infinite; }
+.animate-wiggle { animation: wiggle 0.6s ease-in-out infinite; }
+.animate-pulse-toxic { animation: pulse-toxic 2s ease-in-out infinite; }
+.animate-shake { animation: shake 0.3s ease-in-out infinite; }
+.animate-blast { animation: blast 1.5s ease-out infinite; }
