@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 function Index() {
-  const [brandImg, setBrandImg] = useState(true);
   const sceneRef = useRef<HTMLDivElement>(null);
   const poolRef = useRef<HTMLDivElement>(null);
   const dunkRef = useRef<HTMLSpanElement>(null);
@@ -136,26 +135,6 @@ function Index() {
       <section id="scene" ref={sceneRef}>
         <div className="grease" />
         <button id="mute" ref={muteRef} title="unmute the blorps">🔇</button>
-        <div id="hud">
-          <div className="brand">
-            {brandImg ? (
-              <img
-                src="/nugget-chicken.png"
-                alt="Chicken Nugget"
-                onError={() => setBrandImg(false)}
-                style={{ display: "block", margin: "0 auto", width: "min(66vw,280px)", height: "auto", filter: "drop-shadow(0 8px 16px #000a)" }}
-              />
-            ) : (
-              <h1>CHICKEN <span>NUGGET</span></h1>
-            )}
-            <p>A chicken. Made entirely out of a chicken nugget. It's raining them into ketchup. Don't ask questions. 🍗</p>
-            <div className="btns">
-              <button className="b b-rain" id="rainBtn">🍗 MAKE IT RAIN</button>
-              <button className="b b-buy" id="buyBtn">🍅 BUY $NUGGET</button>
-            </div>
-            <div className="counter">🥫 <b><span ref={dunkRef}>0</span></b> nuggets dunked · click the sky to drop more</div>
-          </div>
-        </div>
         <div id="pool" ref={poolRef}>
           <svg className="pool-wave" viewBox="0 0 100 12" preserveAspectRatio="none">
             <path d="M0,6 Q6,1 12,6 T24,6 T36,6 T48,6 T60,6 T72,6 T84,6 T96,6 T108,6 V12 H0 Z" fill="var(--ketchup)" />
@@ -165,37 +144,6 @@ function Index() {
         </div>
       </section>
 
-      <section id="more">
-        <div className="wrap">
-          <div className="card" style={{ background: "linear-gradient(160deg,#cf1c0e18,#1a1206)", borderColor: "#5a3418" }}>
-            <h2>🍅 $NUGGET</h2>
-            <div className="row row2">
-              <div>
-                <div style={{ fontSize: 11, color: "#a88f5f", marginBottom: 6 }}>CONTRACT ADDRETH (dip responthibly)</div>
-                <div className="ca" id="ca"><span id="caTxt">NUGG7yoUrCh1ckenIsAlreadyFr1edSol4nApumpKetchUp</span><span id="caIco">📋</span></div>
-                <div className="buys">
-                  <button className="b b-rain buy-rain">pump.fun →</button>
-                  <button className="b b-rain buy-rain">Raydium →</button>
-                  <button className="b b-rain buy-rain">DexScreener →</button>
-                </div>
-              </div>
-              <div className="card tok" style={{ padding: 14, borderColor: "#4a3418" }}>
-                <div style={{ fontSize: 11, color: "#a88f5f", border: 0 }}>TOKENOMICTH</div>
-                <div><span>Supply</span><b>1,000,000,000</b></div>
-                <div><span>Tax</span><b>0% (already deep fried)</b></div>
-                <div><span>Team</span><b>1 dipping sauce</b></div>
-                <div><span>Utility</span><b>falls into ketchup</b></div>
-              </div>
-            </div>
-          </div>
-          <div className="row row3 lore" style={{ marginTop: 16 }}>
-            <div className="card"><div className="em">🐔</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Is it a chicken?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Yes. Head, wattle, legs, the whole vibe. Struts around. Clucks, allegedly.</p></div>
-            <div className="card"><div className="em">🍗</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Is it a nugget?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Also yes. Body is 100% breaded, golden, crispy. It was born fried. A miracle.</p></div>
-            <div className="card"><div className="em">🥫</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Why the ketchup?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Every nugget must fulfill its destiny. It's not sad. It's dipping. Respect the dip.</p></div>
-          </div>
-          <p className="foot">Parody. For the memes. A nonsense site about a fictional deep-fried chicken. No real chickens were dipped. $NUGGET is a valueless joke token — no team, no roadmap, no utility beyond falling into condiments. Nothing here is financial advice. Now go make it rain. 🍗🍅</p>
-        </div>
-      </section>
     </>
   );
 }
