@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 function Index() {
+  const [brandImg, setBrandImg] = useState(true);
   const sceneRef = useRef<HTMLDivElement>(null);
   const poolRef = useRef<HTMLDivElement>(null);
   const dunkRef = useRef<HTMLSpanElement>(null);
@@ -137,7 +138,16 @@ function Index() {
         <button id="mute" ref={muteRef} title="unmute the blorps">🔇</button>
         <div id="hud">
           <div className="brand">
-            <h1>CHICKEN <span>NUGGET</span></h1>
+            {brandImg ? (
+              <img
+                src="/nugget-chicken.png"
+                alt="Chicken Nugget"
+                onError={() => setBrandImg(false)}
+                style={{ display: "block", margin: "0 auto", width: "min(66vw,280px)", height: "auto", filter: "drop-shadow(0 8px 16px #000a)" }}
+              />
+            ) : (
+              <h1>CHICKEN <span>NUGGET</span></h1>
+            )}
             <p>A chicken. Made entirely out of a chicken nugget. It's raining them into ketchup. Don't ask questions. 🍗</p>
             <div className="btns">
               <button className="b b-rain" id="rainBtn">🍗 MAKE IT RAIN</button>
