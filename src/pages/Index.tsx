@@ -1,280 +1,192 @@
-import { useEffect, useRef, useState } from "react";
-import { Swords, Shield, Search, Copy, Check, Trophy, Scroll, Coins, Skull, Sparkles, Crown } from "lucide-react";
-
-/* ================= palette (retro medieval) ================= */
-const C = {
-  bg: "#14120c", panel: "#201b12", panel2: "#2b2417", border: "#4a3f28",
-  ink: "#f3e9cf", muted: "#a08f6a", gold: "#e8b93b", green: "#6bd66b",
-  red: "#e0483b", blue: "#5aa9e6", purple: "#b06be6",
-};
-const PX = "'Press Start 2P', ui-monospace, monospace";
-const pixelBox = (bg: string, edge: string) => ({ background: bg, border: `3px solid ${edge}`, boxShadow: `4px 4px 0 0 #0008`, imageRendering: "pixelated" as const });
-const CA = "LARP7yoUrCrYpToHer0IsACardBo4rdKn1ghtSol4nApump";
-
-/* ================= roster (ORIGINAL larper agents) ================= */
-const AGENTS = [
-  { e: "🛡️", name: "Sir Cope-a-Lot", cls: "Knight", det: 88, cope: 42, fer: 72, c: C.blue, tag: "Blocks FUD, absorbs hopium." },
-  { e: "🧙", name: "Wizard of Wen", cls: "Mage", det: 95, cope: 60, fer: 55, c: C.purple, tag: "Casts Detect Bagholder." },
-  { e: "🏹", name: "Ranger Rug-Slayer", cls: "Archer", det: 91, cope: 50, fer: 80, c: C.green, tag: "Snipes exit liquidity at 300m." },
-  { e: "🤺", name: "Duelist Due-Diligence", cls: "Fencer", det: 84, cope: 70, fer: 88, c: C.gold, tag: "Parries every 'trust me bro'." },
-  { e: "🃏", name: "Jester of FUD", cls: "Bard", det: 78, cope: 92, fer: 45, c: C.red, tag: "Debuffs confidence, buffs cope." },
-  { e: "👑", name: "The Exit Liquidator", cls: "King", det: 99, cope: 30, fer: 96, c: C.gold, tag: "Rules the graveyard of dead coins." },
-];
-
-const CLAIMS = ["claims 100x on a shitcoin", "says he called the exact top", "posts wins, never losses", "'been in since 2013'", "flexes a rented Lambo", "'NFA' (it was FA)", "'generational wealth incoming'", "screenshots a demo account", "'i only aped 5 figures'"];
-const REALITY = ["down 38% this quarter", "bought the literal top", "wallet holds $12 and hopium", "wallet is 4 months old", "the Lambo is a Hot Wheels", "rugged his own followers", "it's a paper-trading app", "1 winning trade, 200 deleted ones", "sold the bottom, cried on stream"];
-const VERDICTS = [
-  { min: 0, label: "CERTIFIED REAL", e: "⚔️", c: C.green, line: "Sword's sharp. Hands are diamond. This one actually fights." },
-  { min: 26, label: "MILD LARP", e: "🪵", c: C.blue, line: "Foam-sword energy. Mostly harmless, mildly delusional." },
-  { min: 51, label: "HEAVY LARP", e: "🎭", c: C.gold, line: "All costume, no combat. The armor is cardboard." },
-  { min: 76, label: "TOTAL LARP", e: "🤡", c: C.red, line: "Full exit-liquidity cosplay. Do NOT follow into battle." },
-];
-const hash = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
-const at = <T,>(a: T[], n: number) => a[n % a.length];
-
-type Verdict = { handle: string; score: number; claim: string; reality: string; v: (typeof VERDICTS)[number] };
+import { useEffect, useRef } from "react";
 
 function Index() {
-  const [agent, setAgent] = useState(0);
-  const [handle, setHandle] = useState("");
-  const [scanning, setScanning] = useState(false);
-  const [verdict, setVerdict] = useState<Verdict | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [feed, setFeed] = useState<{ id: number; h: string; s: number }[]>([]);
-  const fid = useRef(1);
+  const sceneRef = useRef<HTMLDivElement>(null);
+  const poolRef = useRef<HTMLDivElement>(null);
+  const dunkRef = useRef<HTMLSpanElement>(null);
+  const muteRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    const seed = ["@moonboy_", "@0xLarpLord", "@dev_trustme", "@100xdaily", "@chartwizard", "@rug_survivor", "@ser_pump", "@giga.eth", "@wen_lambo", "@paperhands99"];
-    setFeed(seed.map((h) => ({ id: fid.current++, h, s: 30 + (hash(h) % 70) })));
-    const t = setInterval(() => {
-      const names = ["degen", "0x", "crypto", "ser", "moon", "chad", "ape", "gwei", "based", "giga", "wagmi", "cope"];
-      const h = "@" + at(names, Math.floor(Math.random() * 999)) + at(names, Math.floor(Math.random() * 999)) + Math.floor(Math.random() * 99);
-      setFeed((f) => [{ id: fid.current++, h, s: 30 + Math.floor(Math.random() * 70) }, ...f].slice(0, 10));
-    }, 2600);
-    return () => clearInterval(t);
+    const scene = sceneRef.current, pool = poolRef.current, dunkEl = dunkRef.current, muteBtn = muteRef.current;
+    if (!scene || !pool) return;
+    const IMG = "/nugget-chicken.png";
+    let imgOk = false, dunked = 0, active = 0, muted = true;
+    const SPLATS = ["PLORP!", "SPLAT!", "BLORP!", "GLOOP!", "SPLOOSH!", "DIP!", "SPLONK!"];
+    const timers: number[] = [];
+    const later = (fn: () => void, ms: number) => timers.push(window.setTimeout(fn, ms));
+
+    const probe = new Image(); probe.onload = () => { imgOk = true; }; probe.src = IMG;
+
+    let actx: AudioContext | null = null;
+    const ctx = () => { if (!actx) { try { actx = new (window.AudioContext || (window as any).webkitAudioContext)(); } catch { return null; } } if (actx && actx.state === "suspended") actx.resume(); return actx; };
+    const blorp = () => {
+      if (muted) return; const c = ctx(); if (!c) return; const t = c.currentTime;
+      const o = c.createOscillator(), g = c.createGain(); o.type = "sine";
+      o.frequency.setValueAtTime(420, t); o.frequency.exponentialRampToValueAtTime(90, t + 0.14);
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.25, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      o.connect(g).connect(c.destination); o.start(t); o.stop(t + 0.22);
+      const dur = 0.09, buf = c.createBuffer(1, Math.floor(c.sampleRate * dur), c.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+      const n = c.createBufferSource(); n.buffer = buf; const f = c.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 900;
+      const ng = c.createGain(); ng.gain.setValueAtTime(0.18, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+      n.connect(f).connect(ng).connect(c.destination); n.start(t); n.stop(t + dur);
+    };
+
+    const splash = (x: number) => {
+      const poolTop = window.innerHeight - pool.offsetHeight + 24;
+      const s = document.createElement("div"); s.className = "splat"; s.style.left = x + "px"; s.style.top = poolTop + "px";
+      s.style.fontSize = (16 + Math.random() * 14) + "px"; s.textContent = SPLATS[Math.floor(Math.random() * SPLATS.length)];
+      scene.appendChild(s); later(() => s.remove(), 720);
+      for (let i = 0; i < 6; i++) {
+        const dp = document.createElement("div"); dp.className = "drop";
+        const dx = (Math.random() * 2 - 1) * 70, dy = -(20 + Math.random() * 50), sz = 6 + Math.random() * 8;
+        dp.style.left = x + "px"; dp.style.top = poolTop + "px"; dp.style.width = dp.style.height = sz + "px"; dp.style.transform = "translate(-50%,-50%)";
+        scene.appendChild(dp);
+        requestAnimationFrame(() => { dp.style.transition = "transform .55s cubic-bezier(.2,.7,.3,1), opacity .55s"; dp.style.transform = "translate(" + (dx - 5) + "px," + dy + "px)"; dp.style.opacity = "0"; });
+        later(() => dp.remove(), 600);
+      }
+      blorp(); dunked++; if (dunkEl) dunkEl.textContent = dunked.toLocaleString();
+    };
+
+    const spawn = (x?: number) => {
+      if (active > 34) return;
+      const size = 46 + Math.random() * 54;
+      const px = (x == null ? Math.random() * (window.innerWidth - size) : Math.max(0, Math.min(window.innerWidth - size, x - size / 2)));
+      const el = document.createElement("div"); el.className = "chick";
+      el.style.width = size + "px"; el.style.height = size + "px"; el.style.left = px + "px";
+      if (imgOk) { const im = document.createElement("img"); im.src = IMG; im.alt = "nugget chicken"; el.appendChild(im); }
+      else { const sp = document.createElement("div"); sp.className = "emoji"; sp.style.fontSize = size + "px"; sp.textContent = "🍗"; el.appendChild(sp); }
+      const fall = window.innerHeight - (pool.offsetHeight - 30) + 40;
+      el.style.setProperty("--fall", fall + "px"); el.style.setProperty("--spin", ((Math.random() * 2 - 1) * 220) + "deg");
+      el.style.animation = "fall " + (3 + Math.random() * 2.6) + "s cubic-bezier(.45,.05,.75,.6) forwards";
+      let finished = false;
+      const done = (atX?: number) => { if (finished) return; finished = true; active--; splash(atX != null ? atX : (px + size / 2)); el.remove(); };
+      el.addEventListener("pointerdown", (e) => { e.stopPropagation(); const r = el.getBoundingClientRect(); done(r.left + r.width / 2); });
+      el.addEventListener("animationend", () => done());
+      scene.appendChild(el); active++;
+    };
+    const rain = (n = 14) => { for (let i = 0; i < n; i++) later(() => spawn(), i * 70); };
+
+    const onScene = (e: PointerEvent) => { const t = e.target as HTMLElement; if (t.closest(".brand") || t.closest("#mute")) return; spawn(e.clientX); };
+    scene.addEventListener("pointerdown", onScene);
+    const rainBtn = scene.querySelector<HTMLButtonElement>("#rainBtn");
+    if (rainBtn) rainBtn.onclick = () => rain(16);
+    if (muteBtn) muteBtn.onclick = () => { muted = !muted; muteBtn.textContent = muted ? "🔇" : "🔊"; if (!muted) blorp(); };
+    document.querySelectorAll<HTMLButtonElement>(".buy-rain").forEach((b) => (b.onclick = () => rain(14)));
+    const buyBtn = document.getElementById("buyBtn");
+    if (buyBtn) buyBtn.onclick = () => document.getElementById("more")?.scrollIntoView({ behavior: "smooth" });
+    const caBtn = document.getElementById("ca");
+    if (caBtn) caBtn.onclick = () => { navigator.clipboard?.writeText("NUGG7yoUrCh1ckenIsAlreadyFr1edSol4nApumpKetchUp").catch(() => {}); const ico = document.getElementById("caIco"); if (ico) { ico.textContent = "✅"; later(() => (ico.textContent = "📋"), 1400); } };
+
+    const amb = window.setInterval(() => spawn(), 720); timers.push(amb);
+    for (let i = 0; i < 6; i++) later(() => spawn(), i * 260);
+
+    return () => { timers.forEach(clearTimeout); clearInterval(amb); scene.removeEventListener("pointerdown", onScene); scene.querySelectorAll(".chick,.splat,.drop").forEach((n) => n.remove()); };
   }, []);
 
-  const scan = () => {
-    const h = handle.trim().replace(/^@?/, "@") || "@anon_larper";
-    setScanning(true); setVerdict(null);
-    setTimeout(() => {
-      const x = hash(h + AGENTS[agent].name);
-      const score = x % 101;
-      const v = [...VERDICTS].reverse().find((t) => score >= t.min)!;
-      setVerdict({ handle: h, score, claim: at(CLAIMS, x >> 3), reality: at(REALITY, x >> 7), v });
-      setScanning(false);
-    }, 1900);
-  };
-  const copyCA = () => { navigator.clipboard?.writeText(CA).catch(() => {}); setCopied(true); setTimeout(() => setCopied(false), 1500); };
-  const A = AGENTS[agent];
-
   return (
-    <div style={{ background: C.bg, color: C.ink, minHeight: "100vh", imageRendering: "pixelated" }} className="relative overflow-hidden">
+    <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
-        @keyframes bobL { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
-        @keyframes bobR { 0%,100%{transform:translateY(-6px) scaleX(-1)} 50%{transform:translateY(0) scaleX(-1)} }
-        @keyframes lungeL { 0%,60%,100%{transform:translateX(0)} 70%,85%{transform:translateX(38px)} }
-        @keyframes lungeR { 0%,60%,100%{transform:translateX(0) scaleX(-1)} 70%,85%{transform:translateX(-38px) scaleX(-1)} }
-        @keyframes spark { 0%,55%,100%{opacity:0;transform:scale(.4)} 72%{opacity:1;transform:scale(1.3)} 90%{opacity:0;transform:scale(.8)} }
-        @keyframes drift { from{transform:translateX(0)} to{transform:translateX(-50%)} }
-        @keyframes scanpulse { 0%,100%{transform:scale(1) rotate(-8deg)} 50%{transform:scale(1.15) rotate(8deg)} }
-        @keyframes pop { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
-        .bobL{animation:bobL 1.1s steps(2) infinite} .bobR{animation:bobR 1.1s steps(2) infinite}
-        .lungeL{animation:lungeL 2.4s ease-in-out infinite} .lungeR{animation:lungeR 2.4s ease-in-out infinite}
-        .spark{animation:spark 2.4s ease-in-out infinite} .drift{display:flex;width:max-content;animation:drift 30s linear infinite}
-        .scanpulse{animation:scanpulse .7s ease-in-out infinite} .pop{animation:pop .25s steps(3)}
-        .px{font-family:${PX}}
+        :root{ --ketchup:#cf1c0e; --ketchup2:#8f120a; --shine:#ff6a58; --gold:#ffcb3b; --cream:#fff4df; --oil1:#1b1206; --oil2:#3a2610; }
+        body{ font-family:'Segoe UI',system-ui,sans-serif; color:var(--cream); background:radial-gradient(120% 90% at 50% -10%, #5a3c14 0%, var(--oil2) 40%, var(--oil1) 100%); overflow-x:hidden; margin:0; }
+        #scene{ position:relative; height:100vh; overflow:hidden; cursor:crosshair; }
+        .grease{ position:absolute; inset:0; pointer-events:none; opacity:.5; background:radial-gradient(60% 40% at 20% 15%, #ffd77a22, transparent 60%), radial-gradient(50% 40% at 80% 25%, #ffb03322, transparent 60%); }
+        .chick{ position:absolute; top:-140px; will-change:transform; pointer-events:auto; user-select:none; filter:drop-shadow(0 6px 10px #0007); }
+        .chick img,.chick .emoji{ display:block; width:100%; height:100%; }
+        .chick .emoji{ line-height:1; text-align:center; }
+        @keyframes fall{ to{ transform:translateY(var(--fall)) rotate(var(--spin)); } }
+        #hud{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding-top:6vh; text-align:center; pointer-events:none; z-index:5; }
+        .brand{ pointer-events:auto; background:#1a120699; border:3px solid var(--gold); border-radius:22px; padding:18px 26px; box-shadow:0 10px 40px #000a, inset 0 0 0 2px #0006; backdrop-filter:blur(2px); max-width:min(92vw,720px); animation:wob 4s ease-in-out infinite; }
+        @keyframes wob{ 0%,100%{ transform:rotate(-1.2deg) } 50%{ transform:rotate(1.2deg) } }
+        .brand h1{ font-size:clamp(34px,8vw,74px); font-weight:900; letter-spacing:-1px; line-height:.95; color:var(--gold); text-shadow:3px 3px 0 #7a3d00, 0 0 22px #ffb03388; margin:0; }
+        .brand h1 span{ color:var(--ketchup); text-shadow:3px 3px 0 #4a0a06; }
+        .brand p{ margin:10px 0 0; font-size:clamp(13px,2.4vw,17px); color:#ffe8c2; }
+        .btns{ margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+        button.b{ pointer-events:auto; font-weight:900; font-size:14px; border:none; border-radius:14px; padding:12px 18px; cursor:pointer; transition:transform .08s; box-shadow:0 5px 0 #0006; color:#2a1500; }
+        button.b:active{ transform:translateY(4px); box-shadow:0 1px 0 #0006; }
+        .b-rain{ background:linear-gradient(135deg,var(--gold),#ff8a2b); }
+        .b-buy{ background:linear-gradient(135deg,var(--ketchup),var(--shine)); color:#fff; }
+        .counter{ margin-top:12px; font-weight:800; font-size:13px; color:#ffd98a; pointer-events:auto; }
+        .counter b{ color:var(--gold); font-size:16px; }
+        #mute{ position:absolute; top:14px; right:14px; z-index:7; pointer-events:auto; width:42px; height:42px; border-radius:12px; border:2px solid #ffffff33; background:#1a120699; color:var(--gold); font-size:18px; cursor:pointer; }
+        #pool{ position:absolute; left:0; right:0; bottom:0; height:150px; z-index:4; pointer-events:none; }
+        .pool-body{ position:absolute; inset:0; top:26px; background:linear-gradient(180deg,var(--ketchup) 0%,var(--ketchup2) 100%); box-shadow:inset 0 8px 24px #ff9a8a55, inset 0 -20px 40px #4a0a06; animation:bob 3.5s ease-in-out infinite; }
+        @keyframes bob{ 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(4px) } }
+        .pool-wave{ position:absolute; left:-2%; right:-2%; top:0; height:44px; }
+        .pool-shine{ position:absolute; left:6%; top:34px; width:32%; height:8px; background:#ff8f7e88; filter:blur(3px); border-radius:50%; }
+        .splat{ position:absolute; transform:translate(-50%,-50%); font-weight:900; color:#fff; text-shadow:2px 2px 0 var(--ketchup2); pointer-events:none; animation:splat .7s ease-out forwards; z-index:6; }
+        @keyframes splat{ 0%{ opacity:0; transform:translate(-50%,-50%) scale(.4) } 25%{ opacity:1; transform:translate(-50%,-70%) scale(1.15) } 100%{ opacity:0; transform:translate(-50%,-120%) scale(1) } }
+        .drop{ position:absolute; border-radius:50%; background:var(--ketchup); pointer-events:none; z-index:5; }
+        #more{ position:relative; z-index:3; padding:40px 16px 60px; }
+        .wrap{ max-width:900px; margin:0 auto; }
+        .card{ background:#1a1206; border:3px solid #4a3418; border-radius:20px; padding:22px; box-shadow:0 10px 30px #0006; }
+        .row{ display:grid; gap:16px; }
+        @media(min-width:760px){ .row2{ grid-template-columns:1.4fr 1fr; } .row3{ grid-template-columns:repeat(3,1fr); } }
+        h2{ color:var(--gold); font-size:22px; margin:0 0 12px; }
+        .ca{ display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; background:#0f0b04; border:2px solid #4a3418; border-radius:12px; padding:12px 14px; font-family:ui-monospace,monospace; font-size:12px; color:var(--gold); cursor:pointer; }
+        .tok div{ display:flex; justify-content:space-between; border-top:2px solid #33260f; padding:8px 0; font-size:13px; color:#c9b48a; }
+        .tok b{ color:var(--cream); }
+        .buys{ display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+        .lore .card{ text-align:center; }
+        .lore .em{ font-size:40px; }
+        .foot{ text-align:center; font-size:11px; color:#8a744a; max-width:640px; margin:26px auto 0; line-height:1.6; }
       `}</style>
 
-      {/* ground/scanline vibe */}
-      <div className="pointer-events-none absolute inset-0 opacity-[0.06]" style={{ backgroundImage: `repeating-linear-gradient(0deg, ${C.ink} 0 1px, transparent 1px 4px)` }} />
-
-      {/* ================= NAV ================= */}
-      <header className="relative z-10 mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4">
-        <div className="flex items-center gap-3">
-          <div className="grid h-10 w-10 place-items-center" style={pixelBox(`linear-gradient(135deg,${C.gold},${C.red})`, C.ink)}>
-            <Swords className="h-5 w-5" style={{ color: "#1a1206" }} />
-          </div>
-          <div>
-            <div className="px text-base" style={{ color: C.gold }}>LARP&nbsp;AI</div>
-            <div className="text-[10px]" style={{ color: C.muted }}>live-action larp detection</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="hidden items-center gap-1.5 px-2.5 py-2 text-[10px] sm:flex" style={pixelBox(C.panel, C.border)}>
-            <span style={{ color: C.muted }}>$LARP</span><span style={{ color: C.green }}>+204%</span>
-          </div>
-          <button className="px px-3 py-2 text-[10px] transition-transform active:translate-y-0.5" style={pixelBox(`linear-gradient(135deg,${C.gold},${C.red})`, C.ink)}><span style={{ color: "#1a1206" }}>CONNECT</span></button>
-        </div>
-      </header>
-
-      {/* banner */}
-      <div className="relative z-10 border-y-2 py-2" style={{ borderColor: C.border, background: C.panel }}>
-        <div className="drift gap-10 px-4 text-[10px]" style={{ color: C.muted }}>
-          {[...Array(2)].map((_, k) => (
-            <div key={k} className="flex gap-10 whitespace-nowrap">
-              <span style={{ color: C.gold }}>⚔️ SEND YOUR CHAMPION · EXPOSE THE FRAUDS</span>
-              <span style={{ color: C.green }}>🎭 3 MEANINGS OF LARP · 1 ARENA</span>
-              <span style={{ color: C.red }}>🤡 987,412 LARPS EXPOSED</span>
-              <span style={{ color: C.blue }}>🛡️ IF THE SWORD IS FOAM, WE KNOW</span>
+      <section id="scene" ref={sceneRef}>
+        <div className="grease" />
+        <button id="mute" ref={muteRef} title="unmute the blorps">🔇</button>
+        <div id="hud">
+          <div className="brand">
+            <h1>CHICKEN <span>NUGGET</span></h1>
+            <p>A chicken. Made entirely out of a chicken nugget. It's raining them into ketchup. Don't ask questions. 🍗</p>
+            <div className="btns">
+              <button className="b b-rain" id="rainBtn">🍗 MAKE IT RAIN</button>
+              <button className="b b-buy" id="buyBtn">🍅 BUY $NUGGET</button>
             </div>
-          ))}
+            <div className="counter">🥫 <b><span ref={dunkRef}>0</span></b> nuggets dunked · click the sky to drop more</div>
+          </div>
         </div>
-      </div>
+        <div id="pool" ref={poolRef}>
+          <svg className="pool-wave" viewBox="0 0 100 12" preserveAspectRatio="none">
+            <path d="M0,6 Q6,1 12,6 T24,6 T36,6 T48,6 T60,6 T72,6 T84,6 T96,6 T108,6 V12 H0 Z" fill="var(--ketchup)" />
+          </svg>
+          <div className="pool-body" />
+          <div className="pool-shine" />
+        </div>
+      </section>
 
-      <main className="relative z-10 mx-auto max-w-6xl px-4 py-6">
-        {/* ================= ARENA ================= */}
-        <section className="relative mb-6 overflow-hidden" style={{ ...pixelBox(`linear-gradient(180deg,#1a2a3f 0%,#243b2a 62%,#2e2413 62%,#2e2413 100%)`, C.border), height: 260 }}>
-          {/* castle silhouette */}
-          <div className="pointer-events-none absolute bottom-[38%] left-1/2 -translate-x-1/2 opacity-40" style={{ width: 220, height: 90, background: "#0b1220" }} />
-          {[[-110, 70], [-70, 90], [70, 90], [110, 70]].map(([x, h], i) => (
-            <div key={i} className="pointer-events-none absolute bottom-[38%] left-1/2 opacity-40" style={{ transform: `translateX(${x}px)`, width: 26, height: h, background: "#0b1220" }} />
-          ))}
-          {/* fighters */}
-          <div className="absolute bottom-6 left-[22%] text-6xl lungeL"><span className="bobL inline-block">{A.e}</span></div>
-          <div className="absolute bottom-6 right-[22%] text-6xl lungeR"><span className="inline-block bobR">🤡</span></div>
-          <div className="spark absolute bottom-16 left-1/2 -translate-x-1/2 text-4xl">💥</div>
-          {/* HUD */}
-          <div className="absolute left-3 top-3">
-            <div className="px text-[9px]" style={{ color: C.ink }}>{A.name}</div>
-            <div className="mt-1 h-3 w-28" style={pixelBox("#3a2f1c", C.border)}><div className="h-full" style={{ width: "84%", background: C.green }} /></div>
-          </div>
-          <div className="absolute right-3 top-3 text-right">
-            <div className="px text-[9px]" style={{ color: C.ink }}>RANDOM LARPER</div>
-            <div className="mt-1 ml-auto h-3 w-28" style={pixelBox("#3a2f1c", C.border)}><div className="h-full" style={{ width: "31%", background: C.red }} /></div>
-          </div>
-          <div className="px absolute bottom-2 left-1/2 -translate-x-1/2 text-[8px]" style={{ color: C.gold }}>⚔ ARENA · LIVE ⚔</div>
-        </section>
-
-        <div className="grid gap-6 lg:grid-cols-[1fr_minmax(0,380px)]">
-          {/* ================= SCANNER (the "utility") ================= */}
-          <section style={pixelBox(C.panel, C.border)} className="p-5">
-            <div className="px mb-1 text-sm" style={{ color: C.gold }}>THE LARP SCANNER</div>
-            <p className="mb-4 text-xs" style={{ color: C.muted }}>Send <b style={{ color: A.c }}>{A.name}</b> into the arena against any crypto trader. He'll fight their claims and report back if they're the real deal… or a total larp. <span style={{ color: C.muted }}>(a "game", allegedly.)</span></p>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <input value={handle} onChange={(e) => setHandle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && scan()} placeholder="@crypto_handle or 0xwallet…" className="w-full px-3 py-3 text-sm outline-none" style={{ ...pixelBox(C.panel2, C.border), color: C.ink }} />
-              <button onClick={scan} disabled={scanning} className="px flex items-center justify-center gap-2 px-4 py-3 text-[10px] transition-transform active:translate-y-0.5 disabled:opacity-60" style={pixelBox(`linear-gradient(135deg,${C.gold},${C.red})`, C.ink)}>
-                <Search className="h-4 w-4" style={{ color: "#1a1206" }} /><span style={{ color: "#1a1206" }}>{scanning ? "FIGHTING…" : "SCAN LARP"}</span>
-              </button>
-            </div>
-
-            {scanning && (
-              <div className="mt-6 flex flex-col items-center justify-center gap-3 py-6">
-                <div className="flex items-center gap-6 text-5xl">
-                  <span className="scanpulse inline-block">{A.e}</span><span className="px text-xs" style={{ color: C.red }}>VS</span><span className="scanpulse inline-block">🤡</span>
-                </div>
-                <div className="px text-[10px]" style={{ color: C.muted }}>reading the tape… checking the wallet… counting the cope…</div>
-              </div>
-            )}
-
-            {verdict && !scanning && (
-              <div className="pop mt-5" style={pixelBox(C.panel2, verdict.v.c)}>
-                <div className="flex items-center justify-between border-b-2 px-4 py-3" style={{ borderColor: C.border }}>
-                  <span className="px text-xs" style={{ color: C.ink }}>{verdict.handle}</span>
-                  <span className="text-2xl">{verdict.v.e}</span>
-                </div>
-                <div className="p-4">
-                  <div className="mb-2 flex items-end justify-between">
-                    <div className="px text-sm" style={{ color: verdict.v.c }}>{verdict.v.label}</div>
-                    <div className="px text-2xl" style={{ color: verdict.v.c }}>{verdict.score}<span className="text-xs" style={{ color: C.muted }}>/100 larp</span></div>
-                  </div>
-                  <div className="mb-3 h-3 w-full" style={pixelBox("#3a2f1c", C.border)}><div className="h-full" style={{ width: `${verdict.score}%`, background: verdict.v.c }} /></div>
-                  <p className="mb-3 text-xs" style={{ color: C.ink }}>{verdict.v.line}</p>
-                  <div className="grid gap-2 text-xs sm:grid-cols-2">
-                    <div style={pixelBox(C.panel, C.border)} className="p-2"><div className="text-[10px]" style={{ color: C.gold }}>CLAIMS</div><div style={{ color: C.muted }}>{verdict.claim}</div></div>
-                    <div style={pixelBox(C.panel, C.border)} className="p-2"><div className="text-[10px]" style={{ color: C.red }}>REALITY</div><div style={{ color: C.muted }}>{verdict.reality}</div></div>
-                  </div>
+      <section id="more">
+        <div className="wrap">
+          <div className="card" style={{ background: "linear-gradient(160deg,#cf1c0e18,#1a1206)", borderColor: "#5a3418" }}>
+            <h2>🍅 $NUGGET</h2>
+            <div className="row row2">
+              <div>
+                <div style={{ fontSize: 11, color: "#a88f5f", marginBottom: 6 }}>CONTRACT ADDRETH (dip responthibly)</div>
+                <div className="ca" id="ca"><span id="caTxt">NUGG7yoUrCh1ckenIsAlreadyFr1edSol4nApumpKetchUp</span><span id="caIco">📋</span></div>
+                <div className="buys">
+                  <button className="b b-rain buy-rain">pump.fun →</button>
+                  <button className="b b-rain buy-rain">Raydium →</button>
+                  <button className="b b-rain buy-rain">DexScreener →</button>
                 </div>
               </div>
-            )}
-            {!verdict && !scanning && <div className="mt-6 text-center text-xs" style={{ color: C.muted }}>enter a handle and send your champion to battle ⚔️</div>}
-          </section>
-
-          {/* ================= CHARACTER SELECT ================= */}
-          <aside style={pixelBox(C.panel, C.border)} className="p-4">
-            <div className="px mb-3 flex items-center gap-2 text-xs" style={{ color: C.gold }}><Shield className="h-4 w-4" /> CHOOSE YOUR LARPER</div>
-            <div className="grid grid-cols-2 gap-2">
-              {AGENTS.map((a, i) => (
-                <button key={a.name} onClick={() => setAgent(i)} className="flex flex-col items-center gap-1 p-2 text-center transition-transform active:translate-y-0.5" style={pixelBox(agent === i ? C.panel2 : C.panel, agent === i ? a.c : C.border)}>
-                  <span className="text-3xl">{a.e}</span>
-                  <span className="px text-[8px] leading-tight" style={{ color: agent === i ? a.c : C.ink }}>{a.name}</span>
-                  <span className="text-[9px]" style={{ color: C.muted }}>{a.cls}</span>
-                </button>
-              ))}
+              <div className="card tok" style={{ padding: 14, borderColor: "#4a3418" }}>
+                <div style={{ fontSize: 11, color: "#a88f5f", border: 0 }}>TOKENOMICTH</div>
+                <div><span>Supply</span><b>1,000,000,000</b></div>
+                <div><span>Tax</span><b>0% (already deep fried)</b></div>
+                <div><span>Team</span><b>1 dipping sauce</b></div>
+                <div><span>Utility</span><b>falls into ketchup</b></div>
+              </div>
             </div>
-            <div className="mt-3 p-3" style={pixelBox(C.panel2, A.c)}>
-              <div className="px mb-2 text-[10px]" style={{ color: A.c }}>{A.name}</div>
-              <p className="mb-2 text-[11px]" style={{ color: C.muted }}>{A.tag}</p>
-              {[["LARP DETECT", A.det, C.green], ["FEROCITY", A.fer, C.red], ["COPE", A.cope, C.blue]].map(([k, v, col]) => (
-                <div key={k as string} className="mb-1.5">
-                  <div className="flex justify-between text-[9px]" style={{ color: C.muted }}><span>{k}</span><span>{v}</span></div>
-                  <div className="h-2 w-full" style={pixelBox("#3a2f1c", C.border)}><div className="h-full" style={{ width: `${v}%`, background: col as string }} /></div>
-                </div>
-              ))}
-            </div>
-          </aside>
+          </div>
+          <div className="row row3 lore" style={{ marginTop: 16 }}>
+            <div className="card"><div className="em">🐔</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Is it a chicken?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Yes. Head, wattle, legs, the whole vibe. Struts around. Clucks, allegedly.</p></div>
+            <div className="card"><div className="em">🍗</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Is it a nugget?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Also yes. Body is 100% breaded, golden, crispy. It was born fried. A miracle.</p></div>
+            <div className="card"><div className="em">🥫</div><h3 style={{ color: "var(--gold)", margin: "8px 0 6px", fontSize: 14 }}>Why the ketchup?</h3><p style={{ fontSize: 13, color: "#c9b48a", margin: 0 }}>Every nugget must fulfill its destiny. It's not sad. It's dipping. Respect the dip.</p></div>
+          </div>
+          <p className="foot">Parody. For the memes. A nonsense site about a fictional deep-fried chicken. No real chickens were dipped. $NUGGET is a valueless joke token — no team, no roadmap, no utility beyond falling into condiments. Nothing here is financial advice. Now go make it rain. 🍗🍅</p>
         </div>
-
-        {/* ================= EXPOSED FEED ================= */}
-        <section className="mt-6 p-4" style={pixelBox(C.panel, C.border)}>
-          <div className="px mb-3 flex items-center gap-2 text-xs" style={{ color: C.gold }}><Skull className="h-4 w-4" /> RECENTLY EXPOSED</div>
-          <div className="space-y-1.5">
-            {feed.map((f) => {
-              const v = [...VERDICTS].reverse().find((t) => f.s >= t.min)!;
-              return (
-                <div key={f.id} className="pop flex items-center justify-between px-3 py-2 text-xs" style={pixelBox(C.panel2, C.border)}>
-                  <span style={{ color: C.ink }}>{f.h}</span>
-                  <span className="flex items-center gap-2"><span style={{ color: C.muted }}>{v.label}</span><span className="px text-[10px]" style={{ color: v.c }}>{f.s} {v.e}</span></span>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* ================= $LARP ================= */}
-        <section className="mt-6 p-5" style={pixelBox(`linear-gradient(160deg,${C.gold}14,${C.panel})`, C.gold)}>
-          <div className="px mb-3 flex items-center gap-2 text-xs" style={{ color: C.gold }}><Coins className="h-4 w-4" /> $LARP — FUND THE HUNT</div>
-          <div className="grid gap-4 md:grid-cols-[1.4fr_1fr]">
-            <div>
-              <div className="mb-1 text-[10px]" style={{ color: C.muted }}>CONTRACT (hodl or get exposed)</div>
-              <button onClick={copyCA} className="mb-3 flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left text-[11px]" style={pixelBox(C.panel2, C.border)}>
-                <span className="truncate" style={{ color: C.gold }}>{CA}</span>{copied ? <Check className="h-4 w-4 shrink-0" style={{ color: C.green }} /> : <Copy className="h-4 w-4 shrink-0" style={{ color: C.muted }} />}
-              </button>
-              <div className="flex flex-wrap gap-2">{["pump.fun", "Uniswap", "DexScreener"].map((b) => (<a key={b} href="#" className="px px-3 py-2.5 text-[10px] transition-transform active:translate-y-0.5" style={pixelBox(`linear-gradient(135deg,${C.gold},${C.red})`, C.ink)}><span style={{ color: "#1a1206" }}>{b} →</span></a>))}</div>
-            </div>
-            <div className="p-3" style={pixelBox(C.panel2, C.border)}>
-              <div className="px mb-2 text-[10px]" style={{ color: C.muted }}>TOKENOMICS</div>
-              {[["Supply", "1,000,000,000"], ["Tax", "0% (we tax larps)"], ["Team", "1 foam sword"], ["Utility", "expose posers, number go up"]].map(([k, v]) => (
-                <div key={k} className="flex justify-between border-t-2 py-1.5 text-[11px]" style={{ borderColor: C.border }}><span style={{ color: C.muted }}>{k}</span><span style={{ color: C.ink }}>{v}</span></div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* ================= LORE (the 3 larps) ================= */}
-        <section className="mt-6 grid gap-4 md:grid-cols-3">
-          {[
-            { i: <Swords className="h-5 w-5" />, t: "LARP #1 — The Battle", d: "Live-action role play. Foam swords, homemade armor, screaming in a field. Noble. Sweaty. We honor it." },
-            { i: <Scroll className="h-5 w-5" />, t: "LARP #2 — The Poser", d: "Pretending to be someone you're not. The crypto 'genius' who's actually exit liquidity in a costume." },
-            { i: <Sparkles className="h-5 w-5" />, t: "LARP #3 — The Agent", d: "Your AI champion rides out, fights their claims, and tells you which is which. That's the whole game. Wink." },
-          ].map((c) => (
-            <div key={c.t} className="p-5" style={pixelBox(C.panel, C.border)}>
-              <div className="mb-3 grid h-10 w-10 place-items-center" style={{ ...pixelBox(C.panel2, C.border), color: C.gold }}>{c.i}</div>
-              <div className="px mb-2 text-[10px]" style={{ color: C.ink }}>{c.t}</div>
-              <p className="text-xs" style={{ color: C.muted }}>{c.d}</p>
-            </div>
-          ))}
-        </section>
-      </main>
-
-      <footer className="relative z-10 mt-8 border-t-2 px-4 py-8 text-center" style={{ borderColor: C.border }}>
-        <div className="px flex items-center justify-center gap-2 text-xs" style={{ color: C.gold }}><Crown className="h-4 w-4" /> LARP AI</div>
-        <p className="mx-auto mt-3 max-w-2xl text-[10px]" style={{ color: C.muted }}>
-          Parody. For the memes. LARP AI is an entertainment toy — the "larp scores" are randomized jokes, not real analysis of any real person or wallet, and $LARP is a valueless meme token. Nothing here is financial advice, due diligence, or an accusation about anyone real. Go outside and hit someone with a foam sword instead. ⚔️
-        </p>
-      </footer>
-    </div>
+      </section>
+    </>
   );
 }
 
