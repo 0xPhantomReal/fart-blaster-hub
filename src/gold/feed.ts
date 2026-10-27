@@ -49,8 +49,8 @@ export class LiveFeed implements Feed {
   jev = false;
   private lastClosed = 0;
 
-  private async fetchRange(from: number, to: number): Promise<Candle[]> {
-    const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution: TIMEFRAME_MIN });
+  private async fetchRange(from: number, to: number, resolution = TIMEFRAME_MIN): Promise<Candle[]> {
+    const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution });
     this.jev = r.jev;
     return r.candles;
   }
@@ -100,8 +100,12 @@ export class LiveFeed implements Feed {
       }
     };
 
+    let lastTickAt = 0;
+    let streamDown = false;
+
     // Every Pyth price tick updates the forming candle.
     const onTick = (t: number, p: number) => {
+      lastTickAt = Date.now();
       const b = bucket(t);
       if (b <= this.lastClosed) return;
       if (!forming || b > forming.time) {
@@ -137,6 +141,7 @@ export class LiveFeed implements Feed {
             throw new Error((j as { error?: string }).error ?? `tick stream ${res.status}`);
           }
           backoff = 1000;
+          streamDown = false;
           const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
           let buf = "";
           while (!stopped) {
@@ -154,19 +159,56 @@ export class LiveFeed implements Feed {
           }
         } catch (e) {
           if (stopped) return;
-          onError(`ticks: ${(e as Error).message}`);
-          await new Promise((r) => setTimeout(r, backoff));
+          const msg = (e as Error).message;
+          if (!streamDown) {
+            streamDown = true;
+            onError(
+              /unknown action/i.test(msg)
+                ? "Tick stream not deployed yet (ask Lovable to deploy the gold edge function). Updating from 1-minute data meanwhile."
+                : `Tick stream down (${msg}). Updating from 1-minute data meanwhile.`,
+            );
+          }
+          await new Promise((r) => setTimeout(r, /unknown action/i.test(msg) ? 60_000 : backoff));
           backoff = Math.min(backoff * 2, 30_000);
         }
+      }
+    };
+
+    // Fallback while ticks aren't flowing: rebuild the forming candle from 1-minute candles.
+    let minuteBusy = false;
+    const minutePoll = async () => {
+      if (stopped || minuteBusy || Date.now() - lastTickAt < 5000) return;
+      minuteBusy = true;
+      try {
+        const now = nowSec();
+        const current = bucket(now);
+        const mins = (await this.fetchRange(current, now + 60, 1)).filter((m) => m.time >= current);
+        if (!mins.length || current <= this.lastClosed) return;
+        if (forming && current > forming.time) void poll(); // previous candle just closed
+        const open = forming && forming.time === current ? forming.open : mins[0].open;
+        forming = {
+          time: current,
+          open,
+          high: Math.max(...mins.map((m) => m.high), forming && forming.time === current ? forming.high : -Infinity),
+          low: Math.min(...mins.map((m) => m.low), forming && forming.time === current ? forming.low : Infinity),
+          close: mins[mins.length - 1].close,
+        };
+        emitForming();
+      } catch {
+        // the 15-minute poll reports data errors
+      } finally {
+        minuteBusy = false;
       }
     };
 
     void poll();
     void stream();
     const id = window.setInterval(poll, 5000);
+    const mid = window.setInterval(minutePoll, 2000);
     return () => {
       stopped = true;
       window.clearInterval(id);
+      window.clearInterval(mid);
       abort?.abort();
     };
   }

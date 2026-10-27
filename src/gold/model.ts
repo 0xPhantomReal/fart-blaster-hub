@@ -393,7 +393,7 @@ export class Engine {
     }
     this.shape.observe(c);
     this.recent.push(c);
-    if (this.recent.length > 8) this.recent.shift();
+    if (this.recent.length > 200) this.recent.shift(); // ~2 days of 15m candles for Jev's context
 
     const x = this.features.push(c);
     const pModel = x ? this.model.predict(x) : null;
@@ -411,10 +411,11 @@ export class Engine {
   }
 
   /** Fold Jev's answer into the pending prediction. pGreen is Jev's probability the next candle is green. */
-  applyJev(pGreen: number, confidence: number, minConfidence: number): Prediction | null {
+  applyJev(pGreen: number, confidence: number): Prediction | null {
     const p = this.pending;
     if (!p || p.pModel === null || !p.ghost) return null;
-    p.pJev = confidence >= minConfidence ? pGreen : 0.5;
+    // Use Jev's real probability; the stacker learns how much it deserves from its track record.
+    p.pJev = pGreen;
     p.pFinal = this.stacker.predict(p.pModel, p.pJev);
     p.call = this.callFor(p.pFinal);
     p.ghost = this.shape.ghost(p.ghost.time, p.ghost.open, p.call);
@@ -443,19 +444,91 @@ export class Engine {
     };
   }
 
-  /** Compact, named snapshot for Jev. ATR units so Jev sees structure, not raw prices. */
+  /**
+   * Market picture for Jev: recent candles, higher-timeframe candles, key levels, session and
+   * the model's engineered signals. Sizes are in ATR units so Jev reads structure, not raw prices.
+   */
   describeForJev(): Record<string, unknown> | null {
     const x = this.pending?.x;
     const atr = this.features.atr;
-    if (!x || !atr) return null;
+    const rc = this.recent;
+    if (!x || !atr || rc.length < 20) return null;
     const r = (v: number) => Number(v.toFixed(2));
+    const last = rc[rc.length - 1];
+    const px = last.close;
+
+    const describe = (c: Candle) => ({
+      c: c.close > c.open ? "G" : c.close < c.open ? "R" : "D",
+      body: r((c.close - c.open) / atr),
+      range: r((c.high - c.low) / atr),
+      close_at: c.high > c.low ? r((c.close - c.low) / (c.high - c.low)) : 0.5,
+      up_wick: r((c.high - Math.max(c.open, c.close)) / atr),
+      dn_wick: r((Math.min(c.open, c.close) - c.low) / atr),
+    });
+
+    // Roll candles up into a bigger timeframe, aligned to the clock.
+    const rollup = (secs: number, n: number) => {
+      const out: Candle[] = [];
+      for (const c of rc) {
+        const b = Math.floor(c.time / secs) * secs;
+        const cur = out[out.length - 1];
+        if (cur && cur.time === b) {
+          cur.high = Math.max(cur.high, c.high);
+          cur.low = Math.min(cur.low, c.low);
+          cur.close = c.close;
+        } else out.push({ time: b, open: c.open, high: c.high, low: c.low, close: c.close });
+      }
+      return out.slice(-n).map(describe);
+    };
+
+    const day = rc.filter((c) => c.time > last.time - 86400);
+    const hi24 = Math.max(...day.map((c) => c.high));
+    const lo24 = Math.min(...day.map((c) => c.low));
+    const lastRange = last.high - last.low;
+    const rangePct = day.filter((c) => c.high - c.low <= lastRange).length / day.length;
+
+    // Gold's trading day rolls over at 22:00 UTC.
+    const dayStart = Math.floor((last.time - 22 * 3600) / 86400) * 86400 + 22 * 3600;
+    const today = rc.filter((c) => c.time >= dayStart);
+    const prevDay = rc.filter((c) => c.time >= dayStart - 86400 && c.time < dayStart);
+    const lvl = (v: number) => r((v - px) / atr);
+    const hiOf = (cs: Candle[]) => (cs.length ? lvl(Math.max(...cs.map((c) => c.high))) : null);
+    const loOf = (cs: Candle[]) => (cs.length ? lvl(Math.min(...cs.map((c) => c.low))) : null);
+
+    const hourUtc = new Date((last.time + this.tfSeconds) * 1000).getUTCHours();
+    const session =
+      hourUtc >= 13 && hourUtc < 16 ? "London/New York overlap"
+      : hourUtc >= 7 && hourUtc < 13 ? "London"
+      : hourUtc >= 16 && hourUtc < 21 ? "New York"
+      : "Asia / quiet hours";
+
+    const round = (step: number) => {
+      const below = Math.floor(px / step) * step;
+      return { below: lvl(below), above: lvl(below + step) };
+    };
+
     return {
-      recent_candles_oldest_first: this.recent.map((c) => ({
-        color: c.close > c.open ? "green" : c.close < c.open ? "red" : "doji",
-        body_atr: r((c.close - c.open) / atr),
-        range_atr: r((c.high - c.low) / atr),
-        close_in_range: c.high > c.low ? r((c.close - c.low) / (c.high - c.low)) : 0.5,
-      })),
+      how_to_read:
+        "c = color (G/R/D). body (signed), range and wicks are in ATR units. close_at: 0 = closed at the low, 1 = at the high. " +
+        "Levels are signed distance from current price in ATR units (positive = above price). Candle lists are oldest first.",
+      atr_dollars: r(atr),
+      session_of_next_candle: session,
+      candles_15m_last_16: rc.slice(-16).map(describe),
+      candles_1h_last_12: rollup(3600, 12),
+      candles_4h_last_6: rollup(4 * 3600, 6),
+      levels: {
+        high_24h: lvl(hi24),
+        low_24h: lvl(lo24),
+        position_in_24h_range: hi24 > lo24 ? r((px - lo24) / (hi24 - lo24)) : 0.5,
+        today_open: today.length ? lvl(today[0].open) : null,
+        today_high: hiOf(today),
+        today_low: loOf(today),
+        prev_day_high: hiOf(prevDay),
+        prev_day_low: loOf(prevDay),
+        round_10_dollars: round(10),
+        round_50_dollars: round(50),
+      },
+      last_candle_size_percentile_24h: r(rangePct),
       signals: Object.fromEntries(FEATURES.slice(0, 13).map((name, i) => [name, r(x[i]!)])),
     };
   }

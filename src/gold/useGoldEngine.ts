@@ -4,7 +4,6 @@ import { Engine, type Outcome, type Prediction } from "./model";
 import { askJev, backendConfigured, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
-export const MIN_JEV_CONFIDENCE = 0.6;
 
 export interface ClosedBar {
   candle: Candle;
@@ -89,7 +88,7 @@ export function useGoldEngine(): GoldState {
       publish({ jevPending: true });
       try {
         const v = await withTimeout(askJev(snapshot), 20_000, "Jev took longer than 20s");
-        const p = engine.applyJev(v.probGreen, v.confidence, MIN_JEV_CONFIDENCE);
+        const p = engine.applyJev(v.probGreen, v.confidence);
         publish({ prediction: p ?? fallback, jevError: null, jevPending: false });
       } catch (e) {
         publish({ jevError: (e as Error).message, jevPending: false });

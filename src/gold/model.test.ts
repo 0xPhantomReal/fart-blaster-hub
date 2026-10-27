@@ -50,11 +50,22 @@ describe("gold engine", () => {
     for (const seed of [1, 2, 3]) expect(run(makeCandles(4000, 0.5, seed)).model.skill!).toBeLessThan(0.02);
   });
 
-  it("a confident Jev answer moves the blend, a weak one is ignored", () => {
+  it("Jev's answer moves the blend in its direction", () => {
     const e = new Engine(300, 0.56, 300);
     for (const c of makeCandles(800, 0.5)) e.close(c);
     const before = e.close({ time: 1_800_000_000, open: 4000, high: 4001, low: 3999, close: 4000.5 }).next;
-    expect(e.applyJev(0.9, 0.9, 0.6)!.pFinal!).toBeGreaterThan(before.pFinal!);
-    expect(e.applyJev(0.9, 0.3, 0.6)!.pFinal!).toBeCloseTo(before.pFinal!, 9);
+    expect(e.applyJev(0.9, 0.9)!.pFinal!).toBeGreaterThan(before.pFinal!);
+    expect(e.applyJev(0.1, 0.9)!.pFinal!).toBeLessThan(before.pFinal!);
+    expect(e.applyJev(0.5, 0.1)!.pFinal!).toBeCloseTo(before.pFinal!, 1);
+  });
+
+  it("gives Jev a compact multi-timeframe picture", () => {
+    const e = new Engine(900, 0.56, 300);
+    for (const c of makeCandles(600, 0.5).map((c, i) => ({ ...c, time: 1_700_000_000 + i * 900 }))) e.close(c);
+    const snap = e.describeForJev()!;
+    expect(snap.candles_15m_last_16).toHaveLength(16);
+    expect(snap.candles_1h_last_12).toHaveLength(12);
+    expect(snap.candles_4h_last_6).toHaveLength(6);
+    expect(JSON.stringify(snap).length).toBeLessThan(7500); // backend limit is 8000
   });
 });
