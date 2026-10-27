@@ -64,8 +64,36 @@ describe("gold engine", () => {
     for (const c of makeCandles(600, 0.5).map((c, i) => ({ ...c, time: 1_700_000_000 + i * 900 }))) e.close(c);
     const snap = e.describeForJev()!;
     expect(snap.candles_15m_last_16).toHaveLength(16);
-    expect(snap.candles_1h_last_12).toHaveLength(12);
-    expect(snap.candles_4h_last_6).toHaveLength(6);
+    expect(snap.candles_1h_last_6).toHaveLength(6);
+    expect(snap.focus).toBeTruthy();
     expect(JSON.stringify(snap).length).toBeLessThan(7500); // backend limit is 8000
+  });
+
+  it("live probability at the halfway point beats a coin flip, even on patternless candles", () => {
+    const r = rng(11);
+    const e = new Engine(900, 0.56, 300);
+    let price = 4000;
+    let hits = 0;
+    let calls = 0;
+    for (let i = 0; i < 1500; i++) {
+      // 15 one-minute random steps per candle
+      const t0 = 1_700_000_000 + i * 900;
+      const path = [price];
+      for (let k = 0; k < 15; k++) path.push(path[path.length - 1] + (r() - 0.5) * 2);
+      const half = path.slice(0, 8);
+      const forming = { time: t0, open: price, high: Math.max(...half), low: Math.min(...half), close: half[half.length - 1] };
+      const live = e.nowcast(forming, t0 + 7.5 * 60);
+      const close = path[path.length - 1];
+      if (live && e.warm && live.call !== 0 && close !== price) {
+        calls += 1;
+        if ((live.call === 1) === close > price) hits += 1;
+      }
+      e.close({ time: t0, open: price, high: Math.max(...path), low: Math.min(...path), close });
+      price = close;
+    }
+    expect(calls).toBeGreaterThan(500);
+    console.log(`halfway live call: ${calls} calls, ${((hits / calls) * 100).toFixed(1)}% right`);
+    expect(hits / calls).toBeGreaterThan(0.7);
+    expect(e.summary().halfway.n).toBeGreaterThan(500);
   });
 });

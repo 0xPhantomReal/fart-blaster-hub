@@ -173,8 +173,9 @@ async function jev(snapshot: Record<string, unknown>, timeframeMin: number) {
         next_candle: {
           type: "choice",
           instructions:
-            "Will the NEXT candle close above or below its open? Weigh exhaustion after outsized candles, " +
-            "rejection near recent highs or lows, wick pressure, and trend against each other.",
+            "Will the very NEXT 15-minute candle close above or below its open? Focus on the last 1-3 candles: " +
+            "exhaustion after outsized candles, rejection wicks, closes near highs or lows, and nearby levels. " +
+            "Longer-term trend is background only.",
           criteria: {
             green: "Buyers keep control: momentum or trend continues, or price bounces off nearby support",
             red: "Sellers take control: an outsized move gets faded, price rejects nearby resistance, or trend rolls over",

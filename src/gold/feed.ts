@@ -32,6 +32,8 @@ async function callFn<T>(body: Record<string, unknown>): Promise<T> {
 export interface Feed {
   readonly name: string;
   readonly jev: boolean; // backend has a TypeSafe key
+  /** Current time on this feed's clock, unix seconds. */
+  now(): number;
   history(): Promise<Candle[]>;
   /** onBar(candle, closed). Returns a stop function. */
   start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void): () => void;
@@ -48,6 +50,7 @@ export class LiveFeed implements Feed {
   readonly name = "Pyth";
   jev = false;
   private lastClosed = 0;
+  now = () => Date.now() / 1000;
 
   private async fetchRange(from: number, to: number, resolution = TIMEFRAME_MIN): Promise<Candle[]> {
     const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution });
@@ -240,6 +243,8 @@ export class SimFeed implements Feed {
   readonly name = "Simulated";
   readonly jev = false;
   private price = 4000;
+  private simNow = Date.now() / 1000;
+  now = () => this.simNow;
   private rand = mulberry32(42);
 
   private step(): number {
@@ -276,6 +281,7 @@ export class SimFeed implements Feed {
       f.low = Math.min(f.low, p);
       f.close = p;
       ticks += 1;
+      this.simNow = barTime + (ticks / ticksPerBar) * TF_SECONDS;
       if (ticks >= ticksPerBar) {
         onBar({ ...f }, true);
         ticks = 0;

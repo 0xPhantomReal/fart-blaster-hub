@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
-import { Engine, type Outcome, type Prediction } from "./model";
+import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
 import { askJev, backendConfigured, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
@@ -18,6 +18,8 @@ export interface GoldState {
   jevOn: boolean;
   bars: ClosedBar[];
   forming: Candle | null;
+  /** Live chance the forming candle closes green; updates on every tick. */
+  live: Nowcast | null;
   prediction: Prediction | null;
   summary: Summary | null;
   error: string | null;
@@ -46,6 +48,7 @@ export function useGoldEngine(): GoldState {
     jevOn: false,
     bars: [],
     forming: null,
+    live: null,
     prediction: null,
     summary: null,
     error: null,
@@ -60,6 +63,14 @@ export function useGoldEngine(): GoldState {
     let stop: (() => void) | null = null;
     let queue = Promise.resolve();
     let cancelled = false;
+    let lastForming: Candle | null = null;
+
+    const relive = () => {
+      if (cancelled || !lastForming) return;
+      const f = lastForming;
+      const live = engine.nowcast(f, feed.now());
+      setState((s) => ({ ...s, forming: f, live, summary: engine.summary() }));
+    };
 
     const publish = (patch: Partial<GoldState> = {}) =>
       !cancelled &&
@@ -77,7 +88,8 @@ export function useGoldEngine(): GoldState {
       bars.push({ candle: c, outcome });
       if (bars.length > MAX_BARS) bars.shift();
       setState((s) => ({ ...s, version: s.version + 1 }));
-      publish({ forming: null, prediction: next, jevPending: false });
+      lastForming = null;
+      publish({ forming: null, live: null, prediction: next, jevPending: false });
       await consultJev(next);
     };
 
@@ -123,14 +135,21 @@ export function useGoldEngine(): GoldState {
       stop = feed.start(
         (c, closed) => {
           if (closed) queue = queue.then(() => onClose(c));
-          else if (!cancelled) setState((s) => ({ ...s, forming: c }));
+          else {
+            lastForming = c;
+            relive();
+          }
         },
         (msg) => !cancelled && setState((s) => ({ ...s, error: `Live data hiccup: ${msg}` })),
       );
     })();
 
+    // Time passing changes the odds too, so refresh the live read every second.
+    const clock = window.setInterval(relive, 1000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(clock);
       stop?.();
     };
   }, []);

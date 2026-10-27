@@ -6,21 +6,21 @@ import { Ema, Rma, type Candle } from "./indicators";
 // ── Features ──────────────────────────────────────────────────────────
 
 export const FEATURES = [
-  "Last candle body", //            signed body ÷ prior ATR
-  "Big candle × direction", //      (range ÷ prior ATR − 1) × sign(body): your big-candle fade
-  "Close position in candle", //    0 = at low, 1 = at high (centred)
-  "Wick pressure", //               (lower wick − upper wick) ÷ range
-  "3-candle move", //               ATR units
-  "12-candle move", //              ATR·√12 units
-  "Distance from fast EMA", //      ATR units
-  "Trend (EMA 9 vs 21)", //         ATR units
-  "RSI", //                         centred, −1…1
-  "Streak", //                      −1…1
-  "Room to 20-candle high", //      ATR units (ceiling)
-  "Room to 20-candle low", //       ATR units (floor)
-  "Volatility regime", //           ATR vs its 100-candle average
+  "Last candle body", //               signed body ÷ prior ATR
+  "Big candle × direction", //         (range ÷ prior ATR − 1) × sign(body): the big-candle fade
+  "Close position in candle", //       0 = at low, 1 = at high (centred)
+  "Wick pressure", //                  (lower wick − upper wick) ÷ range
+  "Candle before body", //             signed body of candle −2
+  "Two candles back body", //          signed body of candle −3
+  "2-candle move", //                  ATR units
+  "Close vs last 3 candles' middle", // short-term stretch
+  "Broke previous high", //            close above prior candle's high (ATR units, ≥ 0)
+  "Broke previous low", //             close below prior candle's low (ATR units, ≥ 0)
+  "Fast RSI (5)", //                   centred, −1…1
+  "Streak", //                         −1…1
+  "Distance from 5-candle EMA", //     ATR units
   "Time of day",
-  "Time of day",
+  "Time of day ",
 ] as const;
 export const N_FEATURES = FEATURES.length;
 
@@ -31,30 +31,26 @@ const logit = (p: number) => {
   return Math.log(q / (1 - q));
 };
 
+/** Short-horizon features: almost everything looks at the last 1–3 candles. */
 export class FeatureBuilder {
-  private emaF = new Ema(9);
-  private emaS = new Ema(21);
-  private up = new Rma(14);
-  private dn = new Rma(14);
+  private ema5 = new Ema(5);
+  private up = new Rma(5);
+  private dn = new Rma(5);
   private atrR = new Rma(14);
-  private atrSlow = new Ema(100);
-  private closes: number[] = [];
-  private highs: number[] = [];
-  private lows: number[] = [];
+  private hist: Candle[] = [];
   private streak = 0;
   private prevAtr: number | null = null;
   atr: number | null = null;
 
   /** Features describing the market once candle `c` has closed, or null while warming up. */
   push(c: Candle): number[] | null {
-    const prevClose = this.closes.length ? this.closes[this.closes.length - 1] : undefined;
-    const tr =
-      prevClose === undefined
-        ? c.high - c.low
-        : Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose));
+    const prev = this.hist.length ? this.hist[this.hist.length - 1] : undefined;
+    const tr = prev
+      ? Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close))
+      : c.high - c.low;
     let rsi: number | null = null;
-    if (prevClose !== undefined) {
-      const ch = c.close - prevClose;
+    if (prev) {
+      const ch = c.close - prev.close;
       const u = this.up.update(Math.max(ch, 0));
       const d = this.dn.update(Math.max(-ch, 0));
       if (u !== null && d !== null) rsi = d === 0 ? 100 : u === 0 ? 0 : 100 - 100 / (1 + u / d);
@@ -63,37 +59,24 @@ export class FeatureBuilder {
     const atr = this.atrR.update(tr);
     this.prevAtr = atr;
     this.atr = atr;
-    const atrSlow = atr === null ? null : this.atrSlow.update(atr);
-    const ef = this.emaF.update(c.close);
-    const es = this.emaS.update(c.close);
+    const e5 = this.ema5.update(c.close);
 
-    this.closes.push(c.close);
-    this.highs.push(c.high);
-    this.lows.push(c.low);
-    if (this.closes.length > 30) {
-      this.closes.shift();
-      this.highs.shift();
-      this.lows.shift();
-    }
+    this.hist.push(c);
+    if (this.hist.length > 4) this.hist.shift();
     const body = c.close - c.open;
     const rng = c.high - c.low;
     this.streak = body > 0 ? (this.streak > 0 ? this.streak + 1 : 1) : body < 0 ? (this.streak < 0 ? this.streak - 1 : -1) : 0;
 
-    if (
-      atr === null || atrPrev === null || atrSlow === null || ef === null || es === null || rsi === null ||
-      this.closes.length < 21 || atr <= 0 || atrPrev <= 0 || atrSlow <= 0
-    ) {
+    if (atr === null || atrPrev === null || e5 === null || rsi === null || this.hist.length < 4 || atr <= 0 || atrPrev <= 0) {
       return null;
     }
 
-    const n = this.closes.length;
-    const c3 = this.closes[n - 4]!;
-    const c12 = this.closes[n - 13]!;
-    const hi20 = Math.max(...this.highs.slice(-20));
-    const lo20 = Math.min(...this.lows.slice(-20));
+    const [c3, c2, c1] = this.hist.slice(-4, -1) as [Candle, Candle, Candle]; // 3, 2 and 1 candles before c
     const upW = c.high - Math.max(c.open, c.close);
     const loW = Math.min(c.open, c.close) - c.low;
-    const d = new Date((c.time + 0) * 1000);
+    const last3 = [c2, c1, c];
+    const mid3 = (Math.max(...last3.map((k) => k.high)) + Math.min(...last3.map((k) => k.low))) / 2;
+    const d = new Date(c.time * 1000);
     const hour = d.getUTCHours() + d.getUTCMinutes() / 60;
 
     return [
@@ -101,22 +84,25 @@ export class FeatureBuilder {
       clip((rng / atrPrev - 1) * Math.sign(body)),
       rng > 0 ? (c.close - c.low) / rng - 0.5 : 0,
       rng > 0 ? (loW - upW) / rng : 0,
-      clip((c.close - c3) / atr),
-      clip((c.close - c12) / (atr * Math.sqrt(12))),
-      clip((c.close - ef) / atr),
-      clip((ef - es) / atr),
+      clip((c1.close - c1.open) / atr),
+      clip((c2.close - c2.open) / atr),
+      clip((c.close - c2.close) / atr),
+      clip((c.close - mid3) / atr),
+      clip(Math.max(0, c.close - c1.high) / atr),
+      clip(Math.max(0, c1.low - c.close) / atr),
       (rsi - 50) / 50,
       clip(this.streak, 6) / 6,
-      clip((hi20 - c.close) / atr),
-      clip((c.close - lo20) / atr),
-      clip(atr / atrSlow - 1),
+      clip((c.close - e5) / atr),
       Math.sin((2 * Math.PI * hour) / 24),
       Math.cos((2 * Math.PI * hour) / 24),
     ];
+
   }
 }
 
-// ── Online logistic regression (AdaGrad, standardized inputs, L2) ────
+// ── Online logistic regression with a short memory ───────────────────
+// RMSProp-style steps and exponentially-weighted scaling, so recent candles
+// count most and the model keeps adapting instead of freezing on old history.
 
 export class OnlineLogit {
   readonly w: number[];
@@ -124,20 +110,25 @@ export class OnlineLogit {
   private G: number[];
   private Gb = 1e-8;
   private mean: number[];
-  private m2: number[];
+  private vari: number[];
   private seen = 0;
   updates = 0;
 
-  constructor(private dim: number, private lr = 0.05, private l2 = 1e-3) {
+  constructor(
+    private dim: number,
+    private lr = 0.002,
+    private l2 = 1e-3,
+    private memory = 2000, // candles (~3 weeks of 15m): how far back the model "remembers"
+  ) {
     this.w = new Array(dim).fill(0);
     this.G = new Array(dim).fill(1e-8);
     this.mean = new Array(dim).fill(0);
-    this.m2 = new Array(dim).fill(0);
+    this.vari = new Array(dim).fill(1);
   }
 
   private z(x: number[]): number[] {
-    if (this.seen < 2) return x.map(() => 0);
-    return x.map((v, i) => clip((v - this.mean[i]!) / Math.sqrt(this.m2[i]! / (this.seen - 1) + 1e-9), 5));
+    if (this.seen < 10) return x.map(() => 0);
+    return x.map((v, i) => clip((v - this.mean[i]!) / Math.sqrt(this.vari[i]! + 1e-9), 5));
   }
 
   predict(x: number[]): number {
@@ -159,13 +150,14 @@ export class OnlineLogit {
     let s = this.b;
     for (let i = 0; i < this.dim; i++) s += this.w[i]! * z[i]!;
     const g = sigmoid(s) - y;
+    const rho = 1 - 1 / this.memory;
     for (let i = 0; i < this.dim; i++) {
       const gi = g * z[i]! + this.l2 * this.w[i]!;
-      this.G[i]! += gi * gi;
-      this.w[i]! -= (this.lr * gi) / Math.sqrt(this.G[i]!);
+      this.G[i] = rho * this.G[i]! + (1 - rho) * gi * gi;
+      this.w[i]! -= (this.lr * gi) / Math.sqrt(this.G[i]! + 1e-8);
     }
-    this.Gb += g * g;
-    this.b -= (this.lr * g) / Math.sqrt(this.Gb);
+    this.Gb = rho * this.Gb + (1 - rho) * g * g;
+    this.b -= (this.lr * g) / Math.sqrt(this.Gb + 1e-8);
     this.observe(x);
     this.updates += 1;
   }
@@ -173,10 +165,11 @@ export class OnlineLogit {
   /** Update the scaler only (used for doji candles, which teach no direction). */
   observe(x: number[]): void {
     this.seen += 1;
+    const a = Math.max(1 / this.seen, 1 / this.memory);
     for (let i = 0; i < this.dim; i++) {
       const delta = x[i]! - this.mean[i]!;
-      this.mean[i]! += delta / this.seen;
-      this.m2[i]! += delta * (x[i]! - this.mean[i]!);
+      this.mean[i]! += a * delta;
+      this.vari[i] = (1 - a) * (this.vari[i]! + a * delta * delta);
     }
   }
 }
@@ -310,6 +303,25 @@ export class ShapeModel {
   }
 }
 
+// ── Live (intra-candle) probability ─────────────────────────────────
+
+/** Standard normal CDF (Abramowitz–Stegun 7.1.26). */
+export function normCdf(z: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
+  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-(z * z) / 2);
+  return z >= 0 ? (1 + y) / 2 : (1 - y) / 2;
+}
+/** Inverse normal CDF, close enough for turning a probability into an expected drift. */
+const normInv = (p: number) => logit(p) / 1.702;
+
+export interface Nowcast {
+  pGreen: number; //     chance the forming candle closes green, given everything so far
+  call: -1 | 0 | 1; //   live lean (uses the same edge as the open call)
+  move: number; //       close − open so far
+  timeLeftFrac: number;
+  ghost: Ghost; //       re-projected candle
+}
+
 // ── Engine: one call per closed candle ───────────────────────────────
 
 export interface Driver {
@@ -342,6 +354,7 @@ interface Pending {
   call: -1 | 0 | 1;
   ghost: Ghost | null;
   counted: boolean; // made after warmup, so it goes in the scoreboard
+  halfway: number | null; // live probability captured at the candle's halfway point
 }
 
 export class Engine {
@@ -349,7 +362,7 @@ export class Engine {
   readonly model = new OnlineLogit(N_FEATURES);
   readonly stacker = new Stacker();
   readonly shape = new ShapeModel();
-  readonly track = { model: new Tracker(), jev: new Tracker(), final: new Tracker() };
+  readonly track = { model: new Tracker(), jev: new Tracker(), final: new Tracker(), halfway: new Tracker() };
   private pending: Pending | null = null;
   private recent: Candle[] = [];
 
@@ -380,6 +393,7 @@ export class Engine {
         if (p.counted && p.pModel !== null) this.track.model.record(p.pModel, y, edgeGap);
         if (p.counted && p.pJev !== null) this.track.jev.record(p.pJev, y, edgeGap);
         if (p.counted && p.pFinal !== null) this.track.final.record(p.pFinal, y, edgeGap);
+        if (p.counted && p.halfway !== null) this.track.halfway.record(p.halfway, y, edgeGap);
         if (p.pModel !== null && p.pJev !== null) this.stacker.update(p.pModel, p.pJev, y);
         if (p.x) this.model.update(p.x, y);
       } else if (p.x) {
@@ -406,8 +420,55 @@ export class Engine {
       call,
       ghost: this.shape.ghost(c.time + this.tfSeconds, c.close, call),
       counted: this.warm && pModel !== null,
+      halfway: null,
     };
     return { outcome, next: this.view(c.time + this.tfSeconds) };
+  }
+
+  /** Typical spread of candle bodies (close − open) over the recent past. */
+  private bodySd(): number | null {
+    const rc = this.recent.slice(-100);
+    if (rc.length < 30) return null;
+    const b = rc.map((c) => c.close - c.open);
+    const m = b.reduce((a, v) => a + v, 0) / b.length;
+    const v = b.reduce((a, x) => a + (x - m) ** 2, 0) / (b.length - 1);
+    return v > 0 ? Math.sqrt(v) : null;
+  }
+
+  /**
+   * Live chance the forming candle closes green, re-computed on every tick.
+   * Starts at the open call, then follows the candle: the move so far versus how much
+   * the price can still travel in the time left (random-walk scaling of recent volatility).
+   */
+  nowcast(f: Candle, nowSec: number): Nowcast | null {
+    const p = this.pending;
+    if (!p || !p.ghost || f.time !== p.ghost.time) return null;
+    const sd = this.bodySd();
+    if (!sd) return null;
+    const frac = Math.min(1, Math.max(0.01, (f.time + this.tfSeconds - nowSec) / this.tfSeconds));
+    const mu = sd * normInv(p.pFinal ?? 0.5); // expected body implied by the open call
+    const move = f.close - f.open;
+    const left = sd * Math.sqrt(frac);
+    const pGreen = normCdf((move + mu * frac) / left);
+    if (frac <= 0.5 && p.halfway === null) p.halfway = pGreen;
+
+    const close = f.close + mu * frac;
+    const reach = 1.28 * left; // 80% band for the rest of the candle
+    const call = this.callFor(pGreen);
+    return {
+      pGreen,
+      call,
+      move,
+      timeLeftFrac: frac,
+      ghost: {
+        time: f.time,
+        open: f.open,
+        close,
+        high: Math.max(f.high, close, f.close + reach),
+        low: Math.min(f.low, close, f.close - reach),
+        dir: call,
+      },
+    };
   }
 
   /** Fold Jev's answer into the pending prediction. pGreen is Jev's probability the next candle is green. */
@@ -508,14 +569,16 @@ export class Engine {
     };
 
     return {
+      focus:
+        "Only the NEXT single 15-minute candle matters. Weigh the last 1-3 candles most: their size, wicks, " +
+        "where they closed, and whether price just hit a nearby level. Longer-term trend is background only.",
       how_to_read:
         "c = color (G/R/D). body (signed), range and wicks are in ATR units. close_at: 0 = closed at the low, 1 = at the high. " +
         "Levels are signed distance from current price in ATR units (positive = above price). Candle lists are oldest first.",
       atr_dollars: r(atr),
       session_of_next_candle: session,
       candles_15m_last_16: rc.slice(-16).map(describe),
-      candles_1h_last_12: rollup(3600, 12),
-      candles_4h_last_6: rollup(4 * 3600, 6),
+      candles_1h_last_6: rollup(3600, 6),
       levels: {
         high_24h: lvl(hi24),
         low_24h: lvl(lo24),
@@ -541,6 +604,7 @@ export class Engine {
       model: this.track.model.summary(),
       jev: this.track.jev.summary(),
       final: this.track.final.summary(),
+      halfway: this.track.halfway.summary(),
       shape: this.shape.summary(),
       jevWeight: this.stacker.updates ? this.stacker.wJev / Math.max(0.1, Math.abs(this.stacker.wModel)) : null,
     };

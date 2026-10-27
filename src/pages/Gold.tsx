@@ -37,28 +37,28 @@ export default function Gold() {
   }, []);
 
   const lastCandle = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
-  const isLive = !!(g.forming && p && g.forming.time === p.forTime);
-  const dir = p?.call === 1 ? "green" : p?.call === -1 ? "red" : "none";
-  const dirText = !s?.warm ? "LEARNING" : dir === "none" ? "NO CALL" : dir.toUpperCase();
-  const dirCls = dir === "green" ? "text-[#26a69a]" : dir === "red" ? "text-[#ef5350]" : "text-[#8b949e]";
+  const nc = g.live; // live read of the forming candle (null between candles)
+  const isLive = !!nc;
+  const colorOf = (c: -1 | 0 | 1 | undefined) => (c === 1 ? "green" : c === -1 ? "red" : "none");
+  const clsOf = (d: string) => (d === "green" ? "text-[#26a69a]" : d === "red" ? "text-[#ef5350]" : "text-[#8b949e]");
 
-  // Live progress of the forming candle against the call, updated on every tick.
-  const live = isLive && g.forming ? g.forming : null;
-  const move = live ? live.close - live.open : 0;
-  const liveCls = move > 0 ? "text-[#26a69a]" : move < 0 ? "text-[#ef5350]" : "text-[#8b949e]";
-  const verdict =
-    !live || p?.call === 0 || move === 0 ? "" : (p?.call === 1) === move > 0 ? " · on track" : " · against the call";
-  const secsLeft = live ? Math.min(TIMEFRAME_MIN * 60, Math.max(0, live.time + TIMEFRAME_MIN * 60 - Math.floor(Date.now() / 1000))) : 0;
+  const dir = colorOf(isLive ? nc.call : p?.call);
+  const prob = isLive ? nc.pGreen : (p?.pFinal ?? null);
+  const dirText = !s?.warm ? "LEARNING" : dir === "none" ? (isLive ? "TOO CLOSE" : "NO CALL") : dir.toUpperCase();
+
+  const move = nc?.move ?? 0;
+  const secsLeft = nc ? Math.round(nc.timeLeftFrac * TIMEFRAME_MIN * 60) : 0;
   const clock = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")}`;
+  const ghost = nc?.ghost ?? p?.ghost ?? null;
 
-  const sub: string[] = [];
-  if (p?.pModel != null) sub.push(`Model ${pct(p.pModel)}`);
+  const atOpen: string[] = [];
+  if (p?.pModel != null) atOpen.push(`Model ${pct(p.pModel, 0)}`);
   if (g.jevOn) {
-    if (p?.pJev != null) sub.push(`Jev ${pct(p.pJev)} (conf ${p.jevConfidence?.toFixed(2) ?? "—"})`);
-    else if (g.jevPending) sub.push("Jev thinking…");
-    else if (g.jevError) sub.push("Jev error (see below)");
-    else if (s?.warm) sub.push("Jev: waiting for candle close");
+    if (p?.pJev != null) atOpen.push(`Jev ${pct(p.pJev, 0)}`);
+    else if (g.jevPending) atOpen.push("Jev thinking…");
+    else if (g.jevError) atOpen.push("Jev error (see below)");
   }
+  if (p?.pFinal != null && (g.jevOn || isLive)) atOpen.push(`→ ${pct(p.pFinal, 0)}`);
 
   return (
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
@@ -76,7 +76,7 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[58vh_auto] md:grid-cols-[1fr_300px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart bars={g.bars} forming={g.forming} ghost={p?.ghost ?? null} version={g.version} />
+          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} version={g.version} />
           {g.status === "loading" && (
             <div className="absolute inset-0 grid place-items-center text-sm text-[#8b949e]">Training on history…</div>
           )}
@@ -84,33 +84,39 @@ export default function Gold() {
 
         <aside className="flex flex-col gap-5 overflow-auto border-t border-[#262c36] bg-[#161b22] p-4 md:border-l md:border-t-0">
           <div className="rounded-xl bg-[#1f252e] p-4 text-center">
-            <div className="text-xs uppercase tracking-wider text-[#8b949e]">{isLive ? "This candle" : "Next candle"}</div>
-            <div className={`my-0.5 text-3xl font-bold ${dirCls}`}>{p ? dirText : "—"}</div>
-            <div className="tabular-nums">{p?.pFinal == null ? "—" : `${pct(p.pFinal)} chance green`}</div>
-            <div className="mt-1.5 text-xs tabular-nums text-[#8b949e]">{sub.join(" · ") || " "}</div>
-            {live && (
-              <div className="mt-3 border-t border-[#262c36] pt-2 text-sm tabular-nums">
-                <span className={liveCls}>
-                  {move >= 0 ? "+" : ""}
-                  {move.toFixed(2)} so far
-                </span>
-                <span className="text-[#8b949e]">
-                  {verdict}
-                  {g.source !== "Simulated" && ` · closes in ${clock}`}
-                </span>
-              </div>
+            <div className="text-xs uppercase tracking-wider text-[#8b949e]">
+              {isLive ? "This candle · live" : "Next candle"}
+            </div>
+            <div className={`my-0.5 text-3xl font-bold ${clsOf(dir)}`}>{p ? dirText : "—"}</div>
+            <div className="tabular-nums">{prob == null ? "—" : `${pct(prob)} chance green`}</div>
+            {isLive && (
+              <>
+                <div className="mx-auto mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#ef5350]/40">
+                  <div className="h-full bg-[#26a69a] transition-[width] duration-300" style={{ width: `${(prob ?? 0.5) * 100}%` }} />
+                </div>
+                <div className="mt-2 text-sm tabular-nums">
+                  <span className={clsOf(move > 0 ? "green" : move < 0 ? "red" : "none")}>
+                    {move >= 0 ? "+" : ""}
+                    {move.toFixed(2)} so far
+                  </span>
+                  <span className="text-[#8b949e]"> · {clock} left</span>
+                </div>
+              </>
             )}
+            <div className="mt-1.5 text-xs tabular-nums text-[#8b949e]">
+              {atOpen.length ? `${isLive ? "At the open: " : ""}${atOpen.join(" · ")}` : "\u00a0"}
+            </div>
           </div>
 
           <section>
             <Label>Ghost candle</Label>
             <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 tabular-nums">
               <dt className="text-[#8b949e]">Expected high</dt>
-              <dd className="text-right">{px(p?.ghost?.high)}</dd>
+              <dd className="text-right">{px(ghost?.high)}</dd>
               <dt className="text-[#8b949e]">Expected close</dt>
-              <dd className="text-right">{px(p?.ghost?.close)}</dd>
+              <dd className="text-right">{px(ghost?.close)}</dd>
               <dt className="text-[#8b949e]">Expected low</dt>
-              <dd className="text-right">{px(p?.ghost?.low)}</dd>
+              <dd className="text-right">{px(ghost?.low)}</dd>
             </dl>
           </section>
 
@@ -145,6 +151,7 @@ export default function Gold() {
                 <tbody>
                   {g.jevOn && <RecordRow name="Blend" t={s.final} />}
                   <RecordRow name="Model" t={s.model} />
+                  <RecordRow name="Live @ halfway" t={s.halfway} />
                   {g.jevOn && <RecordRow name="Jev" t={s.jev} />}
                 </tbody>
               </table>
