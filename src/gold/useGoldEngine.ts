@@ -23,11 +23,22 @@ export interface GoldState {
   summary: Summary | null;
   error: string | null;
   jevError: string | null;
+  jevPending: boolean;
   /** Bumps on every closed candle so the chart knows to redraw markers. */
   version: number;
 }
 
 const MAX_BARS = 3000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => (clearTimeout(id), resolve(v)),
+      (e) => (clearTimeout(id), reject(e)),
+    );
+  });
+}
 
 export function useGoldEngine(): GoldState {
   const [state, setState] = useState<GoldState>({
@@ -40,6 +51,7 @@ export function useGoldEngine(): GoldState {
     summary: null,
     error: null,
     jevError: null,
+    jevPending: false,
     version: 0,
   });
   useEffect(() => {
@@ -66,16 +78,21 @@ export function useGoldEngine(): GoldState {
       bars.push({ candle: c, outcome });
       if (bars.length > MAX_BARS) bars.shift();
       setState((s) => ({ ...s, version: s.version + 1 }));
-      publish({ forming: null, prediction: next });
+      publish({ forming: null, prediction: next, jevPending: false });
+      await consultJev(next);
+    };
 
+    /** Ask Jev about the pending prediction (the candle forming now or next). */
+    const consultJev = async (fallback: Prediction | null) => {
       const snapshot = feed.jev && engine.warm ? engine.describeForJev() : null;
       if (!snapshot) return;
+      publish({ jevPending: true });
       try {
-        const v = await askJev(snapshot);
+        const v = await withTimeout(askJev(snapshot), 20_000, "Jev took longer than 20s");
         const p = engine.applyJev(v.probGreen, v.confidence, MIN_JEV_CONFIDENCE);
-        publish({ prediction: p ?? next, jevError: null });
+        publish({ prediction: p ?? fallback, jevError: null, jevPending: false });
       } catch (e) {
-        publish({ jevError: (e as Error).message });
+        publish({ jevError: (e as Error).message, jevPending: false });
       }
     };
 
@@ -101,6 +118,8 @@ export function useGoldEngine(): GoldState {
       if (cancelled) return;
       publish({ status: "ready", prediction });
       setState((s) => ({ ...s, version: s.version + 1 }));
+      // Don't make the first Jev answer wait for the next candle close.
+      queue = queue.then(() => consultJev(prediction));
 
       stop = feed.start(
         (c, closed) => {

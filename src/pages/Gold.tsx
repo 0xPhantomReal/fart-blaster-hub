@@ -55,7 +55,9 @@ export default function Gold() {
   if (p?.pModel != null) sub.push(`Model ${pct(p.pModel)}`);
   if (g.jevOn) {
     if (p?.pJev != null) sub.push(`Jev ${pct(p.pJev)} (conf ${p.jevConfidence?.toFixed(2) ?? "—"})`);
-    else if (s?.warm) sub.push("Jev thinking…");
+    else if (g.jevPending) sub.push("Jev thinking…");
+    else if (g.jevError) sub.push("Jev error (see below)");
+    else if (s?.warm) sub.push("Jev: waiting for candle close");
   }
 
   return (
