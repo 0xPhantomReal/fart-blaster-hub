@@ -42,6 +42,15 @@ export default function Gold() {
   const dirText = !s?.warm ? "LEARNING" : dir === "none" ? "NO CALL" : dir.toUpperCase();
   const dirCls = dir === "green" ? "text-[#26a69a]" : dir === "red" ? "text-[#ef5350]" : "text-[#8b949e]";
 
+  // Live progress of the forming candle against the call, updated on every tick.
+  const live = isLive && g.forming ? g.forming : null;
+  const move = live ? live.close - live.open : 0;
+  const liveCls = move > 0 ? "text-[#26a69a]" : move < 0 ? "text-[#ef5350]" : "text-[#8b949e]";
+  const verdict =
+    !live || p?.call === 0 || move === 0 ? "" : (p?.call === 1) === move > 0 ? " · on track" : " · against the call";
+  const secsLeft = live ? Math.min(TIMEFRAME_MIN * 60, Math.max(0, live.time + TIMEFRAME_MIN * 60 - Math.floor(Date.now() / 1000))) : 0;
+  const clock = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")}`;
+
   const sub: string[] = [];
   if (p?.pModel != null) sub.push(`Model ${pct(p.pModel)}`);
   if (g.jevOn) {
@@ -77,6 +86,18 @@ export default function Gold() {
             <div className={`my-0.5 text-3xl font-bold ${dirCls}`}>{p ? dirText : "—"}</div>
             <div className="tabular-nums">{p?.pFinal == null ? "—" : `${pct(p.pFinal)} chance green`}</div>
             <div className="mt-1.5 text-xs tabular-nums text-[#8b949e]">{sub.join(" · ") || " "}</div>
+            {live && (
+              <div className="mt-3 border-t border-[#262c36] pt-2 text-sm tabular-nums">
+                <span className={liveCls}>
+                  {move >= 0 ? "+" : ""}
+                  {move.toFixed(2)} so far
+                </span>
+                <span className="text-[#8b949e]">
+                  {verdict}
+                  {g.source !== "Simulated" && ` · closes in ${clock}`}
+                </span>
+              </div>
+            )}
           </div>
 
           <section>

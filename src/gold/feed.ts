@@ -3,7 +3,7 @@
 
 import type { Candle } from "./indicators";
 
-export const TIMEFRAME_MIN = 5;
+export const TIMEFRAME_MIN = 15;
 export const TF_SECONDS = TIMEFRAME_MIN * 60;
 export const HISTORY_BARS = 3000;
 
@@ -57,29 +57,40 @@ export class LiveFeed implements Feed {
 
   async history(): Promise<Candle[]> {
     const to = nowSec();
-    // Gold closes on weekends, so ask for extra wall-clock span.
-    const all = await this.fetchRange(to - HISTORY_BARS * TF_SECONDS * 3, to);
+    // Gold trades ~23h × 5 days, so ask for ~1.7× the wall-clock span.
+    const all = await this.fetchRange(to - Math.round(HISTORY_BARS * TF_SECONDS * 1.7), to);
     const closed = all.filter((c) => c.time < bucket(to)).slice(-HISTORY_BARS);
     this.lastClosed = closed.length ? closed[closed.length - 1].time : 0;
     return closed;
   }
 
   start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void): () => void {
+    let stopped = false;
+    let forming: Candle | null = null;
     let busy = false;
+
+    const emitForming = () => forming && onBar({ ...forming }, false);
+
+    // Closed candles (authoritative OHLC) come from the history API.
     const poll = async () => {
-      if (busy || document.hidden) return;
+      if (busy || stopped) return;
       busy = true;
       try {
         const now = nowSec();
         const recent = await this.fetchRange(Math.max(this.lastClosed, now - 10 * TF_SECONDS), now);
-        const forming = bucket(now);
+        const current = bucket(now);
         for (const c of recent) {
           if (c.time <= this.lastClosed) continue;
-          if (c.time < forming) {
+          if (c.time < current) {
             onBar(c, true);
             this.lastClosed = c.time;
+          } else if (!forming || forming.time !== c.time) {
+            forming = { ...c };
+            emitForming();
           } else {
-            onBar(c, false);
+            // Keep the API's open; widen high/low with anything the ticks saw.
+            forming = { ...forming, open: c.open, high: Math.max(forming.high, c.high), low: Math.min(forming.low, c.low) };
+            emitForming();
           }
         }
       } catch (e) {
@@ -88,9 +99,76 @@ export class LiveFeed implements Feed {
         busy = false;
       }
     };
-    const id = window.setInterval(poll, 3000);
+
+    // Every Pyth price tick updates the forming candle.
+    const onTick = (t: number, p: number) => {
+      const b = bucket(t);
+      if (b <= this.lastClosed) return;
+      if (!forming || b > forming.time) {
+        forming = { time: b, open: forming ? forming.close : p, high: p, low: p, close: p };
+        void poll(); // a candle just closed: fetch its final OHLC now
+      } else if (b < forming.time) {
+        return; // late tick from the previous candle
+      } else {
+        forming.high = Math.max(forming.high, p);
+        forming.low = Math.min(forming.low, p);
+        forming.close = p;
+      }
+      emitForming();
+    };
+
+    let abort: AbortController | null = null;
+    const stream = async () => {
+      let backoff = 1000;
+      while (!stopped) {
+        abort = new AbortController();
+        try {
+          const res = await fetch(FN_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+            },
+            body: JSON.stringify({ action: "stream" }),
+            signal: abort.signal,
+          });
+          if (!res.ok || !res.body) {
+            const j = await res.json().catch(() => ({}));
+            throw new Error((j as { error?: string }).error ?? `tick stream ${res.status}`);
+          }
+          backoff = 1000;
+          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = "";
+          while (!stopped) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += value;
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl);
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              const m = JSON.parse(line) as { t: number; p: number };
+              onTick(m.t, m.p);
+            }
+          }
+        } catch (e) {
+          if (stopped) return;
+          onError(`ticks: ${(e as Error).message}`);
+          await new Promise((r) => setTimeout(r, backoff));
+          backoff = Math.min(backoff * 2, 30_000);
+        }
+      }
+    };
+
     void poll();
-    return () => window.clearInterval(id);
+    void stream();
+    const id = window.setInterval(poll, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+      abort?.abort();
+    };
   }
 }
 

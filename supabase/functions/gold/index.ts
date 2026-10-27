@@ -3,6 +3,8 @@
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "jev", snapshot, timeframeMin }   → { choice, probGreen, confidence }
+// POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
+//   (optional secrets: PYTH_HERMES_KEY if Hermes needs a different key, PYTH_GOLD_FEED_ID)
 
 const PYTH_BASE = "https://pyth.dourolabs.app/v1";
 const PYTH_CHANNEL = "fixed_rate@200ms";
@@ -70,6 +72,86 @@ async function history(from: number, to: number, resolution: number) {
   return body;
 }
 
+// ── Live ticks (Pyth Hermes SSE → compact NDJSON for the browser) ─────
+
+const HERMES_BASE = () => env("PYTH_HERMES_BASE") || "https://hermes.pyth.network";
+const hermesKey = () => env("PYTH_HERMES_KEY") || env("PYTH_API_KEY");
+let goldFeedId = env("PYTH_GOLD_FEED_ID");
+
+async function resolveFeedId(): Promise<string> {
+  if (goldFeedId) return goldFeedId;
+  for (const assetType of ["metal", "metals"]) {
+    const res = await fetch(`${HERMES_BASE()}/v2/price_feeds?query=XAU&asset_type=${assetType}`, {
+      headers: { Authorization: `Bearer ${hermesKey()}` },
+    });
+    if (!res.ok) continue;
+    const rows: Array<{ id: string; attributes?: Record<string, string> }> = await res.json();
+    const isGoldUsd = (r: { attributes?: Record<string, string> }) =>
+      Object.values(r.attributes ?? {}).some((v) => /XAU\/?USD$/i.test(v));
+    const pick = rows.find(isGoldUsd);
+    if (pick) {
+      goldFeedId = pick.id.startsWith("0x") ? pick.id : `0x${pick.id}`;
+      return goldFeedId;
+    }
+  }
+  throw new Error("could not find the XAU/USD feed on Hermes (set PYTH_GOLD_FEED_ID)");
+}
+
+// Edge functions have a wall-clock limit, so each stream ends after ~2 minutes and the page reconnects.
+const STREAM_MS = 120_000;
+
+async function tickStream(): Promise<Response> {
+  const id = await resolveFeedId();
+  const upstream = await fetch(`${HERMES_BASE()}/v2/updates/price/stream?ids[]=${id}&parsed=true&encoding=hex`, {
+    headers: { Authorization: `Bearer ${hermesKey()}`, Accept: "text/event-stream" },
+  });
+  if (!upstream.ok || !upstream.body) {
+    throw new Error(`Hermes ${upstream.status}: ${(await upstream.text()).slice(0, 160)}`);
+  }
+  const reader = upstream.body.pipeThrough(new TextDecoderStream()).getReader();
+  const enc = new TextEncoder();
+  let buf = "";
+
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const timer = setTimeout(() => reader.cancel().catch(() => {}), STREAM_MS);
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += value;
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;
+            try {
+              const msg = JSON.parse(line.slice(5));
+              for (const p of msg.parsed ?? []) {
+                const pr = p.price;
+                const expo = Number(pr.expo);
+                const price = expo < 0 ? Number(pr.price) / 10 ** -expo : Number(pr.price) * 10 ** expo;
+                if (Number.isFinite(price)) {
+                  controller.enqueue(enc.encode(JSON.stringify({ t: pr.publish_time, p: price }) + "\n"));
+                }
+              }
+            } catch {
+              // skip partial or non-price lines
+            }
+          }
+        }
+      } finally {
+        clearTimeout(timer);
+        controller.close();
+      }
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
+    },
+  });
+  return new Response(body, { headers: { ...cors, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" } });
+}
+
 // ── Jev ────────────────────────────────────────────────────────────────
 
 async function jev(snapshot: Record<string, unknown>, timeframeMin: number) {
@@ -135,6 +217,11 @@ Deno.serve(async (req) => {
       if (!RESOLUTIONS.has(resolution)) return json({ error: "unsupported resolution" }, 400);
       if (to <= from || to - from > MAX_SPAN_SEC) return json({ error: "bad time range" }, 400);
       return json(await history(Math.floor(from), Math.floor(to), resolution));
+    }
+
+    if (body.action === "stream") {
+      if (!hermesKey()) return json({ error: "PYTH_API_KEY secret is not set" }, 503);
+      return await tickStream();
     }
 
     if (body.action === "jev") {
