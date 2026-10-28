@@ -139,9 +139,11 @@ export default function Gold() {
                 <>
                   <p className="mb-2 text-xs text-[#8b949e]">
                     {fc.picked === "jev"
-                      ? `Jev's pick out of ${fc.scenarios} real gold paths: ${pct(fc.pJev, 1)} likely (an even guess would be ${pct(1 / fc.scenarios, 1)}).`
-                      : `Most typical of ${fc.scenarios} real gold paths.`}{" "}
-                    {pct(fc.endsHigherPct, 0)} of all paths end higher.
+                      ? `Jev's pick from ${fc.scenarios.toLocaleString()} real gold paths: ${pct(fc.pJev, 1)} in the final round of ${fc.finalists} (an even split would be ${pct(1 / Math.max(1, fc.finalists), 1)}).`
+                      : `Most typical of ${fc.scenarios.toLocaleString()} real gold paths.`}{" "}
+                    {pct(fc.endsHigherPct, 0)} of all paths end higher. Drawn from {fc.pool.toLocaleString()} past candles · updated{" "}
+                    {Math.max(0, Math.round((Date.now() - fc.updatedAt) / 1000))}s ago
+                    {g.forecastBusy ? " · rerunning…" : ""}.
                   </p>
                   <ol className="grid gap-1 tabular-nums">
                     {fc.candles.map((c, i) => {

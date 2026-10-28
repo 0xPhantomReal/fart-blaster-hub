@@ -67,6 +67,22 @@ export class LiveFeed implements Feed {
     return closed;
   }
 
+  /** ~A year of 15-minute candles (closed only), fetched in 60-day chunks. The pool for forecast analogs. */
+  async deepHistory(days = 365): Promise<Candle[]> {
+    const end = Math.floor(nowSec() / TF_SECONDS) * TF_SECONDS;
+    const chunk = 60 * 86400;
+    const out: Candle[] = [];
+    for (let from = end - days * 86400; from < end; from += chunk) {
+      try {
+        out.push(...(await this.fetchRange(from, Math.min(end, from + chunk))));
+      } catch {
+        // older data may not exist; use whatever comes back
+      }
+    }
+    const seen = new Set<number>();
+    return out.filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
+  }
+
   /** 1-minute candles for the last `days` days, fetched in 2-day chunks. Used to measure mean reversion. */
   async minuteHistory(days = 10): Promise<Candle[]> {
     const end = Math.floor(nowSec() / 60) * 60;
@@ -250,6 +266,25 @@ export async function askForecast(
   slotKey: string,
 ): Promise<ForecastVerdict> {
   return callFn<ForecastVerdict>({ action: "jev", mode: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
+}
+
+export interface TournamentResult {
+  winner: string;
+  pFinal: number | null; // Jev's probability for the winner in the final round
+  top: { id: string; p: number }[];
+  finalists: number;
+  paths: number;
+  calls: number;
+  tokens: number;
+}
+
+/** Up to 2,000 paths: Jev picks in batches of 250, then a final round. One run per minute, shared by all viewers. */
+export async function askTournament(
+  snapshot: Record<string, unknown>,
+  options: Record<string, string>,
+  slotKey: string,
+): Promise<TournamentResult> {
+  return callFn<TournamentResult>({ action: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
 }
 
 /** Which backend is deployed. Old versions don't know this action, which tells us live Jev isn't available yet. */

@@ -69,8 +69,20 @@ const describe = (c: Candle, atr: number): ScenarioCandle => ({
   down: (Math.min(c.open, c.close) - c.low) / atr,
 });
 
-/** The `n` past moments most like now, and the 5 candles that followed each. History must be closed candles, oldest first. */
-export function buildScenarios(history: Candle[], n = 200): ScenarioSet | null {
+/** The candle that is forming right now, in ATR units from its open. `elapsed` is 0 at the open, 1 at the close. */
+export interface FormingNow {
+  move: number;
+  high: number;
+  low: number;
+  elapsed: number;
+}
+
+/**
+ * The `n` past moments most like now, and the 5 candles that followed each. History must be closed
+ * candles, oldest first. With `forming`, paths whose first candle disagrees with what the current candle
+ * has already done are pushed down the list, more strongly the further into the candle we are.
+ */
+export function buildScenarios(history: Candle[], n = 200, forming: FormingNow | null = null): ScenarioSet | null {
   const atrs = wilderAtr(history);
   const last = history.length - 1;
   const atrNow = atrs[last];
@@ -82,7 +94,9 @@ export function buildScenarios(history: Candle[], n = 200): ScenarioSet | null {
     const a = atrs[i];
     if (a && a > 0) cands.push({ i, sig: signature(history, i, a) });
   }
-  if (cands.length < n) return null;
+  // Never use more than a third of history: beyond that the "analogs" stop resembling now.
+  n = Math.min(n, Math.floor(cands.length / 3));
+  if (n < 20) return null;
 
   // Standardize each feature so no single one dominates the distance.
   const dim = now.length;
@@ -91,10 +105,29 @@ export function buildScenarios(history: Candle[], n = 200): ScenarioSet | null {
   for (const c of cands) c.sig.forEach((v, k) => (mean[k] += v / cands.length));
   for (const c of cands) c.sig.forEach((v, k) => (sd[k] += (v - mean[k]) ** 2 / cands.length));
   const scale = sd.map((v) => Math.sqrt(v) || 1);
-  const dist = (s: number[]) => Math.sqrt(s.reduce((a, v, k) => a + ((v - now[k]) / scale[k]) ** 2, 0));
+  const dist2 = (s: number[]) => s.reduce((a, v, k) => a + ((v - now[k]) / scale[k]) ** 2, 0);
+
+  // How well each analog's first candle matches the candle forming now.
+  let firstSd = 1;
+  if (forming) {
+    const bodies = cands.map((c) => (history[c.i + 1].close - history[c.i + 1].open) / atrs[c.i]!);
+    const m = bodies.reduce((a, v) => a + v, 0) / bodies.length;
+    firstSd = Math.sqrt(bodies.reduce((a, v) => a + (v - m) ** 2, 0) / bodies.length) || 1;
+  }
+  const formingPenalty = (i: number) => {
+    if (!forming || forming.elapsed <= 0) return 0;
+    const a = atrs[i]!;
+    const f = history[i + 1];
+    // Where the analog's first candle stood relative to its open (its final shape; we only have 15m data).
+    const body = (f.close - f.open) / a;
+    const hi = (f.high - f.open) / a;
+    const lo = (f.low - f.open) / a;
+    const miss = (body - forming.move) ** 2 + Math.max(0, forming.high - hi) ** 2 + Math.max(0, lo - forming.low) ** 2;
+    return 3 * forming.elapsed * (miss / firstSd ** 2);
+  };
 
   const nearest = cands
-    .map((c) => ({ ...c, d: dist(c.sig) }))
+    .map((c) => ({ ...c, d: Math.sqrt(dist2(c.sig) + formingPenalty(c.i)) }))
     .sort((a, b) => a.d - b.d)
     .slice(0, n);
 
@@ -109,11 +142,16 @@ export function buildScenarios(history: Candle[], n = 200): ScenarioSet | null {
   return { scenarios, atr: atrNow, endsHigherPct: endsHigher / scenarios.length };
 }
 
-/** Compact text for one scenario, e.g. "G+0.62 ^0.21 v0.10 | R-0.30 ^0.05 v0.40 | …". */
+const num = (v: number) => {
+  const t = Math.abs(v).toFixed(2).replace(/^0(?=\.)/, "");
+  return v < 0 ? `-${t}` : t;
+};
+
+/** Compact text for one scenario, e.g. "G+.62^.21v.10 R-.30^.05v.40 …" (body, upper wick, lower wick in ATR). */
 export function label(s: Scenario): string {
   return s.candles
-    .map((c) => `${c.body > 0 ? "G" : c.body < 0 ? "R" : "D"}${c.body >= 0 ? "+" : ""}${c.body.toFixed(2)} ^${c.up.toFixed(2)} v${c.down.toFixed(2)}`)
-    .join(" | ");
+    .map((c) => `${c.body > 0 ? "G+" : c.body < 0 ? "R" : "D+"}${num(c.body)}^${num(c.up)}v${num(c.down)}`)
+    .join(" ");
 }
 
 /** The scenario closest to all the others: the "most typical" path, used when Jev isn't available. */

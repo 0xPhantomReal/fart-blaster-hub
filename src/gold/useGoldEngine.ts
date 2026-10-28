@@ -3,7 +3,7 @@ import type { Candle } from "./indicators";
 import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
 import { fitReversion, type ReversionFit } from "./reversion";
 import { buildScenarios, label, medoid, toCandles } from "./forecast";
-import { askForecast, askJev, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
+import { askJev, askTournament, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
 /** How often Jev re-reads the forming candle. Each check only calls Jev if something new happened. */
@@ -17,13 +17,15 @@ export interface ClosedBar {
 export type Summary = ReturnType<Engine["summary"]>;
 
 export interface Forecast {
-  forTime: number; //        first forecast candle's time
-  candles: Candle[]; //      the 5 candles to draw
+  forTime: number; //          first forecast candle's time (the candle forming now)
+  candles: Candle[]; //        the 5 candles to draw
   picked: "jev" | "typical"; // Jev's pick, or the most typical path when Jev isn't available
-  pJev: number | null; //    Jev's probability for the picked path
-  rank: { pJev: number }[]; // top few Jev probabilities, for context
-  scenarios: number; //      how many paths Jev chose from
-  endsHigherPct: number; //  share of all paths that finish above the current price
+  pJev: number | null; //      Jev's probability for the winner in its final round
+  finalists: number; //        how many paths were in Jev's final round
+  scenarios: number; //        how many paths were generated
+  pool: number; //             how many past candles the paths were drawn from
+  endsHigherPct: number; //    share of all paths that finish above the current price
+  updatedAt: number; //        ms timestamp
   note: string | null;
 }
 
@@ -57,7 +59,9 @@ export interface GoldState {
 }
 
 const MAX_BARS = 3000;
-const FORECAST_PATHS = 200;
+const FORECAST_PATHS = 2000;
+/** How often the forecast reruns (one Jev tournament per run, shared by all viewers). */
+export const FORECAST_EVERY_SECONDS = 60;
 
 function readForecastPref(): boolean {
   try {
@@ -125,6 +129,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
     let liveSupported: boolean | null = null;
     let forecastSupported = false;
     let reversionTimer: number | undefined;
+    let poolTimer: number | undefined;
 
     const relive = () => {
       if (cancelled || !lastForming) return;
@@ -171,25 +176,62 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
       }
     };
 
-    /** Build ~200 analog paths for the next 5 candles and let Jev pick the most likely one. */
-    let forecastFor = -1;
-    const runForecast = async () => {
-      if (cancelled || !forecastWanted.current || bars.length < 100) return;
+    /**
+     * Every minute: build up to 2,000 analog paths for the next 5 candles (following the candle forming now)
+     * and let Jev pick the most likely one in a tournament (batches of 250, then a final round).
+     */
+    let forecastKey = "";
+    let forecastRunning = false;
+    let pool: Candle[] = []; // ~a year of closed 15m candles: where the analogs come from
+    const analogPool = () => {
+      const recent = bars.map((b) => b.candle);
+      if (!pool.length || !recent.length) return recent;
+      return [...pool.filter((c) => c.time < recent[0].time), ...recent];
+    };
+    const runForecast = async (force = false) => {
+      if (cancelled || forecastRunning || !forecastWanted.current || bars.length < 100) return;
+      if (document.hidden && !force) return;
       const last = bars[bars.length - 1].candle;
-      if (forecastFor === last.time) return; // already done for this candle
-      forecastFor = last.time;
-      const set = buildScenarios(
-        bars.map((b) => b.candle),
-        FORECAST_PATHS,
-      );
-      if (!set) return;
-      const start = last.time + TF_SECONDS;
-      const draw = (id: string) => toCandles(set.scenarios.find((x) => x.id === id)!, start, last.close, set.atr, TF_SECONDS);
-      const typical = medoid(set);
-      const base = { forTime: start, scenarios: set.scenarios.length, endsHigherPct: set.endsHigherPct };
-      const fallback = (note: string): Forecast => ({ ...base, candles: draw(typical.id), picked: "typical", pJev: null, rank: [], note });
+      const now = feed.now();
+      const key = `${last.time}:${Math.floor(now / FORECAST_EVERY_SECONDS)}`;
+      if (!force && key === forecastKey) return;
+      forecastKey = key;
 
-      const snapshot = engine.describeForJev();
+      const start = last.time + TF_SECONDS;
+      const f = lastForming && lastForming.time === start ? lastForming : null;
+      const atr = engine.features.atr;
+      const formingNow =
+        f && atr
+          ? {
+              move: (f.close - f.open) / atr,
+              high: (f.high - f.open) / atr,
+              low: (f.low - f.open) / atr,
+              elapsed: Math.min(1, Math.max(0, (now - f.time) / TF_SECONDS)),
+            }
+          : null;
+      const history = analogPool();
+      const set = buildScenarios(history, FORECAST_PATHS, formingNow);
+      if (!set) return;
+      const startPrice = f ? f.open : last.close;
+      const draw = (id: string) => toCandles(set.scenarios.find((x) => x.id === id)!, start, startPrice, set.atr, TF_SECONDS);
+      const typical = medoid(set);
+      const base = {
+        forTime: start,
+        scenarios: set.scenarios.length,
+        pool: history.length,
+        endsHigherPct: set.endsHigherPct,
+        updatedAt: Date.now(),
+      };
+      const fallback = (note: string): Forecast => ({
+        ...base,
+        candles: draw(typical.id),
+        picked: "typical",
+        pJev: null,
+        finalists: 0,
+        note,
+      });
+
+      const snapshot = engine.describeForForecast(f, now);
       if (!feed.jev || !forecastSupported || !snapshot) {
         const why = !feed.jev
           ? "Jev is off, so this is the most typical of the paths."
@@ -199,31 +241,27 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
         if (!cancelled) setState((s) => ({ ...s, forecast: fallback(why) }));
         return;
       }
+      forecastRunning = true;
       setState((s) => ({ ...s, forecastBusy: true }));
       try {
         const options = Object.fromEntries(set.scenarios.map((x) => [x.id, label(x)]));
-        const v = await withTimeout(askForecast(snapshot, options, `forecast:${last.time}`), 30_000, "Jev forecast took longer than 30s");
-        calls.open += 1;
-        const ranked = Object.entries(v.probabilities).sort((a, b) => b[1] - a[1]);
-        const [bestId, bestP] = ranked[0] ?? [typical.id, 0];
-        const f: Forecast = {
-          ...base,
-          candles: draw(set.scenarios.some((x) => x.id === bestId) ? bestId : typical.id),
-          picked: "jev",
-          pJev: bestP,
-          rank: ranked.slice(0, 3).map(([, p]) => ({ pJev: p })),
-          note: null,
-        };
-        if (!cancelled) setState((s) => ({ ...s, forecast: f, forecastBusy: false, jevCalls: { ...calls } }));
+        const v = await withTimeout(askTournament(snapshot, options, key), 50_000, "Jev forecast took longer than 50s");
+        calls.open += v.calls;
+        const winner = set.scenarios.some((x) => x.id === v.winner) ? v.winner : typical.id;
+        const fc: Forecast = { ...base, candles: draw(winner), picked: "jev", pJev: v.pFinal, finalists: v.finalists, note: null };
+        if (!cancelled) setState((s) => ({ ...s, forecast: fc, forecastBusy: false, jevCalls: { ...calls } }));
       } catch (e) {
         if (!cancelled)
-          setState((s) => ({ ...s, forecast: fallback(`Jev forecast failed (${(e as Error).message}). Showing the most typical path.`), forecastBusy: false }));
+          setState((s) => ({
+            ...s,
+            forecast: fallback(`Jev forecast failed (${(e as Error).message}). Showing the most typical path.`),
+            forecastBusy: false,
+          }));
+      } finally {
+        forecastRunning = false;
       }
     };
-    runForecastRef.current = () => {
-      forecastFor = -1;
-      void runForecast();
-    };
+    runForecastRef.current = () => void runForecast(true);
 
     (async () => {
       let history: Candle[];
@@ -263,11 +301,27 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
       void measure();
       reversionTimer = window.setInterval(measure, 6 * 3600 * 1000);
 
+      // A year of 15-minute history as the pool for forecast analogs (refreshed every 6 hours).
+      const loadPool = async () => {
+        if (!(feed instanceof LiveFeed) || cancelled) return;
+        try {
+          const p = await feed.deepHistory(365);
+          if (p.length > pool.length && !cancelled) {
+            pool = p;
+            void runForecast(true);
+          }
+        } catch {
+          // keep using the recent history
+        }
+      };
+      void loadPool();
+      poolTimer = window.setInterval(loadPool, 6 * 3600 * 1000);
+
       if (feed.name === "Pyth") {
         backendVersion()
           .then((v) => {
             liveSupported = !!v && v.features.includes("jev-live");
-            forecastSupported = !!v && v.features.includes("jev-forecast");
+            forecastSupported = !!v && v.features.includes("forecast-tournament");
             void liveJev();
             void runForecast();
           })
@@ -345,12 +399,16 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
       }
     };
     const jevClock = window.setInterval(liveJev, JEV_LIVE_SECONDS * 1000);
+    // Checked every 10s; actually reruns once per minute (and right after each candle closes).
+    const forecastClock = window.setInterval(() => void runForecast(), 10_000);
 
     return () => {
       cancelled = true;
       window.clearInterval(clock);
       window.clearInterval(jevClock);
       window.clearInterval(reversionTimer);
+      window.clearInterval(poolTimer);
+      window.clearInterval(forecastClock);
       stop?.();
     };
   }, []);

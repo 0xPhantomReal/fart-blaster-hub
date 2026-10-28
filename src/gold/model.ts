@@ -562,6 +562,30 @@ export class Engine {
     };
   }
 
+  /** Market picture for the 5-candle forecast: the open snapshot, re-focused on 5 candles, plus the candle forming now. */
+  describeForForecast(f: Candle | null, nowSec: number): Record<string, unknown> | null {
+    const base = this.describeForJev();
+    const atr = this.features.atr;
+    if (!base || !atr) return null;
+    const { focus: _nextCandleOnly, ...rest } = base;
+    void _nextCandleOnly;
+    const r = (v: number) => Number(v.toFixed(2));
+    return {
+      focus:
+        "The question is about the next 5 fifteen-minute candles as a sequence. Candle 1 is the one forming now " +
+        "(see forming_candle): paths whose first candle can't match what it has already done are unlikely.",
+      ...rest,
+      forming_candle: f
+        ? {
+            seconds_left: Math.max(0, Math.round(f.time + this.tfSeconds - nowSec)),
+            move_so_far: r((f.close - f.open) / atr),
+            high_so_far: r((f.high - f.open) / atr),
+            low_so_far: r((f.low - f.open) / atr),
+          }
+        : "not started yet",
+    };
+  }
+
   /** Fold Jev's live read of the forming candle into the live probability. */
   applyJevLive(f: Candle, pGreen: number): void {
     const p = this.pending;
