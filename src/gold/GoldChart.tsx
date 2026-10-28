@@ -4,6 +4,7 @@ import {
   createChart,
   createSeriesMarkers,
   CrosshairMode,
+  TickMarkType,
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -38,14 +39,16 @@ interface Props {
   bars: ClosedBar[];
   forming: Candle | null;
   ghost: Ghost | null;
+  forecast: Candle[] | null;
   version: number;
 }
 
-export function GoldChart({ bars, forming, ghost, version }: Props) {
+export function GoldChart({ bars, forming, ghost, forecast, version }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const ghostSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const forecastSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawnVersion = useRef(-1);
   const zoomed = useRef(false);
@@ -56,7 +59,25 @@ export function GoldChart({ bars, forming, ghost, version }: Props) {
       autoSize: true,
       layout: { background: { color: COLORS.bg }, textColor: COLORS.muted },
       grid: { vertLines: { color: COLORS.line }, horzLines: { color: COLORS.line } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: COLORS.line, rightOffset: 4 },
+      // Show times in the viewer's own time zone (the library defaults to UTC).
+      localization: {
+        timeFormatter: (t: number) =>
+          new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: COLORS.line,
+        rightOffset: 4,
+        tickMarkFormatter: (t: number, type: TickMarkType) => {
+          const d = new Date(t * 1000);
+          // Day markers fall on UTC midnight; only label them as a date when that's also local midnight.
+          const localMidnight = d.getHours() === 0 && d.getMinutes() === 0;
+          return type < TickMarkType.Time && localMidnight
+            ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+            : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        },
+      },
       rightPriceScale: { borderColor: COLORS.line },
       crosshair: { mode: CrosshairMode.Normal },
     });
@@ -75,6 +96,18 @@ export function GoldChart({ bars, forming, ghost, version }: Props) {
       borderDownColor: "rgba(239,83,80,0.9)",
       wickUpColor: "rgba(38,166,154,0.7)",
       wickDownColor: "rgba(239,83,80,0.7)",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    // Forecast: hollow gold-outlined candles so they can't be mistaken for real ones.
+    forecastSeries.current = c.addSeries(CandlestickSeries, {
+      upColor: "rgba(212,167,44,0.10)",
+      downColor: "rgba(212,167,44,0.10)",
+      borderVisible: true,
+      borderUpColor: "rgba(38,166,154,0.95)",
+      borderDownColor: "rgba(239,83,80,0.95)",
+      wickUpColor: "rgba(212,167,44,0.8)",
+      wickDownColor: "rgba(212,167,44,0.8)",
       priceLineVisible: false,
       lastValueVisible: false,
     });
@@ -121,6 +154,18 @@ export function GoldChart({ bars, forming, ghost, version }: Props) {
       },
     ]);
   }, [ghost]);
+
+  useEffect(() => {
+    const s = forecastSeries.current;
+    if (!s) return;
+    s.setData(forecast ? forecast.map(toBar) : []);
+    if (forecast && chart.current) {
+      // Make room on the right for the 5 forecast candles.
+      const ts = chart.current.timeScale();
+      const r = ts.getVisibleLogicalRange();
+      if (r && bars.length && r.to < bars.length + 6) ts.setVisibleLogicalRange({ from: r.from + 6, to: bars.length + 7 });
+    }
+  }, [forecast, bars.length]);
 
   return <div ref={el} className="h-full w-full" />;
 }

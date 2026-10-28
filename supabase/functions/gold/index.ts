@@ -3,6 +3,7 @@
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "jev", snapshot, timeframeMin, mode?: "open" | "live", slotKey? } → { choice, probGreen, confidence, usage }
+// POST { action: "jev", mode: "forecast", snapshot, timeframeMin, options: { s1: "...", … }, slotKey } → { choice, probabilities, confidence, usage }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
 //   (optional secrets: PYTH_HERMES_KEY if Hermes needs a different key, PYTH_GOLD_FEED_ID)
 
@@ -154,10 +155,10 @@ async function tickStream(): Promise<Response> {
 
 // ── Jev ────────────────────────────────────────────────────────────────
 
-type JevMode = "open" | "live";
+type JevMode = "open" | "live" | "forecast";
 const inflight = new Map<string, Promise<unknown>>();
 
-const QUESTIONS: Record<JevMode, { instructions: string; green: string; red: string }> = {
+const QUESTIONS: Record<"open" | "live", { instructions: string; green: string; red: string }> = {
   // Asked once per candle, before it starts.
   open: {
     instructions:
@@ -171,21 +172,41 @@ const QUESTIONS: Record<JevMode, { instructions: string; green: string; red: str
   live: {
     instructions:
       "The 15-minute candle in forming_candle is still open. Will it CLOSE above or below its open price? " +
-      "Judge the move so far, what happened in the last 10 seconds, time left, and nearby levels.",
-    green: "It finishes above its open: buyers hold or regain control before the close",
-    red: "It finishes below its open: sellers hold or take control before the close",
+      "Weigh whether the move so far HOLDS or REVERTS before the close: compare move_so_far with typical_move_left " +
+      "(how far price can still travel in the time left), use historically_holds_pct (how much of a move at this " +
+      "point usually survives), and how far price has already pulled back from its high or bounced off its low. " +
+      "Then account for the last 10 seconds and nearby levels.",
+    green: "It finishes above its open: an up move holds, or a down move reverts back above the open",
+    red: "It finishes below its open: a down move holds, or an up move reverts back below the open",
   },
 };
 
-async function jev(snapshot: Record<string, unknown>, timeframeMin: number, mode: JevMode, slotKey: string | null) {
-  // Live calls: one TypeSafe call per 10-second slot, shared by every viewer.
-  const key = mode === "live" && slotKey ? `live:${slotKey}` : `open:${JSON.stringify(snapshot)}`;
+const FORECAST_INSTRUCTIONS =
+  "Each option is a possible path for the NEXT 5 fifteen-minute candles of gold, taken from moments in gold's own " +
+  "history that looked like now. Per candle: G/R = green/red, signed body, ^ upper wick, v lower wick, all in ATR " +
+  "units. Given the market state, which path is the most likely to happen?";
+
+async function jev(
+  snapshot: Record<string, unknown>,
+  timeframeMin: number,
+  mode: JevMode,
+  slotKey: string | null,
+  options: Record<string, string> | null,
+) {
+  // Live and forecast calls are keyed by time slot, so every viewer shares one TypeSafe call.
+  const key = slotKey && mode !== "open" ? `${mode}:${slotKey}` : `open:${JSON.stringify(snapshot)}`;
   const hit = cached<unknown>(jevCache, key, mode === "live" ? 20_000 : 10 * 60 * 1000);
   if (hit) return hit;
   const pending = inflight.get(key);
   if (pending) return pending;
 
-  const q = QUESTIONS[mode];
+  const question =
+    mode === "forecast" && options
+      ? { type: "choice", instructions: FORECAST_INSTRUCTIONS, criteria: options }
+      : (() => {
+          const q = QUESTIONS[mode === "live" ? "live" : "open"];
+          return { type: "choice", instructions: q.instructions, criteria: { green: q.green, red: q.red } };
+        })();
   const call = (async () => {
     const res = await fetch(TYPESAFE_URL, {
       method: "POST",
@@ -193,14 +214,20 @@ async function jev(snapshot: Record<string, unknown>, timeframeMin: number, mode
       body: JSON.stringify({
         model: env("JEV_MODEL") || "jev-latest",
         state: { instrument: `Gold (XAU/USD), ${timeframeMin}-minute candles`, ...snapshot },
-        questions: {
-          next_candle: { type: "choice", instructions: q.instructions, criteria: { green: q.green, red: q.red } },
-        },
+        questions: { next_candle: question },
       }),
     });
     if (!res.ok) throw new Error(`TypeSafe ${res.status}: ${(await res.text()).slice(0, 160)}`);
     const r = await res.json();
     const a = r?.answers?.next_candle;
+    if (mode === "forecast") {
+      if (!a || typeof a.choice !== "string" || typeof a.probabilities !== "object" || typeof a.confidence !== "number") {
+        throw new Error("unexpected TypeSafe response shape");
+      }
+      const body = { choice: a.choice, probabilities: a.probabilities, confidence: a.confidence, usage: r.usage ?? null };
+      jevCache.set(key, { at: Date.now(), body });
+      return body;
+    }
     if (!a || (a.choice !== "green" && a.choice !== "red") || typeof a.confidence !== "number" || typeof a.probabilities?.green !== "number") {
       throw new Error("unexpected TypeSafe response shape");
     }
@@ -243,7 +270,7 @@ Deno.serve(async (req) => {
 
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
-      return json({ version: 4, features: ["stream", "jev-live"], jev: !!env("TYPESAFE_API_KEY") });
+      return json({ version: 5, features: ["stream", "jev-live", "jev-forecast"], jev: !!env("TYPESAFE_API_KEY") });
     }
 
     if (body.action === "stream") {
@@ -258,9 +285,22 @@ Deno.serve(async (req) => {
         return json({ error: "bad snapshot" }, 400);
       }
       if (typeof timeframeMin !== "number" || !RESOLUTIONS.has(timeframeMin)) return json({ error: "bad timeframe" }, 400);
-      const mode: JevMode = body.mode === "live" ? "live" : "open";
+      const mode: JevMode = body.mode === "live" ? "live" : body.mode === "forecast" ? "forecast" : "open";
       const slotKey = typeof body.slotKey === "string" && body.slotKey.length <= 64 ? body.slotKey : null;
-      return json(await jev(snapshot as Record<string, unknown>, timeframeMin, mode, slotKey));
+      let options: Record<string, string> | null = null;
+      if (mode === "forecast") {
+        // Up to 255 options per Jev choice question; keep each short and the total well inside one request.
+        const o = body.options as Record<string, unknown> | undefined;
+        const entries = o && typeof o === "object" ? Object.entries(o) : [];
+        const valid =
+          entries.length >= 2 &&
+          entries.length <= 255 &&
+          entries.every(([k, v]) => /^s\d{1,3}$/.test(k) && typeof v === "string" && v.length <= 200) &&
+          JSON.stringify(o).length <= 60_000;
+        if (!valid) return json({ error: "bad forecast options" }, 400);
+        options = o as Record<string, string>;
+      }
+      return json(await jev(snapshot as Record<string, unknown>, timeframeMin, mode, slotKey, options));
     }
 
     return json({ error: "unknown action" }, 400);

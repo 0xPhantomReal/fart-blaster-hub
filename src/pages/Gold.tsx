@@ -3,6 +3,7 @@ import { GoldChart } from "@/gold/GoldChart";
 import { TIMEFRAME_MIN } from "@/gold/feed";
 import type { TrackSummary } from "@/gold/model";
 import { useGoldEngine } from "@/gold/useGoldEngine";
+import { reversionAt } from "@/gold/reversion";
 
 const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
 const px = (x: number | null | undefined) => (x == null ? "—" : x.toFixed(2));
@@ -49,7 +50,10 @@ export default function Gold() {
   const move = nc?.move ?? 0;
   const secsLeft = nc ? Math.round(nc.timeLeftFrac * TIMEFRAME_MIN * 60) : 0;
   const clock = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")}`;
-  const ghost = nc?.ghost ?? p?.ghost ?? null;
+  const fc = g.forecastOn ? g.forecast : null;
+  // With the forecast on, its first candle replaces the single ghost.
+  const ghost = fc ? null : (nc?.ghost ?? p?.ghost ?? null);
+  const ghostInfo = nc?.ghost ?? p?.ghost ?? null;
 
   const atOpen: string[] = [];
   if (p?.pModel != null) atOpen.push(`Model ${pct(p.pModel, 0)}`);
@@ -69,14 +73,24 @@ export default function Gold() {
         <div className={`text-lg font-semibold tabular-nums ${lastCandle && lastCandle.close < lastCandle.open ? "text-[#ef5350]" : "text-[#26a69a]"}`}>
           {lastCandle ? lastCandle.close.toFixed(2) : "—"}
         </div>
-        <div className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : "text-[#8b949e]"}`}>
+        <button
+          type="button"
+          aria-pressed={g.forecastOn}
+          onClick={() => g.setForecastOn(!g.forecastOn)}
+          className={`ml-auto rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+            g.forecastOn ? "border-[#d4a72c] bg-[#d4a72c]/15 text-[#d4a72c]" : "border-[#262c36] text-[#8b949e] hover:text-[#e6e8eb]"
+          }`}
+        >
+          Forecast 5 {g.forecastOn ? "on" : "off"}
+        </button>
+        <div className={`text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : "text-[#8b949e]"}`}>
           {g.status === "loading" ? "loading…" : g.source === "Simulated" ? "SIMULATED DATA" : "Pyth live"}
         </div>
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[58vh_auto] md:grid-cols-[1fr_300px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} version={g.version} />
+          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} forecast={fc?.candles ?? null} version={g.version} />
           {g.status === "loading" && (
             <div className="absolute inset-0 grid place-items-center text-sm text-[#8b949e]">Training on history…</div>
           )}
@@ -116,16 +130,69 @@ export default function Gold() {
             </div>
           </div>
 
+          {g.forecastOn && (
+            <section>
+              <Label>Forecast · next 5 candles</Label>
+              {!fc ? (
+                <p className="text-sm text-[#8b949e]">{g.forecastBusy ? "Jev is weighing the paths…" : "building paths…"}</p>
+              ) : (
+                <>
+                  <p className="mb-2 text-xs text-[#8b949e]">
+                    {fc.picked === "jev"
+                      ? `Jev's pick out of ${fc.scenarios} real gold paths: ${pct(fc.pJev, 1)} likely (an even guess would be ${pct(1 / fc.scenarios, 1)}).`
+                      : `Most typical of ${fc.scenarios} real gold paths.`}{" "}
+                    {pct(fc.endsHigherPct, 0)} of all paths end higher.
+                  </p>
+                  <ol className="grid gap-1 tabular-nums">
+                    {fc.candles.map((c, i) => {
+                      const d = c.close - c.open;
+                      return (
+                        <li key={c.time} className="flex justify-between gap-2 text-sm">
+                          <span className="text-[#8b949e]">
+                            {i + 1}. {new Date(c.time * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                          </span>
+                          <span className={d >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}>
+                            {d >= 0 ? "▲ +" : "▼ "}
+                            {d.toFixed(2)}
+                          </span>
+                          <span className="text-[#8b949e]">
+                            {c.low.toFixed(1)}–{c.high.toFixed(1)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {fc.note && <p className="mt-2 text-xs text-[#d4a72c]">{fc.note}</p>}
+                </>
+              )}
+            </section>
+          )}
+
           <section>
             <Label>Ghost candle</Label>
             <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 tabular-nums">
               <dt className="text-[#8b949e]">Expected high</dt>
-              <dd className="text-right">{px(ghost?.high)}</dd>
+              <dd className="text-right">{px(ghostInfo?.high)}</dd>
               <dt className="text-[#8b949e]">Expected close</dt>
-              <dd className="text-right">{px(ghost?.close)}</dd>
+              <dd className="text-right">{px(ghostInfo?.close)}</dd>
               <dt className="text-[#8b949e]">Expected low</dt>
-              <dd className="text-right">{px(ghost?.low)}</dd>
+              <dd className="text-right">{px(ghostInfo?.low)}</dd>
             </dl>
+          </section>
+
+          <section>
+            <Label>Mean reversion (measured)</Label>
+            {g.reversion ? (
+              <p className="text-sm text-[#8b949e]">
+                A move at the halfway point keeps{" "}
+                <span className="text-[#e6e8eb]">{pct(reversionAt(g.reversion, g.reversion.minutesPerCandle / 2).hold, 0)}</span> of itself by
+                the close, on average. After 3 minutes it keeps{" "}
+                <span className="text-[#e6e8eb]">{pct(reversionAt(g.reversion, 3).hold, 0)}</span>. Measured from {g.reversion.candles} candles of
+                1-minute gold data.
+              </p>
+            ) : (
+              <p className="text-sm text-[#8b949e]">{g.source === "Simulated" ? "Needs live data." : "Measuring from 1-minute history…"}</p>
+            )}
           </section>
 
           <section>

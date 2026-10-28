@@ -105,7 +105,7 @@ describe("gold engine", () => {
     const f = { time: t0, open: 4000, high: 4001.5, low: 3999.8, close: 4001.2 };
     const first = e.describeLive(f, t0 + 200, null)!;
     const next = e.describeLive(f, t0 + 210, { price: 4000.9, high: 4001.5, low: 3999.8 })!;
-    expect(JSON.stringify(first).length).toBeLessThan(600); // vs ~4,300 for the full open snapshot
+    expect(JSON.stringify(first).length).toBeLessThan(800); // vs ~4,300 for the full open snapshot
     expect(next.last_10_seconds).toMatchObject({ made_new_high: false, made_new_low: false });
     expect(next.context).toBe(first.context); // context built once per candle
 

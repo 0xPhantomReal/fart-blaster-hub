@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
-import { askJev, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
+import { fitReversion, type ReversionFit } from "./reversion";
+import { buildScenarios, label, medoid, toCandles } from "./forecast";
+import { askForecast, askJev, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
 /** How often Jev re-reads the forming candle. Each check only calls Jev if something new happened. */
@@ -13,6 +15,17 @@ export interface ClosedBar {
 }
 
 export type Summary = ReturnType<Engine["summary"]>;
+
+export interface Forecast {
+  forTime: number; //        first forecast candle's time
+  candles: Candle[]; //      the 5 candles to draw
+  picked: "jev" | "typical"; // Jev's pick, or the most typical path when Jev isn't available
+  pJev: number | null; //    Jev's probability for the picked path
+  rank: { pJev: number }[]; // top few Jev probabilities, for context
+  scenarios: number; //      how many paths Jev chose from
+  endsHigherPct: number; //  share of all paths that finish above the current price
+  note: string | null;
+}
 
 export interface GoldState {
   status: "loading" | "ready" | "error";
@@ -29,6 +42,12 @@ export interface GoldState {
   jevPending: boolean;
   /** Jev's latest read on the forming candle. */
   jevLive: { pGreen: number; at: number } | null;
+  /** 5-candle forecast (only while the toggle is on). */
+  forecastOn: boolean;
+  forecast: Forecast | null;
+  forecastBusy: boolean;
+  /** Intra-candle mean reversion measured from 1-minute history (null until measured). */
+  reversion: ReversionFit | null;
   /** Why Jev is or isn't reading the live candle right now, in plain words. */
   jevLiveStatus: string;
   /** Jev usage this session: calls sent, and live checks skipped because nothing new happened. */
@@ -38,6 +57,15 @@ export interface GoldState {
 }
 
 const MAX_BARS = 3000;
+const FORECAST_PATHS = 200;
+
+function readForecastPref(): boolean {
+  try {
+    return localStorage.getItem("gold.forecast") === "1";
+  } catch {
+    return false;
+  }
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -49,7 +77,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
   });
 }
 
-export function useGoldEngine(): GoldState {
+export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => void } {
   const [state, setState] = useState<GoldState>({
     status: "loading",
     source: backendConfigured() ? "Pyth" : "Simulated",
@@ -64,9 +92,27 @@ export function useGoldEngine(): GoldState {
     jevPending: false,
     jevLive: null,
     jevLiveStatus: "starting…",
+    reversion: null,
+    forecastOn: readForecastPref(),
+    forecast: null,
+    forecastBusy: false,
     jevCalls: { open: 0, live: 0, skipped: 0 },
     version: 0,
   });
+  const forecastWanted = useRef(state.forecastOn);
+  const runForecastRef = useRef<() => void>(() => {});
+
+  const setForecastOn = useCallback((on: boolean) => {
+    forecastWanted.current = on;
+    try {
+      localStorage.setItem("gold.forecast", on ? "1" : "0");
+    } catch {
+      // private mode etc.: the toggle still works for this visit
+    }
+    setState((s) => ({ ...s, forecastOn: on, ...(on ? {} : { forecast: null }) }));
+    if (on) runForecastRef.current();
+  }, []);
+
   useEffect(() => {
     let feed: Feed = backendConfigured() ? new LiveFeed() : new SimFeed();
     const engine = new Engine(TF_SECONDS, MIN_EDGE, 300);
@@ -77,6 +123,8 @@ export function useGoldEngine(): GoldState {
     let lastForming: Candle | null = null;
     const calls = { open: 0, live: 0, skipped: 0 };
     let liveSupported: boolean | null = null;
+    let forecastSupported = false;
+    let reversionTimer: number | undefined;
 
     const relive = () => {
       if (cancelled || !lastForming) return;
@@ -104,6 +152,7 @@ export function useGoldEngine(): GoldState {
       lastForming = null;
       publish({ forming: null, live: null, prediction: next, jevPending: false, jevLive: null });
       await consultJev(next);
+      await runForecast();
     };
 
     /** Ask Jev about the pending prediction (the candle forming now or next). */
@@ -120,6 +169,60 @@ export function useGoldEngine(): GoldState {
       } catch (e) {
         publish({ jevError: (e as Error).message, jevPending: false });
       }
+    };
+
+    /** Build ~200 analog paths for the next 5 candles and let Jev pick the most likely one. */
+    let forecastFor = -1;
+    const runForecast = async () => {
+      if (cancelled || !forecastWanted.current || bars.length < 100) return;
+      const last = bars[bars.length - 1].candle;
+      if (forecastFor === last.time) return; // already done for this candle
+      forecastFor = last.time;
+      const set = buildScenarios(
+        bars.map((b) => b.candle),
+        FORECAST_PATHS,
+      );
+      if (!set) return;
+      const start = last.time + TF_SECONDS;
+      const draw = (id: string) => toCandles(set.scenarios.find((x) => x.id === id)!, start, last.close, set.atr, TF_SECONDS);
+      const typical = medoid(set);
+      const base = { forTime: start, scenarios: set.scenarios.length, endsHigherPct: set.endsHigherPct };
+      const fallback = (note: string): Forecast => ({ ...base, candles: draw(typical.id), picked: "typical", pJev: null, rank: [], note });
+
+      const snapshot = engine.describeForJev();
+      if (!feed.jev || !forecastSupported || !snapshot) {
+        const why = !feed.jev
+          ? "Jev is off, so this is the most typical of the paths."
+          : !forecastSupported
+            ? "Jev's pick needs the new backend (ask Lovable to “Deploy the gold edge function”). Showing the most typical path."
+            : "Showing the most typical path.";
+        if (!cancelled) setState((s) => ({ ...s, forecast: fallback(why) }));
+        return;
+      }
+      setState((s) => ({ ...s, forecastBusy: true }));
+      try {
+        const options = Object.fromEntries(set.scenarios.map((x) => [x.id, label(x)]));
+        const v = await withTimeout(askForecast(snapshot, options, `forecast:${last.time}`), 30_000, "Jev forecast took longer than 30s");
+        calls.open += 1;
+        const ranked = Object.entries(v.probabilities).sort((a, b) => b[1] - a[1]);
+        const [bestId, bestP] = ranked[0] ?? [typical.id, 0];
+        const f: Forecast = {
+          ...base,
+          candles: draw(set.scenarios.some((x) => x.id === bestId) ? bestId : typical.id),
+          picked: "jev",
+          pJev: bestP,
+          rank: ranked.slice(0, 3).map(([, p]) => ({ pJev: p })),
+          note: null,
+        };
+        if (!cancelled) setState((s) => ({ ...s, forecast: f, forecastBusy: false, jevCalls: { ...calls } }));
+      } catch (e) {
+        if (!cancelled)
+          setState((s) => ({ ...s, forecast: fallback(`Jev forecast failed (${(e as Error).message}). Showing the most typical path.`), forecastBusy: false }));
+      }
+    };
+    runForecastRef.current = () => {
+      forecastFor = -1;
+      void runForecast();
     };
 
     (async () => {
@@ -144,17 +247,36 @@ export function useGoldEngine(): GoldState {
       if (cancelled) return;
       publish({ status: "ready", prediction });
       setState((s) => ({ ...s, version: s.version + 1 }));
+      // Measure intra-candle mean reversion from ~10 days of 1-minute bars; refresh every 6 hours.
+      const measure = async () => {
+        if (!(feed instanceof LiveFeed) || cancelled) return;
+        try {
+          const fit = fitReversion(await feed.minuteHistory(10), TF_SECONDS);
+          if (fit && !cancelled) {
+            engine.reversion = fit;
+            setState((s) => ({ ...s, reversion: fit }));
+          }
+        } catch {
+          // keep the random-walk fallback; the data errors already show elsewhere
+        }
+      };
+      void measure();
+      reversionTimer = window.setInterval(measure, 6 * 3600 * 1000);
+
       if (feed.name === "Pyth") {
         backendVersion()
           .then((v) => {
             liveSupported = !!v && v.features.includes("jev-live");
+            forecastSupported = !!v && v.features.includes("jev-forecast");
             void liveJev();
+            void runForecast();
           })
           .catch(() => {
             liveSupported = false;
           });
       } else {
         liveSupported = false;
+        void runForecast();
       }
       // Don't make the first Jev answer wait for the next candle close.
       queue = queue.then(() => consultJev(prediction));
@@ -228,9 +350,10 @@ export function useGoldEngine(): GoldState {
       cancelled = true;
       window.clearInterval(clock);
       window.clearInterval(jevClock);
+      window.clearInterval(reversionTimer);
       stop?.();
     };
   }, []);
 
-  return state;
+  return { ...state, setForecastOn };
 }

@@ -2,6 +2,7 @@
 // Strict walk-forward: every prediction is made before the model sees that candle's outcome.
 
 import { Ema, Rma, type Candle } from "./indicators";
+import { reversionAt, type ReversionFit } from "./reversion";
 
 // ── Features ──────────────────────────────────────────────────────────
 
@@ -321,6 +322,10 @@ export interface Nowcast {
   move: number; //       close − open so far
   timeLeftFrac: number;
   ghost: Ghost; //       re-projected candle
+  /** Measured share of the move so far that historically survives to the close (null = not measured yet). */
+  hold: number | null;
+  /** Typical distance the close can still land from the expectation, in ATR units. */
+  typicalLeft: number;
 }
 
 // ── Engine: one call per closed candle ───────────────────────────────
@@ -367,6 +372,8 @@ export class Engine {
   readonly shape = new ShapeModel();
   readonly track = { model: new Tracker(), jev: new Tracker(), final: new Tracker(), halfway: new Tracker() };
   private pending: Pending | null = null;
+  /** Intra-candle mean reversion measured from 1-minute history (see reversion.ts). */
+  reversion: ReversionFit | null = null;
   private recent: Candle[] = [];
 
   constructor(
@@ -449,19 +456,39 @@ export class Engine {
     const p = this.pending;
     if (!p || !p.ghost || f.time !== p.ghost.time) return null;
     const sd = this.bodySd();
-    if (!sd) return null;
+    const atr = this.features.atr;
+    if (!sd || !atr) return null;
     const frac = Math.min(1, Math.max(0.01, (f.time + this.tfSeconds - nowSec) / this.tfSeconds));
     // Lean for the rest of the candle: the open call, blended with Jev's latest live read if there is one.
     const prior = p.jevLive === null ? (p.pFinal ?? 0.5) : sigmoid(0.5 * logit(p.pFinal ?? 0.5) + 0.5 * logit(p.jevLive));
-    const mu = sd * normInv(prior); // expected remaining drift implied by that lean
     const move = f.close - f.open;
-    const left = sd * Math.sqrt(frac);
-    const pGreen = normCdf((move + mu * frac) / left);
-    const pPath = normCdf(move / left);
+
+    let expected: number; //  expected final body, ATR units
+    let spread: number; //    uncertainty around it, ATR units
+    let pathOnly: number; //  expected body from price action alone
+    let hold: number | null = null;
+    const fit = this.reversion;
+    if (fit) {
+      // Measured from 1-minute history: how much of a move at this point in the candle tends to survive.
+      const minutesIn = (1 - frac) * fit.minutesPerCandle;
+      const r = reversionAt(fit, minutesIn);
+      hold = r.hold;
+      spread = Math.max(r.spread, 0.02);
+      const s0 = Math.max(fit.spread[0], 0.02);
+      pathOnly = r.hold * (move / atr);
+      expected = pathOnly + normInv(prior) * spread * (spread / s0);
+    } else {
+      // No history measured yet: assume a fair random walk for the rest of the candle.
+      spread = (sd / atr) * Math.sqrt(frac);
+      pathOnly = move / atr;
+      expected = pathOnly + (sd / atr) * normInv(prior) * frac;
+    }
+    const pGreen = normCdf(expected / spread);
+    const pPath = normCdf(pathOnly / spread);
     if (frac <= 0.5 && p.halfway === null) p.halfway = pGreen;
 
-    const close = f.close + mu * frac;
-    const reach = 1.28 * left; // 80% band for the rest of the candle
+    const close = f.open + expected * atr;
+    const reach = 1.28 * spread * atr; // 80% band around the expected close
     const call = this.callFor(pGreen);
     return {
       pGreen,
@@ -469,12 +496,14 @@ export class Engine {
       call,
       move,
       timeLeftFrac: frac,
+      hold,
+      typicalLeft: spread,
       ghost: {
         time: f.time,
         open: f.open,
         close,
-        high: Math.max(f.high, close, f.close + reach),
-        low: Math.min(f.low, close, f.close - reach),
+        high: Math.max(f.high, close, close + reach),
+        low: Math.min(f.low, close, close - reach),
         dir: call,
       },
     };
@@ -505,15 +534,27 @@ export class Engine {
     }
     const left = Math.max(0, Math.round(f.time + this.tfSeconds - nowSec));
     const rng = f.high - f.low;
+    const move = (f.close - f.open) / atr;
+    const nc = this.nowcast(f, nowSec);
     return {
       units: "ATR units, measured from this candle's open unless stated.",
       forming_candle: {
         seconds_left: left,
-        move_so_far: r((f.close - f.open) / atr),
+        move_so_far: r(move),
         high_so_far: r((f.high - f.open) / atr),
         low_so_far: r((f.low - f.open) / atr),
+        pulled_back_from_high: r((f.high - f.close) / atr),
+        bounced_off_low: r((f.close - f.low) / atr),
         close_position_in_range: rng > 0 ? r((f.close - f.low) / rng) : 0.5,
       },
+      reversion: nc
+        ? {
+            // From real gold 1-minute history: of a move this far into a candle, the share that is still there at the close.
+            historically_holds_pct: nc.hold === null ? "not measured yet" : Math.round(nc.hold * 100),
+            typical_move_left: r(nc.typicalLeft),
+            move_vs_typical_move_left: r(move / Math.max(nc.typicalLeft, 0.01)),
+          }
+        : "not available",
       last_10_seconds: since
         ? { move: r((f.close - since.price) / atr), made_new_high: f.high > since.high, made_new_low: f.low < since.low }
         : "first look at this candle",
