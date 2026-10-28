@@ -223,8 +223,11 @@ export interface JevVerdict {
   confidence: number;
 }
 
-export async function askJev(snapshot: Record<string, unknown>): Promise<JevVerdict> {
-  return callFn<JevVerdict>({ action: "jev", snapshot, timeframeMin: TIMEFRAME_MIN });
+export async function askJev(
+  snapshot: Record<string, unknown>,
+  opts: { mode?: "open" | "live"; slotKey?: string } = {},
+): Promise<JevVerdict> {
+  return callFn<JevVerdict>({ action: "jev", snapshot, timeframeMin: TIMEFRAME_MIN, ...opts });
 }
 
 // ── Simulated gold (no backend needed) ─────────────────────────────────

@@ -101,6 +101,13 @@ export default function Gold() {
                   </span>
                   <span className="text-[#8b949e]"> · {clock} left</span>
                 </div>
+                {g.jevOn && (
+                  <div className="mt-1 text-xs tabular-nums text-[#8b949e]">
+                    {g.jevLive
+                      ? `Jev live: ${pct(g.jevLive.pGreen, 0)} green · ${Math.max(0, Math.round((Date.now() - g.jevLive.at) / 1000))}s ago`
+                      : "Jev live: waiting for fresh data"}
+                  </div>
+                )}
               </>
             )}
             <div className="mt-1.5 text-xs tabular-nums text-[#8b949e]">
@@ -159,6 +166,11 @@ export default function Gold() {
             <p className="mt-2 text-xs text-[#8b949e]">
               Always guessing the more common color: {pct(s?.model.majority)}. Ghost held the candle {pct(s?.shape.insideRate, 0)} of the time.
             </p>
+            {g.jevOn && (
+              <p className="mt-2 text-xs tabular-nums text-[#8b949e]">
+                Jev calls this session: {g.jevCalls.open} at candle open · {g.jevCalls.live} live · {g.jevCalls.skipped} skipped (nothing new)
+              </p>
+            )}
             <p className="mt-2 text-xs text-[#8b949e]">
               Skill above 0 means real information beyond the base rate. Every number here comes from predictions made before the candle happened.
             </p>

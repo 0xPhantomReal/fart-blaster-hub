@@ -316,6 +316,7 @@ const normInv = (p: number) => logit(p) / 1.702;
 
 export interface Nowcast {
   pGreen: number; //     chance the forming candle closes green, given everything so far
+  pPath: number; //      same, from the price action alone (no opinions): is the candle already decided?
   call: -1 | 0 | 1; //   live lean (uses the same edge as the open call)
   move: number; //       close − open so far
   timeLeftFrac: number;
@@ -355,6 +356,8 @@ interface Pending {
   ghost: Ghost | null;
   counted: boolean; // made after warmup, so it goes in the scoreboard
   halfway: number | null; // live probability captured at the candle's halfway point
+  jevLive: number | null; //  Jev's latest read on the forming candle
+  liveContext: Record<string, unknown> | null; // built once per candle for live Jev calls
 }
 
 export class Engine {
@@ -421,6 +424,8 @@ export class Engine {
       ghost: this.shape.ghost(c.time + this.tfSeconds, c.close, call),
       counted: this.warm && pModel !== null,
       halfway: null,
+      jevLive: null,
+      liveContext: null,
     };
     return { outcome, next: this.view(c.time + this.tfSeconds) };
   }
@@ -446,10 +451,13 @@ export class Engine {
     const sd = this.bodySd();
     if (!sd) return null;
     const frac = Math.min(1, Math.max(0.01, (f.time + this.tfSeconds - nowSec) / this.tfSeconds));
-    const mu = sd * normInv(p.pFinal ?? 0.5); // expected body implied by the open call
+    // Lean for the rest of the candle: the open call, blended with Jev's latest live read if there is one.
+    const prior = p.jevLive === null ? (p.pFinal ?? 0.5) : sigmoid(0.5 * logit(p.pFinal ?? 0.5) + 0.5 * logit(p.jevLive));
+    const mu = sd * normInv(prior); // expected remaining drift implied by that lean
     const move = f.close - f.open;
     const left = sd * Math.sqrt(frac);
     const pGreen = normCdf((move + mu * frac) / left);
+    const pPath = normCdf(move / left);
     if (frac <= 0.5 && p.halfway === null) p.halfway = pGreen;
 
     const close = f.close + mu * frac;
@@ -457,6 +465,7 @@ export class Engine {
     const call = this.callFor(pGreen);
     return {
       pGreen,
+      pPath,
       call,
       move,
       timeLeftFrac: frac,
@@ -469,6 +478,53 @@ export class Engine {
         dir: call,
       },
     };
+  }
+
+  /**
+   * Small snapshot of the forming candle for a live Jev call: only fresh data, plus a short
+   * context line that is built once per candle. `since` is the price at the previous live call.
+   */
+  describeLive(f: Candle, nowSec: number, since: { price: number; high: number; low: number } | null): Record<string, unknown> | null {
+    const p = this.pending;
+    const atr = this.features.atr;
+    if (!p || !p.ghost || f.time !== p.ghost.time || !atr) return null;
+    const r = (v: number) => Number(v.toFixed(2));
+    if (!p.liveContext) {
+      const rc = this.recent;
+      const last3 = rc.slice(-3).map((c) => r((c.close - c.open) / atr));
+      const day = rc.filter((c) => c.time > f.time - 86400);
+      const hi = Math.max(...day.map((c) => c.high));
+      const lo = Math.min(...day.map((c) => c.low));
+      p.liveContext = {
+        last_3_candle_bodies_atr: last3,
+        high_24h_atr: r((hi - f.open) / atr),
+        low_24h_atr: r((lo - f.open) / atr),
+        round_10_above_atr: r((Math.ceil(f.open / 10) * 10 - f.open) / atr),
+        round_10_below_atr: r((Math.floor(f.open / 10) * 10 - f.open) / atr),
+      };
+    }
+    const left = Math.max(0, Math.round(f.time + this.tfSeconds - nowSec));
+    const rng = f.high - f.low;
+    return {
+      units: "ATR units, measured from this candle's open unless stated.",
+      forming_candle: {
+        seconds_left: left,
+        move_so_far: r((f.close - f.open) / atr),
+        high_so_far: r((f.high - f.open) / atr),
+        low_so_far: r((f.low - f.open) / atr),
+        close_position_in_range: rng > 0 ? r((f.close - f.low) / rng) : 0.5,
+      },
+      last_10_seconds: since
+        ? { move: r((f.close - since.price) / atr), made_new_high: f.high > since.high, made_new_low: f.low < since.low }
+        : "first look at this candle",
+      context: p.liveContext,
+    };
+  }
+
+  /** Fold Jev's live read of the forming candle into the live probability. */
+  applyJevLive(f: Candle, pGreen: number): void {
+    const p = this.pending;
+    if (p && p.ghost && f.time === p.ghost.time) p.jevLive = pGreen;
   }
 
   /** Fold Jev's answer into the pending prediction. pGreen is Jev's probability the next candle is green. */

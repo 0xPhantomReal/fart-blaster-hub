@@ -96,4 +96,21 @@ describe("gold engine", () => {
     expect(hits / calls).toBeGreaterThan(0.7);
     expect(e.summary().halfway.n).toBeGreaterThan(500);
   });
+
+  it("live Jev snapshot is small and only carries fresh data", () => {
+    const e = new Engine(900, 0.56, 300);
+    const cs = makeCandles(600, 0.5).map((c, i) => ({ ...c, time: 1_700_000_000 + i * 900 }));
+    for (const c of cs) e.close(c);
+    const t0 = cs[cs.length - 1].time + 900;
+    const f = { time: t0, open: 4000, high: 4001.5, low: 3999.8, close: 4001.2 };
+    const first = e.describeLive(f, t0 + 200, null)!;
+    const next = e.describeLive(f, t0 + 210, { price: 4000.9, high: 4001.5, low: 3999.8 })!;
+    expect(JSON.stringify(first).length).toBeLessThan(600); // vs ~4,300 for the full open snapshot
+    expect(next.last_10_seconds).toMatchObject({ made_new_high: false, made_new_low: false });
+    expect(next.context).toBe(first.context); // context built once per candle
+
+    const before = e.nowcast(f, t0 + 200)!.pGreen;
+    e.applyJevLive(f, 0.1);
+    expect(e.nowcast(f, t0 + 200)!.pGreen).toBeLessThan(before);
+  });
 });

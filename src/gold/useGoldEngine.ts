@@ -4,6 +4,8 @@ import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
 import { askJev, backendConfigured, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
+/** How often Jev re-reads the forming candle. Each check only calls Jev if something new happened. */
+export const JEV_LIVE_SECONDS = 10;
 
 export interface ClosedBar {
   candle: Candle;
@@ -25,6 +27,10 @@ export interface GoldState {
   error: string | null;
   jevError: string | null;
   jevPending: boolean;
+  /** Jev's latest read on the forming candle. */
+  jevLive: { pGreen: number; at: number } | null;
+  /** Jev usage this session: calls sent, and live checks skipped because nothing new happened. */
+  jevCalls: { open: number; live: number; skipped: number };
   /** Bumps on every closed candle so the chart knows to redraw markers. */
   version: number;
 }
@@ -54,6 +60,8 @@ export function useGoldEngine(): GoldState {
     error: null,
     jevError: null,
     jevPending: false,
+    jevLive: null,
+    jevCalls: { open: 0, live: 0, skipped: 0 },
     version: 0,
   });
   useEffect(() => {
@@ -64,6 +72,7 @@ export function useGoldEngine(): GoldState {
     let queue = Promise.resolve();
     let cancelled = false;
     let lastForming: Candle | null = null;
+    const calls = { open: 0, live: 0, skipped: 0 };
 
     const relive = () => {
       if (cancelled || !lastForming) return;
@@ -89,7 +98,7 @@ export function useGoldEngine(): GoldState {
       if (bars.length > MAX_BARS) bars.shift();
       setState((s) => ({ ...s, version: s.version + 1 }));
       lastForming = null;
-      publish({ forming: null, live: null, prediction: next, jevPending: false });
+      publish({ forming: null, live: null, prediction: next, jevPending: false, jevLive: null });
       await consultJev(next);
     };
 
@@ -99,9 +108,10 @@ export function useGoldEngine(): GoldState {
       if (!snapshot) return;
       publish({ jevPending: true });
       try {
-        const v = await withTimeout(askJev(snapshot), 20_000, "Jev took longer than 20s");
+        const v = await withTimeout(askJev(snapshot, { mode: "open" }), 20_000, "Jev took longer than 20s");
+        calls.open += 1;
         const p = engine.applyJev(v.probGreen, v.confidence);
-        publish({ prediction: p ?? fallback, jevError: null, jevPending: false });
+        publish({ prediction: p ?? fallback, jevError: null, jevPending: false, jevCalls: { ...calls } });
       } catch (e) {
         publish({ jevError: (e as Error).message, jevPending: false });
       }
@@ -147,9 +157,48 @@ export function useGoldEngine(): GoldState {
     // Time passing changes the odds too, so refresh the live read every second.
     const clock = window.setInterval(relive, 1000);
 
+    // Every JEV_LIVE_SECONDS, show Jev only what is new in the forming candle.
+    // Skipped (no TypeSafe call) when nothing changed, the outcome is already clear, or nobody is looking.
+    let lastSent: { candle: number; price: number; high: number; low: number } | null = null;
+    let liveBusy = false;
+    const skip = () => {
+      calls.skipped += 1;
+      if (!cancelled) setState((s) => ({ ...s, jevCalls: { ...calls } }));
+    };
+    const liveJev = async () => {
+      if (cancelled || liveBusy || !feed.jev || !engine.warm || document.hidden || !lastForming) return;
+      const f = lastForming;
+      const now = feed.now();
+      const nc = engine.nowcast(f, now);
+      if (!nc) return;
+      const atr = engine.features.atr ?? 0;
+      const since = lastSent && lastSent.candle === f.time ? lastSent : null;
+      const nothingNew =
+        since && Math.abs(f.close - since.price) < 0.05 * atr && f.high <= since.high && f.low >= since.low;
+      if (nc.timeLeftFrac < 0.05 || nc.pPath > 0.95 || nc.pPath < 0.05 || nothingNew) return skip();
+      const snap = engine.describeLive(f, now, since);
+      if (!snap) return;
+      liveBusy = true;
+      lastSent = { candle: f.time, price: f.close, high: f.high, low: f.low };
+      try {
+        const slotKey = `${f.time}:${Math.floor(now / JEV_LIVE_SECONDS)}`;
+        const v = await withTimeout(askJev(snap, { mode: "live", slotKey }), 9_000, "Jev live read took longer than 9s");
+        calls.live += 1;
+        engine.applyJevLive(f, v.probGreen);
+        if (!cancelled) setState((s) => ({ ...s, jevLive: { pGreen: v.probGreen, at: Date.now() }, jevCalls: { ...calls } }));
+        relive();
+      } catch (e) {
+        if (!cancelled) setState((s) => ({ ...s, jevError: (e as Error).message }));
+      } finally {
+        liveBusy = false;
+      }
+    };
+    const jevClock = window.setInterval(liveJev, JEV_LIVE_SECONDS * 1000);
+
     return () => {
       cancelled = true;
       window.clearInterval(clock);
+      window.clearInterval(jevClock);
       stop?.();
     };
   }, []);

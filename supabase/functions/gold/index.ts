@@ -2,7 +2,7 @@
 // Secrets: PYTH_API_KEY, TYPESAFE_API_KEY (optional: PYTH_SYMBOL, JEV_MODEL)
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
-// POST { action: "jev", snapshot, timeframeMin }   → { choice, probGreen, confidence }
+// POST { action: "jev", snapshot, timeframeMin, mode?: "open" | "live", slotKey? } → { choice, probGreen, confidence, usage }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
 //   (optional secrets: PYTH_HERMES_KEY if Hermes needs a different key, PYTH_GOLD_FEED_ID)
 
@@ -154,45 +154,66 @@ async function tickStream(): Promise<Response> {
 
 // ── Jev ────────────────────────────────────────────────────────────────
 
-async function jev(snapshot: Record<string, unknown>, timeframeMin: number) {
-  const key = JSON.stringify(snapshot);
-  const hit = cached<unknown>(jevCache, key, 10 * 60 * 1000);
-  if (hit) return hit;
+type JevMode = "open" | "live";
+const inflight = new Map<string, Promise<unknown>>();
 
-  const res = await fetch(TYPESAFE_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env("TYPESAFE_API_KEY")}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: env("JEV_MODEL") || "jev-latest",
-      state: {
-        instrument: `Gold (XAU/USD), ${timeframeMin}-minute candles`,
-        units: "Sizes and distances are in ATR (average true range) units. Signals are centred so 0 is neutral.",
-        ...snapshot,
-      },
-      questions: {
-        next_candle: {
-          type: "choice",
-          instructions:
-            "Will the very NEXT 15-minute candle close above or below its open? Focus on the last 1-3 candles: " +
-            "exhaustion after outsized candles, rejection wicks, closes near highs or lows, and nearby levels. " +
-            "Longer-term trend is background only.",
-          criteria: {
-            green: "Buyers keep control: momentum or trend continues, or price bounces off nearby support",
-            red: "Sellers take control: an outsized move gets faded, price rejects nearby resistance, or trend rolls over",
-          },
+const QUESTIONS: Record<JevMode, { instructions: string; green: string; red: string }> = {
+  // Asked once per candle, before it starts.
+  open: {
+    instructions:
+      "Will the very NEXT 15-minute candle close above or below its open? Focus on the last 1-3 candles: " +
+      "exhaustion after outsized candles, rejection wicks, closes near highs or lows, and nearby levels. " +
+      "Longer-term trend is background only.",
+    green: "Buyers keep control: momentum or trend continues, or price bounces off nearby support",
+    red: "Sellers take control: an outsized move gets faded, price rejects nearby resistance, or trend rolls over",
+  },
+  // Asked every ~10s while a candle is forming, with only the fresh data.
+  live: {
+    instructions:
+      "The 15-minute candle in forming_candle is still open. Will it CLOSE above or below its open price? " +
+      "Judge the move so far, what happened in the last 10 seconds, time left, and nearby levels.",
+    green: "It finishes above its open: buyers hold or regain control before the close",
+    red: "It finishes below its open: sellers hold or take control before the close",
+  },
+};
+
+async function jev(snapshot: Record<string, unknown>, timeframeMin: number, mode: JevMode, slotKey: string | null) {
+  // Live calls: one TypeSafe call per 10-second slot, shared by every viewer.
+  const key = mode === "live" && slotKey ? `live:${slotKey}` : `open:${JSON.stringify(snapshot)}`;
+  const hit = cached<unknown>(jevCache, key, mode === "live" ? 20_000 : 10 * 60 * 1000);
+  if (hit) return hit;
+  const pending = inflight.get(key);
+  if (pending) return pending;
+
+  const q = QUESTIONS[mode];
+  const call = (async () => {
+    const res = await fetch(TYPESAFE_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env("TYPESAFE_API_KEY")}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: env("JEV_MODEL") || "jev-latest",
+        state: { instrument: `Gold (XAU/USD), ${timeframeMin}-minute candles`, ...snapshot },
+        questions: {
+          next_candle: { type: "choice", instructions: q.instructions, criteria: { green: q.green, red: q.red } },
         },
-      },
-    }),
-  });
-  if (!res.ok) throw new Error(`TypeSafe ${res.status}: ${(await res.text()).slice(0, 160)}`);
-  const r = await res.json();
-  const a = r?.answers?.next_candle;
-  if (!a || (a.choice !== "green" && a.choice !== "red") || typeof a.confidence !== "number" || typeof a.probabilities?.green !== "number") {
-    throw new Error("unexpected TypeSafe response shape");
+      }),
+    });
+    if (!res.ok) throw new Error(`TypeSafe ${res.status}: ${(await res.text()).slice(0, 160)}`);
+    const r = await res.json();
+    const a = r?.answers?.next_candle;
+    if (!a || (a.choice !== "green" && a.choice !== "red") || typeof a.confidence !== "number" || typeof a.probabilities?.green !== "number") {
+      throw new Error("unexpected TypeSafe response shape");
+    }
+    const body = { choice: a.choice, probGreen: a.probabilities.green, confidence: a.confidence, usage: r.usage ?? null };
+    jevCache.set(key, { at: Date.now(), body });
+    return body;
+  })();
+  inflight.set(key, call);
+  try {
+    return await call;
+  } finally {
+    inflight.delete(key);
   }
-  const body = { choice: a.choice, probGreen: a.probabilities.green, confidence: a.confidence };
-  jevCache.set(key, { at: Date.now(), body });
-  return body;
 }
 
 // ── Handler ────────────────────────────────────────────────────────────
@@ -232,7 +253,9 @@ Deno.serve(async (req) => {
         return json({ error: "bad snapshot" }, 400);
       }
       if (typeof timeframeMin !== "number" || !RESOLUTIONS.has(timeframeMin)) return json({ error: "bad timeframe" }, 400);
-      return json(await jev(snapshot as Record<string, unknown>, timeframeMin));
+      const mode: JevMode = body.mode === "live" ? "live" : "open";
+      const slotKey = typeof body.slotKey === "string" && body.slotKey.length <= 64 ? body.slotKey : null;
+      return json(await jev(snapshot as Record<string, unknown>, timeframeMin, mode, slotKey));
     }
 
     return json({ error: "unknown action" }, 400);
