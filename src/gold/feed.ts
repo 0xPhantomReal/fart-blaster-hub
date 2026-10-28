@@ -225,6 +225,16 @@ export interface JevVerdict {
   usage?: unknown;
 }
 
+/** Which backend is deployed. Old versions don't know this action, which tells us live Jev isn't available yet. */
+export async function backendVersion(): Promise<{ version: number; features: string[] } | null> {
+  try {
+    return await callFn<{ version: number; features: string[] }>({ action: "version" });
+  } catch (e) {
+    if (/unknown action/i.test((e as Error).message)) return null;
+    throw e;
+  }
+}
+
 export async function askJev(
   snapshot: Record<string, unknown>,
   opts: { mode?: "open" | "live"; slotKey?: string } = {},

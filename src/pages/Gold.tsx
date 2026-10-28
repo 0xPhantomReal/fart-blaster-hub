@@ -105,7 +105,8 @@ export default function Gold() {
                   <div className="mt-1 text-xs tabular-nums text-[#8b949e]">
                     {g.jevLive
                       ? `Jev live: ${pct(g.jevLive.pGreen, 0)} green · ${Math.max(0, Math.round((Date.now() - g.jevLive.at) / 1000))}s ago`
-                      : "Jev live: waiting for fresh data"}
+                      : "Jev live: —"}
+                    {g.jevLiveStatus !== "reading" && <div className="text-[#d4a72c]">{g.jevLiveStatus}</div>}
                   </div>
                 )}
               </>

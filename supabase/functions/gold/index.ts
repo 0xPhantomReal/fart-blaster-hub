@@ -241,6 +241,11 @@ Deno.serve(async (req) => {
       return json(await history(Math.floor(from), Math.floor(to), resolution));
     }
 
+    if (body.action === "version") {
+      // Lets the page check which backend is deployed (older versions answer "unknown action").
+      return json({ version: 4, features: ["stream", "jev-live"], jev: !!env("TYPESAFE_API_KEY") });
+    }
+
     if (body.action === "stream") {
       if (!hermesKey()) return json({ error: "PYTH_API_KEY secret is not set" }, 503);
       return await tickStream();

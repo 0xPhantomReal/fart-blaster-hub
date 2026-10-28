@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
 import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
-import { askJev, backendConfigured, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
+import { askJev, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
 /** How often Jev re-reads the forming candle. Each check only calls Jev if something new happened. */
@@ -29,6 +29,8 @@ export interface GoldState {
   jevPending: boolean;
   /** Jev's latest read on the forming candle. */
   jevLive: { pGreen: number; at: number } | null;
+  /** Why Jev is or isn't reading the live candle right now, in plain words. */
+  jevLiveStatus: string;
   /** Jev usage this session: calls sent, and live checks skipped because nothing new happened. */
   jevCalls: { open: number; live: number; skipped: number };
   /** Bumps on every closed candle so the chart knows to redraw markers. */
@@ -61,6 +63,7 @@ export function useGoldEngine(): GoldState {
     jevError: null,
     jevPending: false,
     jevLive: null,
+    jevLiveStatus: "starting…",
     jevCalls: { open: 0, live: 0, skipped: 0 },
     version: 0,
   });
@@ -73,7 +76,7 @@ export function useGoldEngine(): GoldState {
     let cancelled = false;
     let lastForming: Candle | null = null;
     const calls = { open: 0, live: 0, skipped: 0 };
-    let liveSupported = false;
+    let liveSupported: boolean | null = null;
 
     const relive = () => {
       if (cancelled || !lastForming) return;
@@ -111,13 +114,9 @@ export function useGoldEngine(): GoldState {
       try {
         const v = await withTimeout(askJev(snapshot, { mode: "open" }), 20_000, "Jev took longer than 20s");
         calls.open += 1;
-        // The old backend would ask live snapshots the wrong question and can't share calls; hold off until it's redeployed.
-        liveSupported = "usage" in v;
-        if (!liveSupported && !cancelled) {
-          setState((s) => ({ ...s, jevError: "Live Jev reads are paused until Lovable deploys the gold edge function." }));
-        }
+
         const p = engine.applyJev(v.probGreen, v.confidence);
-        publish({ prediction: p ?? fallback, ...(liveSupported ? { jevError: null } : {}), jevPending: false, jevCalls: { ...calls } });
+        publish({ prediction: p ?? fallback, jevError: null, jevPending: false, jevCalls: { ...calls } });
       } catch (e) {
         publish({ jevError: (e as Error).message, jevPending: false });
       }
@@ -145,6 +144,18 @@ export function useGoldEngine(): GoldState {
       if (cancelled) return;
       publish({ status: "ready", prediction });
       setState((s) => ({ ...s, version: s.version + 1 }));
+      if (feed.name === "Pyth") {
+        backendVersion()
+          .then((v) => {
+            liveSupported = !!v && v.features.includes("jev-live");
+            void liveJev();
+          })
+          .catch(() => {
+            liveSupported = false;
+          });
+      } else {
+        liveSupported = false;
+      }
       // Don't make the first Jev answer wait for the next candle close.
       queue = queue.then(() => consultJev(prediction));
 
@@ -167,21 +178,32 @@ export function useGoldEngine(): GoldState {
     // Skipped (no TypeSafe call) when nothing changed, the outcome is already clear, or nobody is looking.
     let lastSent: { candle: number; price: number; high: number; low: number } | null = null;
     let liveBusy = false;
-    const skip = () => {
+    const status = (jevLiveStatus: string) => {
+      if (!cancelled) setState((s) => (s.jevLiveStatus === jevLiveStatus ? s : { ...s, jevLiveStatus }));
+    };
+    const skip = (why: string) => {
       calls.skipped += 1;
-      if (!cancelled) setState((s) => ({ ...s, jevCalls: { ...calls } }));
+      if (!cancelled) setState((s) => ({ ...s, jevCalls: { ...calls }, jevLiveStatus: why }));
     };
     const liveJev = async () => {
-      if (cancelled || liveBusy || !liveSupported || !feed.jev || !engine.warm || document.hidden || !lastForming) return;
+      if (cancelled || liveBusy) return;
+      if (!feed.jev) return status("off (no TypeSafe key on the backend)");
+      if (liveSupported === null) return status("checking the backend…");
+      if (!liveSupported) return status("paused: ask Lovable to “Deploy the gold edge function”");
+      if (!engine.warm) return status("model still learning");
+      if (document.hidden) return status("paused while the tab is hidden");
+      if (!lastForming) return status("waiting for the candle to start");
       const f = lastForming;
       const now = feed.now();
       const nc = engine.nowcast(f, now);
-      if (!nc) return;
+      if (!nc) return status("waiting for the candle to start");
       const atr = engine.features.atr ?? 0;
       const since = lastSent && lastSent.candle === f.time ? lastSent : null;
       const nothingNew =
         since && Math.abs(f.close - since.price) < 0.05 * atr && f.high <= since.high && f.low >= since.low;
-      if (nc.timeLeftFrac < 0.05 || nc.pPath > 0.95 || nc.pPath < 0.05 || nothingNew) return skip();
+      if (nc.timeLeftFrac < 0.05) return skip("skipped: candle is about to close");
+      if (nc.pPath > 0.95 || nc.pPath < 0.05) return skip("skipped: candle already decided by price");
+      if (nothingNew) return skip("skipped: no new price movement in the last 10s");
       const snap = engine.describeLive(f, now, since);
       if (!snap) return;
       liveBusy = true;
@@ -191,10 +213,11 @@ export function useGoldEngine(): GoldState {
         const v = await withTimeout(askJev(snap, { mode: "live", slotKey }), 9_000, "Jev live read took longer than 9s");
         calls.live += 1;
         engine.applyJevLive(f, v.probGreen);
-        if (!cancelled) setState((s) => ({ ...s, jevLive: { pGreen: v.probGreen, at: Date.now() }, jevCalls: { ...calls } }));
+        if (!cancelled)
+          setState((s) => ({ ...s, jevLive: { pGreen: v.probGreen, at: Date.now() }, jevCalls: { ...calls }, jevLiveStatus: "reading" }));
         relive();
       } catch (e) {
-        if (!cancelled) setState((s) => ({ ...s, jevError: (e as Error).message }));
+        if (!cancelled) setState((s) => ({ ...s, jevError: (e as Error).message, jevLiveStatus: `error: ${(e as Error).message}` }));
       } finally {
         liveBusy = false;
       }
