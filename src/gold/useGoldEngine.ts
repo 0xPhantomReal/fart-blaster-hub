@@ -73,6 +73,7 @@ export function useGoldEngine(): GoldState {
     let cancelled = false;
     let lastForming: Candle | null = null;
     const calls = { open: 0, live: 0, skipped: 0 };
+    let liveSupported = false;
 
     const relive = () => {
       if (cancelled || !lastForming) return;
@@ -110,8 +111,13 @@ export function useGoldEngine(): GoldState {
       try {
         const v = await withTimeout(askJev(snapshot, { mode: "open" }), 20_000, "Jev took longer than 20s");
         calls.open += 1;
+        // The old backend would ask live snapshots the wrong question and can't share calls; hold off until it's redeployed.
+        liveSupported = "usage" in v;
+        if (!liveSupported && !cancelled) {
+          setState((s) => ({ ...s, jevError: "Live Jev reads are paused until Lovable deploys the gold edge function." }));
+        }
         const p = engine.applyJev(v.probGreen, v.confidence);
-        publish({ prediction: p ?? fallback, jevError: null, jevPending: false, jevCalls: { ...calls } });
+        publish({ prediction: p ?? fallback, ...(liveSupported ? { jevError: null } : {}), jevPending: false, jevCalls: { ...calls } });
       } catch (e) {
         publish({ jevError: (e as Error).message, jevPending: false });
       }
@@ -166,7 +172,7 @@ export function useGoldEngine(): GoldState {
       if (!cancelled) setState((s) => ({ ...s, jevCalls: { ...calls } }));
     };
     const liveJev = async () => {
-      if (cancelled || liveBusy || !feed.jev || !engine.warm || document.hidden || !lastForming) return;
+      if (cancelled || liveBusy || !liveSupported || !feed.jev || !engine.warm || document.hidden || !lastForming) return;
       const f = lastForming;
       const now = feed.now();
       const nc = engine.nowcast(f, now);

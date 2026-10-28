@@ -221,6 +221,8 @@ export interface JevVerdict {
   choice: "green" | "red";
   probGreen: number;
   confidence: number;
+  /** Only the current backend returns this key; its absence means the old version is deployed. */
+  usage?: unknown;
 }
 
 export async function askJev(
