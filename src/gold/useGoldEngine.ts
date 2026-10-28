@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
 import { fitReversion, type ReversionFit } from "./reversion";
-import { buildScenarios, label, medoid, toCandles } from "./forecast";
-import { askJev, askTournament, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
+import { AnalogIndex, HORIZON, label } from "./forecast";
+import { backtestFan, buildFan, calibrateFan, FanTracker, jevWeights, type BandCalibration, type Fan, type FanScore } from "./fan";
+import { askJev, ratePaths, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
 export const MIN_EDGE = 0.56;
 /** How often Jev re-reads the forming candle. Each check only calls Jev if something new happened. */
@@ -17,16 +18,25 @@ export interface ClosedBar {
 export type Summary = ReturnType<Engine["summary"]>;
 
 export interface Forecast {
-  forTime: number; //          first forecast candle's time (the candle forming now)
-  candles: Candle[]; //        the 5 candles to draw
-  picked: "jev" | "typical"; // Jev's pick, or the most typical path when Jev isn't available
-  pJev: number | null; //      Jev's probability for the winner in its final round
-  finalists: number; //        how many paths were in Jev's final round
-  scenarios: number; //        how many paths were generated
-  pool: number; //             how many past candles the paths were drawn from
-  endsHigherPct: number; //    share of all paths that finish above the current price
-  updatedAt: number; //        ms timestamp
+  forTime: number; //      time of forecast candle 1 (the candle forming now)
+  startPrice: number; //   where the fan starts (candle 1's open)
+  atr: number; //          dollars per ATR unit, to turn the fan into prices
+  plain: Fan; //           from the analog paths alone
+  jev: Fan | null; //      the same paths, weighted by Jev's ratings
+  scenarios: number; //    how many paths
+  pool: number; //         how many past candles they were drawn from
+  updatedAt: number; //    ms timestamp
   note: string | null;
+}
+
+/** How the forecast fan has done: replayed on history at load, and live as forecasts play out. */
+export interface ForecastScores {
+  backtest: FanScore | null;
+  /** Band stretch learned from the replay, applied to live fans (null = not learned yet). */
+  calibration: BandCalibration | null;
+  backtestRunning: boolean;
+  livePlain: FanScore | null;
+  liveJev: FanScore | null;
 }
 
 export interface GoldState {
@@ -48,6 +58,7 @@ export interface GoldState {
   forecastOn: boolean;
   forecast: Forecast | null;
   forecastBusy: boolean;
+  forecastScores: ForecastScores;
   /** Intra-candle mean reversion measured from 1-minute history (null until measured). */
   reversion: ReversionFit | null;
   /** Why Jev is or isn't reading the live candle right now, in plain words. */
@@ -100,6 +111,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
     forecastOn: readForecastPref(),
     forecast: null,
     forecastBusy: false,
+    forecastScores: { backtest: null, calibration: null, backtestRunning: false, livePlain: null, liveJev: null },
     jevCalls: { open: 0, live: 0, skipped: 0 },
     version: 0,
   });
@@ -156,6 +168,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
       setState((s) => ({ ...s, version: s.version + 1 }));
       lastForming = null;
       publish({ forming: null, live: null, prediction: next, jevPending: false, jevLive: null });
+      scorePending();
       await consultJev(next);
       await runForecast();
     };
@@ -177,17 +190,64 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
     };
 
     /**
-     * Every minute: build up to 2,000 analog paths for the next 5 candles (following the candle forming now)
-     * and let Jev pick the most likely one in a tournament (batches of 250, then a final round).
+     * Every minute: up to 2,000 analog paths for the next 5 candles (following the candle forming now),
+     * summarized as a fan (middle line, 50% and 80% bands, per-candle green odds). Jev rates every path and
+     * those ratings re-weight the same fan. Both versions are scored as they play out.
      */
     let forecastKey = "";
     let forecastRunning = false;
     let pool: Candle[] = []; // ~a year of closed 15m candles: where the analogs come from
+    let index: AnalogIndex | null = null;
+    let indexKey = "";
     const analogPool = () => {
       const recent = bars.map((b) => b.candle);
       if (!pool.length || !recent.length) return recent;
       return [...pool.filter((c) => c.time < recent[0].time), ...recent];
     };
+    const getIndex = () => {
+      const key = `${pool.length}:${bars.length ? bars[bars.length - 1].candle.time : 0}`;
+      if (!index || key !== indexKey) {
+        index = new AnalogIndex(analogPool());
+        indexKey = key;
+      }
+      return index;
+    };
+
+    // Live scoring: the first forecast made for each candle is checked once its 5 candles have closed.
+    const pendingScores = new Map<number, { startPrice: number; atr: number; plain: Fan; jev: Fan | null }>();
+    const livePlain = new FanTracker();
+    const liveJevTracker = new FanTracker();
+    const scorePending = () => {
+      for (const [forTime, f] of pendingScores) {
+        const end = forTime + (HORIZON - 1) * TF_SECONDS;
+        const i0 = bars.findIndex((b) => b.candle.time === forTime);
+        if (!bars.length || bars[bars.length - 1].candle.time < end) continue;
+        pendingScores.delete(forTime);
+        if (i0 < 0 || i0 + HORIZON > bars.length) continue;
+        const actual = bars.slice(i0, i0 + HORIZON).map((b) => (b.candle.close - f.startPrice) / f.atr);
+        livePlain.record(f.plain, actual);
+        if (f.jev) liveJevTracker.record(f.jev, actual);
+      }
+      if (!cancelled)
+        setState((s) => ({
+          ...s,
+          forecastScores: { ...s.forecastScores, livePlain: livePlain.summary(), liveJev: liveJevTracker.summary() },
+        }));
+    };
+
+    let backtestDone = false;
+    let bandCalibration: BandCalibration | null = null;
+    const cal = (fan: Fan) => (bandCalibration ? calibrateFan(fan, bandCalibration) : fan);
+    const runBacktest = async () => {
+      if (backtestDone || cancelled || !forecastWanted.current) return;
+      backtestDone = true;
+      setState((s) => ({ ...s, forecastScores: { ...s.forecastScores, backtestRunning: true } }));
+      const { score, calibration } = await backtestFan(getIndex(), { windows: 200, spacing: 4, paths: FORECAST_PATHS });
+      bandCalibration = calibration;
+      if (!cancelled)
+        setState((s) => ({ ...s, forecastScores: { ...s.forecastScores, backtest: score, calibration, backtestRunning: false } }));
+    };
+
     const runForecast = async (force = false) => {
       if (cancelled || forecastRunning || !forecastWanted.current || bars.length < 100) return;
       if (document.hidden && !force) return;
@@ -209,54 +269,52 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
               elapsed: Math.min(1, Math.max(0, (now - f.time) / TF_SECONDS)),
             }
           : null;
-      const history = analogPool();
-      const set = buildScenarios(history, FORECAST_PATHS, formingNow);
+      const idx = getIndex();
+      const set = idx.scenarios(idx.history.length - 1, FORECAST_PATHS, formingNow);
       if (!set) return;
-      const startPrice = f ? f.open : last.close;
-      const draw = (id: string) => toCandles(set.scenarios.find((x) => x.id === id)!, start, startPrice, set.atr, TF_SECONDS);
-      const typical = medoid(set);
-      const base = {
+      const plain = cal(buildFan(set));
+      const base: Forecast = {
         forTime: start,
+        startPrice: f ? f.open : last.close,
+        atr: set.atr,
+        plain,
+        jev: null,
         scenarios: set.scenarios.length,
-        pool: history.length,
-        endsHigherPct: set.endsHigherPct,
+        pool: idx.history.length,
         updatedAt: Date.now(),
+        note: null,
       };
-      const fallback = (note: string): Forecast => ({
-        ...base,
-        candles: draw(typical.id),
-        picked: "typical",
-        pJev: null,
-        finalists: 0,
-        note,
-      });
+      const remember = (fc: Forecast) => {
+        if (!pendingScores.has(start)) pendingScores.set(start, { startPrice: fc.startPrice, atr: fc.atr, plain: fc.plain, jev: fc.jev });
+      };
+      void runBacktest();
 
       const snapshot = engine.describeForForecast(f, now);
       if (!feed.jev || !forecastSupported || !snapshot) {
-        const why = !feed.jev
-          ? "Jev is off, so this is the most typical of the paths."
+        const note = !feed.jev
+          ? "Jev is off: range from the analog paths only."
           : !forecastSupported
-            ? "Jev's pick needs the new backend (ask Lovable to “Deploy the gold edge function”). Showing the most typical path."
-            : "Showing the most typical path.";
-        if (!cancelled) setState((s) => ({ ...s, forecast: fallback(why) }));
+            ? "Jev's weighting needs the new backend (ask Lovable to “Deploy the gold edge function”). Range from the analog paths only."
+            : null;
+        const fc = { ...base, note };
+        remember(fc);
+        if (!cancelled) setState((s) => ({ ...s, forecast: fc }));
         return;
       }
       forecastRunning = true;
-      setState((s) => ({ ...s, forecastBusy: true }));
+      // Show the analog fan right away; Jev's weighting follows.
+      if (!cancelled) setState((s) => ({ ...s, forecast: s.forecast && s.forecast.forTime === start ? { ...base, jev: s.forecast.jev } : base, forecastBusy: true }));
       try {
         const options = Object.fromEntries(set.scenarios.map((x) => [x.id, label(x)]));
-        const v = await withTimeout(askTournament(snapshot, options, key), 50_000, "Jev forecast took longer than 50s");
+        const v = await withTimeout(ratePaths(snapshot, options, key), 50_000, "Jev took longer than 50s");
         calls.open += v.calls;
-        const winner = set.scenarios.some((x) => x.id === v.winner) ? v.winner : typical.id;
-        const fc: Forecast = { ...base, candles: draw(winner), picked: "jev", pJev: v.pFinal, finalists: v.finalists, note: null };
+        const fc: Forecast = { ...base, jev: cal(buildFan(set, jevWeights(set, v.ratings, v.batch))) };
+        remember(fc);
         if (!cancelled) setState((s) => ({ ...s, forecast: fc, forecastBusy: false, jevCalls: { ...calls } }));
       } catch (e) {
-        if (!cancelled)
-          setState((s) => ({
-            ...s,
-            forecast: fallback(`Jev forecast failed (${(e as Error).message}). Showing the most typical path.`),
-            forecastBusy: false,
-          }));
+        const fc = { ...base, note: `Jev's weighting failed (${(e as Error).message}). Range from the analog paths only.` };
+        remember(fc);
+        if (!cancelled) setState((s) => ({ ...s, forecast: fc, forecastBusy: false }));
       } finally {
         forecastRunning = false;
       }
@@ -308,6 +366,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
           const p = await feed.deepHistory(365);
           if (p.length > pool.length && !cancelled) {
             pool = p;
+            backtestDone = false;
             void runForecast(true);
           }
         } catch {
@@ -321,7 +380,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
         backendVersion()
           .then((v) => {
             liveSupported = !!v && v.features.includes("jev-live");
-            forecastSupported = !!v && v.features.includes("forecast-tournament");
+            forecastSupported = !!v && v.features.includes("forecast-ratings");
             void liveJev();
             void runForecast();
           })

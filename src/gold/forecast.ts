@@ -3,7 +3,7 @@
 // We describe the market right now (shape of the last 3 candles, the recent move, where price sits in its
 // recent range, time of day), find the N past moments that looked most similar, and take the candles that
 // actually came next after each one. Every scenario is something gold really did, rescaled to today's
-// volatility (ATR) and anchored at the current price. Jev then picks the most likely one.
+// volatility (ATR) and anchored at the current price. fan.ts turns them into a forecast range.
 
 import type { Candle } from "./indicators";
 
@@ -78,68 +78,84 @@ export interface FormingNow {
 }
 
 /**
- * The `n` past moments most like now, and the 5 candles that followed each. History must be closed
- * candles, oldest first. With `forming`, paths whose first candle disagrees with what the current candle
- * has already done are pushed down the list, more strongly the further into the candle we are.
+ * Analog search over a fixed history. Signatures are computed once, so asking "what came next after
+ * moments like candle t?" is cheap enough to replay hundreds of past moments for scoring.
  */
+export class AnalogIndex {
+  readonly atrs: (number | null)[];
+  private sigs: (number[] | null)[];
+  private scale: number[];
+  private firstBody: number[]; // first next-candle body for each index, ATR units (for the forming-candle match)
+  private firstSd: number;
+
+  constructor(readonly history: Candle[]) {
+    this.atrs = wilderAtr(history);
+    this.sigs = history.map((_, i) => {
+      const a = this.atrs[i];
+      return i >= 20 && a && a > 0 ? signature(history, i, a) : null;
+    });
+    const valid = this.sigs.filter((x): x is number[] => !!x);
+    const dim = valid[0]?.length ?? 0;
+    const mean = new Array(dim).fill(0);
+    const sd = new Array(dim).fill(0);
+    for (const v of valid) v.forEach((x, k) => (mean[k] += x / valid.length));
+    for (const v of valid) v.forEach((x, k) => (sd[k] += (x - mean[k]) ** 2 / valid.length));
+    this.scale = sd.map((v) => Math.sqrt(v) || 1);
+    this.firstBody = history.map((_, i) => {
+      const a = this.atrs[i];
+      const f = history[i + 1];
+      return a && f ? (f.close - f.open) / a : 0;
+    });
+    const fb = this.firstBody.filter((_, i) => this.sigs[i]);
+    const m = fb.reduce((x, v) => x + v, 0) / Math.max(1, fb.length);
+    this.firstSd = Math.sqrt(fb.reduce((x, v) => x + (v - m) ** 2, 0) / Math.max(1, fb.length)) || 1;
+  }
+
+  /**
+   * The `n` past moments most like candle `t` (using only moments whose next 5 candles had finished by t),
+   * and the 5 candles that followed each. With `forming`, paths whose first candle disagrees with what the
+   * current candle has already done are pushed down the list, more strongly the further into the candle we are.
+   */
+  scenarios(t: number, n = 200, forming: FormingNow | null = null): ScenarioSet | null {
+    const h = this.history;
+    const atrNow = this.atrs[t];
+    const now = this.sigs[t];
+    if (!atrNow || !now || t < 60) return null;
+    const cands: { i: number; d: number }[] = [];
+    for (let i = 20; i + HORIZON <= t; i++) {
+      const sig = this.sigs[i];
+      if (!sig) continue;
+      let d2 = 0;
+      for (let k = 0; k < sig.length; k++) d2 += ((sig[k] - now[k]) / this.scale[k]) ** 2;
+      if (forming && forming.elapsed > 0) {
+        const a = this.atrs[i]!;
+        const f = h[i + 1];
+        const hi = (f.high - f.open) / a;
+        const lo = (f.low - f.open) / a;
+        const miss = (this.firstBody[i] - forming.move) ** 2 + Math.max(0, forming.high - hi) ** 2 + Math.max(0, lo - forming.low) ** 2;
+        d2 += 3 * forming.elapsed * (miss / this.firstSd ** 2);
+      }
+      cands.push({ i, d: Math.sqrt(d2) });
+    }
+    // Never use more than a third of history: beyond that the "analogs" stop resembling now.
+    n = Math.min(n, Math.floor(cands.length / 3));
+    if (n < 20) return null;
+    cands.sort((a, b) => a.d - b.d);
+    const scenarios: Scenario[] = cands.slice(0, n).map((c, k) => ({
+      id: `s${k + 1}`,
+      from: h[c.i].time,
+      distance: c.d,
+      // Each future candle in the ATR of its own time, so it rescales cleanly to today.
+      candles: h.slice(c.i + 1, c.i + 1 + HORIZON).map((f) => describe(f, this.atrs[c.i]!)),
+    }));
+    const endsHigher = scenarios.filter((s) => s.candles.reduce((a, c) => a + c.body, 0) > 0).length;
+    return { scenarios, atr: atrNow, endsHigherPct: endsHigher / scenarios.length };
+  }
+}
+
+/** One-off version: analogs for the latest candle in `history`. */
 export function buildScenarios(history: Candle[], n = 200, forming: FormingNow | null = null): ScenarioSet | null {
-  const atrs = wilderAtr(history);
-  const last = history.length - 1;
-  const atrNow = atrs[last];
-  if (!atrNow || last < 60) return null;
-  const now = signature(history, last, atrNow);
-
-  const cands: { i: number; sig: number[] }[] = [];
-  for (let i = 20; i + HORIZON <= last; i++) {
-    const a = atrs[i];
-    if (a && a > 0) cands.push({ i, sig: signature(history, i, a) });
-  }
-  // Never use more than a third of history: beyond that the "analogs" stop resembling now.
-  n = Math.min(n, Math.floor(cands.length / 3));
-  if (n < 20) return null;
-
-  // Standardize each feature so no single one dominates the distance.
-  const dim = now.length;
-  const mean = new Array(dim).fill(0);
-  const sd = new Array(dim).fill(0);
-  for (const c of cands) c.sig.forEach((v, k) => (mean[k] += v / cands.length));
-  for (const c of cands) c.sig.forEach((v, k) => (sd[k] += (v - mean[k]) ** 2 / cands.length));
-  const scale = sd.map((v) => Math.sqrt(v) || 1);
-  const dist2 = (s: number[]) => s.reduce((a, v, k) => a + ((v - now[k]) / scale[k]) ** 2, 0);
-
-  // How well each analog's first candle matches the candle forming now.
-  let firstSd = 1;
-  if (forming) {
-    const bodies = cands.map((c) => (history[c.i + 1].close - history[c.i + 1].open) / atrs[c.i]!);
-    const m = bodies.reduce((a, v) => a + v, 0) / bodies.length;
-    firstSd = Math.sqrt(bodies.reduce((a, v) => a + (v - m) ** 2, 0) / bodies.length) || 1;
-  }
-  const formingPenalty = (i: number) => {
-    if (!forming || forming.elapsed <= 0) return 0;
-    const a = atrs[i]!;
-    const f = history[i + 1];
-    // Where the analog's first candle stood relative to its open (its final shape; we only have 15m data).
-    const body = (f.close - f.open) / a;
-    const hi = (f.high - f.open) / a;
-    const lo = (f.low - f.open) / a;
-    const miss = (body - forming.move) ** 2 + Math.max(0, forming.high - hi) ** 2 + Math.max(0, lo - forming.low) ** 2;
-    return 3 * forming.elapsed * (miss / firstSd ** 2);
-  };
-
-  const nearest = cands
-    .map((c) => ({ ...c, d: Math.sqrt(dist2(c.sig) + formingPenalty(c.i)) }))
-    .sort((a, b) => a.d - b.d)
-    .slice(0, n);
-
-  const scenarios: Scenario[] = nearest.map((c, k) => ({
-    id: `s${k + 1}`,
-    from: history[c.i].time,
-    distance: c.d,
-    // Express each future candle in the ATR of its own time, so it rescales cleanly to today.
-    candles: history.slice(c.i + 1, c.i + 1 + HORIZON).map((f) => describe(f, atrs[c.i]!)),
-  }));
-  const endsHigher = scenarios.filter((s) => s.candles.reduce((a, c) => a + c.body, 0) > 0).length;
-  return { scenarios, atr: atrNow, endsHigherPct: endsHigher / scenarios.length };
+  return new AnalogIndex(history).scenarios(history.length - 1, n, forming);
 }
 
 const num = (v: number) => {

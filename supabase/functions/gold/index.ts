@@ -3,7 +3,7 @@
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "jev", snapshot, timeframeMin, mode?: "open" | "live", slotKey? } → { choice, probGreen, confidence, usage }
-// POST { action: "forecast", snapshot, timeframeMin, options: { s1…s2000 }, slotKey } → Jev tournament winner
+// POST { action: "forecast", snapshot, timeframeMin, options: { s1…s2000 }, slotKey } → { ratings, batch, calls, tokens }
 // POST { action: "jev", mode: "forecast", snapshot, timeframeMin, options: { s1: "...", … }, slotKey } → { choice, probabilities, confidence, usage }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
 //   (optional secrets: PYTH_HERMES_KEY if Hermes needs a different key, PYTH_GOLD_FEED_ID)
@@ -244,12 +244,11 @@ async function jev(
   }
 }
 
-// ── Forecast tournament: up to 2,000 paths ─────────────────────────────
-// Jev takes at most 255 options per choice question and ~32k tokens per request, so the paths are split
-// into batches of 250 asked in parallel; each batch's top picks go to a final round, and Jev picks the winner.
+// ── Forecast ratings: up to 2,000 paths ────────────────────────────────
+// Jev takes at most 255 options per choice question and ~32k tokens per request, so the paths are split into
+// batches of 250 asked in parallel. Jev's probabilities within each batch become weights on the forecast fan.
 
 const SHARD = 250;
-const FINALISTS_PER_SHARD = 6;
 
 type ChoiceAnswer = { choice: string; probabilities: Record<string, number>; confidence: number };
 
@@ -270,59 +269,21 @@ async function askChoice(state: Record<string, unknown>, instructions: string, c
   return { answer: a, tokens: Number(r?.usage?.input_tokens ?? 0) };
 }
 
-const PATHS_HOW_TO_READ =
+const PATHS_QUESTION =
   "Each option is a possible path for the next 5 fifteen-minute candles of gold (candle 1 is the one forming now), " +
   "taken from moments in gold's own history that looked like now. Per candle: G/R = green/red, signed body, " +
-  "^ upper wick, v lower wick, all in ATR units. Options are listed most-similar-to-now first.";
+  "^ upper wick, v lower wick, all in ATR units. Options are listed most-similar-to-now first. " +
+  "How likely is each path, given the market state?";
 
-async function forecastTournament(snapshot: Record<string, unknown>, timeframeMin: number, options: Record<string, string>) {
+async function rateForecastPaths(snapshot: Record<string, unknown>, timeframeMin: number, options: Record<string, string>) {
   const state = { instrument: `Gold (XAU/USD), ${timeframeMin}-minute candles`, ...snapshot };
   const entries = Object.entries(options);
   const shards: Record<string, string>[] = [];
   for (let i = 0; i < entries.length; i += SHARD) shards.push(Object.fromEntries(entries.slice(i, i + SHARD)));
-
-  const round1 = await Promise.all(
-    shards.map((criteria) =>
-      askChoice(state, `${PATHS_HOW_TO_READ} Which path is the most likely to happen?`, criteria),
-    ),
-  );
-  let tokens = round1.reduce((a, r) => a + r.tokens, 0);
-  const shardP: Record<string, number> = {};
-  const finalists: Record<string, string> = {};
-  for (const { answer } of round1) {
-    const top = Object.entries(answer.probabilities).sort((a, b) => b[1] - a[1]).slice(0, FINALISTS_PER_SHARD);
-    for (const [id, p] of top) {
-      if (options[id]) {
-        finalists[id] = options[id];
-        shardP[id] = p;
-      }
-    }
-  }
-
-  let final: ChoiceAnswer;
-  if (shards.length === 1) {
-    final = round1[0].answer;
-  } else {
-    const r = await askChoice(
-      state,
-      `${PATHS_HOW_TO_READ} These finalists were the strongest picks from ${entries.length} paths. Which is the most likely to happen?`,
-      finalists,
-    );
-    tokens += r.tokens;
-    final = r.answer;
-  }
-  const ranked = Object.entries(final.probabilities)
-    .filter(([id]) => options[id])
-    .sort((a, b) => b[1] - a[1]);
-  return {
-    winner: ranked[0]?.[0] ?? final.choice,
-    pFinal: ranked[0]?.[1] ?? null,
-    top: ranked.slice(0, 5).map(([id, p]) => ({ id, p })),
-    finalists: shards.length === 1 ? entries.length : Object.keys(finalists).length,
-    paths: entries.length,
-    calls: round1.length + (shards.length === 1 ? 0 : 1),
-    tokens,
-  };
+  const results = await Promise.all(shards.map((criteria) => askChoice(state, PATHS_QUESTION, criteria)));
+  const ratings: Record<string, number> = {};
+  for (const { answer } of results) for (const [id, p] of Object.entries(answer.probabilities)) if (options[id]) ratings[id] = p;
+  return { ratings, batch: SHARD, calls: results.length, tokens: results.reduce((a, r) => a + r.tokens, 0) };
 }
 
 // ── Handler ────────────────────────────────────────────────────────────
@@ -352,7 +313,7 @@ Deno.serve(async (req) => {
 
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
-      return json({ version: 6, features: ["stream", "jev-live", "jev-forecast", "forecast-tournament"], jev: !!env("TYPESAFE_API_KEY") });
+      return json({ version: 7, features: ["stream", "jev-live", "jev-forecast", "forecast-ratings"], jev: !!env("TYPESAFE_API_KEY") });
     }
 
     if (body.action === "stream") {
@@ -376,12 +337,12 @@ Deno.serve(async (req) => {
       if (typeof slotKey !== "string" || slotKey.length > 64) return json({ error: "bad slotKey" }, 400);
 
       // One tournament per minute, shared by every viewer.
-      const key = `tournament:${slotKey}`;
+      const key = `ratings:${slotKey}`;
       const hit = cached<unknown>(jevCache, key, 90_000);
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        run = forecastTournament(snapshot as Record<string, unknown>, timeframeMin, options as Record<string, string>).then((r) => {
+        run = rateForecastPaths(snapshot as Record<string, unknown>, timeframeMin, options as Record<string, string>).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });

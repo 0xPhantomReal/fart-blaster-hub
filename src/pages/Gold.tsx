@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { GoldChart } from "@/gold/GoldChart";
+import { GoldChart, type FanLines } from "@/gold/GoldChart";
+import type { BandCalibration, FanScore } from "@/gold/fan";
 import { TIMEFRAME_MIN } from "@/gold/feed";
 import type { TrackSummary } from "@/gold/model";
 import { useGoldEngine } from "@/gold/useGoldEngine";
@@ -23,6 +24,66 @@ function RecordRow({ name, t }: { name: string; t: TrackSummary }) {
 const Label = ({ children }: { children: React.ReactNode }) => (
   <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[#8b949e]">{children}</h2>
 );
+
+function ScoreRow({ name, sc }: { name: string; sc: FanScore | null }) {
+  if (!sc) return null;
+  const good = (v: number) => (v > 0.005 ? "text-[#26a69a]" : v < -0.005 ? "text-[#ef5350]" : "");
+  const near = (v: number, aim: number) => (Math.abs(v - aim) <= 0.07 ? "text-[#26a69a]" : "text-[#d4a72c]");
+  return (
+    <tr className="border-t border-[#262c36]">
+      <td className="py-1 text-left">
+        {name}
+        <span className="text-xs text-[#8b949e]"> · {sc.windows}</span>
+      </td>
+      <td className={`py-1 text-right ${near(sc.in80, 0.8)}`}>{pct(sc.in80, 0)}</td>
+      <td className={`py-1 text-right ${near(sc.in50, 0.5)}`}>{pct(sc.in50, 0)}</td>
+      <td className={`py-1 text-right ${good(sc.centerSkill)}`}>
+        {sc.centerSkill >= 0 ? "+" : ""}
+        {(sc.centerSkill * 100).toFixed(1)}%
+      </td>
+    </tr>
+  );
+}
+
+function ForecastScoreboard(props: {
+  backtest: FanScore | null;
+  calibration: BandCalibration | null;
+  running: boolean;
+  livePlain: FanScore | null;
+  liveJev: FanScore | null;
+}) {
+  const any = props.backtest || props.livePlain || props.liveJev;
+  return (
+    <div className="mt-3">
+      <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[#8b949e]">How accurate is it?</div>
+      {any ? (
+        <table className="w-full text-sm tabular-nums">
+          <thead>
+            <tr className="text-xs text-[#8b949e]">
+              <th className="pb-1 text-left font-medium"></th>
+              <th className="pb-1 text-right font-medium">In 80%</th>
+              <th className="pb-1 text-right font-medium">In 50%</th>
+              <th className="pb-1 text-right font-medium">vs no move</th>
+            </tr>
+          </thead>
+          <tbody>
+            <ScoreRow name="Replay" sc={props.backtest} />
+            <ScoreRow name="Live" sc={props.livePlain} />
+            <ScoreRow name="Live + Jev" sc={props.liveJev} />
+          </tbody>
+        </table>
+      ) : (
+        <p className="text-sm text-[#8b949e]">{props.running ? "Replaying past forecasts…" : "No scores yet."}</p>
+      )}
+      <p className="mt-1 text-xs text-[#8b949e]">
+        Good = the 80% band holds ~80% of real prices, the 50% band ~50%, and the middle line beats assuming no move (above
+        0). Replay = the same method run on past moments using only data before each one; its misses set how much the live
+        bands are stretched
+        {props.calibration ? ` (80% band ×${props.calibration.k80.toFixed(2)}, 50% band ×${props.calibration.k50.toFixed(2)}).` : "."} Live scores fill in as forecasts play out; the small number is how many 5-candle windows were scored.
+      </p>
+    </div>
+  );
+}
 
 export default function Gold() {
   const g = useGoldEngine();
@@ -51,6 +112,24 @@ export default function Gold() {
   const secsLeft = nc ? Math.round(nc.timeLeftFrac * TIMEFRAME_MIN * 60) : 0;
   const clock = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")}`;
   const fc = g.forecastOn ? g.forecast : null;
+  const fcFan = fc ? (fc.jev ?? fc.plain) : null;
+  const tf = TIMEFRAME_MIN * 60;
+  const toPrice = (v: number) => (fc ? fc.startPrice + v * fc.atr : 0);
+  const fanLines: FanLines | null =
+    fc && fcFan
+      ? {
+          anchor: { time: fc.forTime - tf, price: fc.startPrice },
+          points: fcFan.steps.map((st, k) => ({
+            time: fc.forTime + k * tf,
+            p10: toPrice(st.p10),
+            p25: toPrice(st.p25),
+            p50: toPrice(st.p50),
+            p75: toPrice(st.p75),
+            p90: toPrice(st.p90),
+          })),
+        }
+      : null;
+  const fs = g.forecastScores;
   // With the forecast on, its first candle replaces the single ghost.
   const ghost = fc ? null : (nc?.ghost ?? p?.ghost ?? null);
   const ghostInfo = nc?.ghost ?? p?.ghost ?? null;
@@ -90,7 +169,7 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[58vh_auto] md:grid-cols-[1fr_300px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} forecast={fc?.candles ?? null} version={g.version} />
+          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} fan={fanLines} version={g.version} />
           {g.status === "loading" && (
             <div className="absolute inset-0 grid place-items-center text-sm text-[#8b949e]">Training on history…</div>
           )}
@@ -133,40 +212,46 @@ export default function Gold() {
           {g.forecastOn && (
             <section>
               <Label>Forecast · next 5 candles</Label>
-              {!fc ? (
-                <p className="text-sm text-[#8b949e]">{g.forecastBusy ? "Jev is weighing the paths…" : "building paths…"}</p>
+              {!fc || !fcFan ? (
+                <p className="text-sm text-[#8b949e]">building the range…</p>
               ) : (
                 <>
                   <p className="mb-2 text-xs text-[#8b949e]">
-                    {fc.picked === "jev"
-                      ? `Jev's pick from ${fc.scenarios.toLocaleString()} real gold paths: ${pct(fc.pJev, 1)} in the final round of ${fc.finalists} (an even split would be ${pct(1 / Math.max(1, fc.finalists), 1)}).`
-                      : `Most typical of ${fc.scenarios.toLocaleString()} real gold paths.`}{" "}
-                    {pct(fc.endsHigherPct, 0)} of all paths end higher. Drawn from {fc.pool.toLocaleString()} past candles · updated{" "}
-                    {Math.max(0, Math.round((Date.now() - fc.updatedAt) / 1000))}s ago
-                    {g.forecastBusy ? " · rerunning…" : ""}.
+                    Range from {fc.scenarios.toLocaleString()} real gold paths
+                    {fc.jev ? ", weighted by Jev" : ""}. Gold line = middle, dashed = 50% band, dotted = 80% band.{" "}
+                    <span className="text-[#e6e8eb]">{pct(fcFan.endsHigher, 0)}</span> chance it ends higher. Updated{" "}
+                    {Math.max(0, Math.round((Date.now() - fc.updatedAt) / 1000))}s ago{g.forecastBusy ? " · Jev re-weighting…" : ""}.
                   </p>
-                  <ol className="grid gap-1 tabular-nums">
-                    {fc.candles.map((c, i) => {
-                      const d = c.close - c.open;
-                      return (
-                        <li key={c.time} className="flex justify-between gap-2 text-sm">
-                          <span className="text-[#8b949e]">
-                            {i + 1}. {new Date(c.time * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                          </span>
-                          <span className={d >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}>
-                            {d >= 0 ? "▲ +" : "▼ "}
-                            {d.toFixed(2)}
-                          </span>
-                          <span className="text-[#8b949e]">
-                            {c.low.toFixed(1)}–{c.high.toFixed(1)}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ol>
+                  <table className="w-full text-sm tabular-nums">
+                    <thead>
+                      <tr className="text-xs text-[#8b949e]">
+                        <th className="pb-1 text-left font-medium">Close at</th>
+                        <th className="pb-1 text-right font-medium">Green</th>
+                        <th className="pb-1 text-right font-medium">Middle</th>
+                        <th className="pb-1 text-right font-medium">80% range</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fcFan.steps.map((st, k) => (
+                        <tr key={k} className="border-t border-[#262c36]">
+                          <td className="py-1 text-left text-[#8b949e]">
+                            {new Date((fc.forTime + (k + 1) * tf) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                          </td>
+                          <td className={`py-1 text-right ${st.pGreen >= 0.55 ? "text-[#26a69a]" : st.pGreen <= 0.45 ? "text-[#ef5350]" : ""}`}>
+                            {pct(st.pGreen, 0)}
+                          </td>
+                          <td className="py-1 text-right">{toPrice(st.p50).toFixed(1)}</td>
+                          <td className="py-1 text-right text-[#8b949e]">
+                            {toPrice(st.p10).toFixed(0)}–{toPrice(st.p90).toFixed(0)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                   {fc.note && <p className="mt-2 text-xs text-[#d4a72c]">{fc.note}</p>}
                 </>
               )}
+              <ForecastScoreboard backtest={fs.backtest} calibration={fs.calibration} running={fs.backtestRunning} livePlain={fs.livePlain} liveJev={fs.liveJev} />
             </section>
           )}
 

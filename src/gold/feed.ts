@@ -268,23 +268,20 @@ export async function askForecast(
   return callFn<ForecastVerdict>({ action: "jev", mode: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
 }
 
-export interface TournamentResult {
-  winner: string;
-  pFinal: number | null; // Jev's probability for the winner in the final round
-  top: { id: string; p: number }[];
-  finalists: number;
-  paths: number;
+export interface PathRatings {
+  ratings: Record<string, number>; // Jev's probability for each path within its batch
+  batch: number; //                   batch size used (probabilities sum to 1 within each batch)
   calls: number;
   tokens: number;
 }
 
-/** Up to 2,000 paths: Jev picks in batches of 250, then a final round. One run per minute, shared by all viewers. */
-export async function askTournament(
+/** Jev rates up to 2,000 forecast paths (batches of 250 in parallel). One run per minute, shared by all viewers. */
+export async function ratePaths(
   snapshot: Record<string, unknown>,
   options: Record<string, string>,
   slotKey: string,
-): Promise<TournamentResult> {
-  return callFn<TournamentResult>({ action: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
+): Promise<PathRatings> {
+  return callFn<PathRatings>({ action: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
 }
 
 /** Which backend is deployed. Old versions don't know this action, which tells us live Jev isn't available yet. */

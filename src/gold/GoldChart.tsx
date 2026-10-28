@@ -4,6 +4,8 @@ import {
   createChart,
   createSeriesMarkers,
   CrosshairMode,
+  LineSeries,
+  LineStyle,
   TickMarkType,
   type IChartApi,
   type ISeriesApi,
@@ -15,6 +17,13 @@ import {
 import type { Candle } from "./indicators";
 import type { Ghost } from "./model";
 import type { ClosedBar } from "./useGoldEngine";
+
+/** Forecast range to draw: one point per future candle close, starting from the anchor price. */
+export interface FanLines {
+  anchor: { time: number; price: number };
+  points: { time: number; p10: number; p25: number; p50: number; p75: number; p90: number }[];
+}
+type Band = "p10" | "p25" | "p50" | "p75" | "p90";
 
 const COLORS = { bg: "#0e1116", line: "#262c36", muted: "#8b949e", green: "#26a69a", red: "#ef5350", miss: "#6b7280" };
 
@@ -39,16 +48,16 @@ interface Props {
   bars: ClosedBar[];
   forming: Candle | null;
   ghost: Ghost | null;
-  forecast: Candle[] | null;
+  fan: FanLines | null;
   version: number;
 }
 
-export function GoldChart({ bars, forming, ghost, forecast, version }: Props) {
+export function GoldChart({ bars, forming, ghost, fan, version }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const ghostSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const forecastSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const fanSeries = useRef<Partial<Record<Band, ISeriesApi<"Line">>>>({});
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawnVersion = useRef(-1);
   const zoomed = useRef(false);
@@ -99,18 +108,23 @@ export function GoldChart({ bars, forming, ghost, forecast, version }: Props) {
       priceLineVisible: false,
       lastValueVisible: false,
     });
-    // Forecast: hollow gold-outlined candles so they can't be mistaken for real ones.
-    forecastSeries.current = c.addSeries(CandlestickSeries, {
-      upColor: "rgba(212,167,44,0.10)",
-      downColor: "rgba(212,167,44,0.10)",
-      borderVisible: true,
-      borderUpColor: "rgba(38,166,154,0.95)",
-      borderDownColor: "rgba(239,83,80,0.95)",
-      wickUpColor: "rgba(212,167,44,0.8)",
-      wickDownColor: "rgba(212,167,44,0.8)",
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+    // Forecast fan: gold middle line, dashed 50% band, dotted 80% band.
+    const line = (color: string, width: 1 | 2, style: LineStyle) =>
+      c.addSeries(LineSeries, {
+        color,
+        lineWidth: width,
+        lineStyle: style,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+    fanSeries.current = {
+      p90: line("rgba(212,167,44,0.45)", 1, LineStyle.Dotted),
+      p75: line("rgba(212,167,44,0.75)", 1, LineStyle.Dashed),
+      p50: line("rgba(212,167,44,1)", 2, LineStyle.Solid),
+      p25: line("rgba(212,167,44,0.75)", 1, LineStyle.Dashed),
+      p10: line("rgba(212,167,44,0.45)", 1, LineStyle.Dotted),
+    };
     markers.current = createSeriesMarkers(candles.current, []);
     chart.current = c;
     return () => {
@@ -156,16 +170,26 @@ export function GoldChart({ bars, forming, ghost, forecast, version }: Props) {
   }, [ghost]);
 
   useEffect(() => {
-    const s = forecastSeries.current;
-    if (!s) return;
-    s.setData(forecast ? forecast.map(toBar) : []);
-    if (forecast && chart.current) {
+    const series = fanSeries.current;
+    for (const band of ["p10", "p25", "p50", "p75", "p90"] as Band[]) {
+      const ser = series[band];
+      if (!ser) continue;
+      ser.setData(
+        fan
+          ? [
+              { time: fan.anchor.time as UTCTimestamp, value: fan.anchor.price },
+              ...fan.points.map((p) => ({ time: p.time as UTCTimestamp, value: p[band] })),
+            ]
+          : [],
+      );
+    }
+    if (fan && chart.current) {
       // Make room on the right for the 5 forecast candles.
       const ts = chart.current.timeScale();
       const r = ts.getVisibleLogicalRange();
       if (r && bars.length && r.to < bars.length + 6) ts.setVisibleLogicalRange({ from: r.from + 6, to: bars.length + 7 });
     }
-  }, [forecast, bars.length]);
+  }, [fan, bars.length]);
 
   return <div ref={el} className="h-full w-full" />;
 }
