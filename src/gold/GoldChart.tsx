@@ -35,9 +35,20 @@ function markerFor(b: ClosedBar): SeriesMarker<Time>[] {
   ];
 }
 
-export function GoldChart({ bars, forming, version }: { bars: ClosedBar[]; forming: Candle | null; version: number }) {
+export function GoldChart({
+  bars,
+  forming,
+  version,
+  forecast,
+}: {
+  bars: ClosedBar[];
+  forming: Candle | null;
+  version: number;
+  forecast: Candle[] | null; // ghost bars for the next 5 candles, or null to hide
+}) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
+  const ghosts = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawn = useRef(-1);
@@ -70,6 +81,18 @@ export function GoldChart({ bars, forming, version }: { bars: ClosedBar[]; formi
       rightPriceScale: { borderColor: COLORS.line },
       crosshair: { mode: CrosshairMode.Normal },
     });
+    // Added first so the real forming candle draws on top of the first forecast bar.
+    ghosts.current = c.addSeries(CandlestickSeries, {
+      upColor: "rgba(38,166,154,0.18)",
+      downColor: "rgba(239,83,80,0.18)",
+      borderVisible: true,
+      borderUpColor: "rgba(38,166,154,0.85)",
+      borderDownColor: "rgba(239,83,80,0.85)",
+      wickUpColor: "rgba(38,166,154,0.6)",
+      wickDownColor: "rgba(239,83,80,0.6)",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
     candles.current = c.addSeries(CandlestickSeries, {
       upColor: COLORS.green,
       downColor: COLORS.red,
@@ -98,6 +121,17 @@ export function GoldChart({ bars, forming, version }: { bars: ClosedBar[]; formi
       chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - show), to: bars.length + 3 });
     }
   }, [bars, version]);
+
+  useEffect(() => {
+    if (!ghosts.current) return;
+    ghosts.current.setData(forecast ? forecast.map(toBar) : []);
+    // Keep the forecast in view when it first appears.
+    if (forecast && chart.current) {
+      const r = chart.current.timeScale().getVisibleLogicalRange();
+      // Only when looking at the latest candles (don't yank the view if scrolled back in history).
+      if (r && r.to >= bars.length - 2 && r.to < bars.length + forecast.length) chart.current.timeScale().setVisibleLogicalRange({ from: r.from, to: bars.length + forecast.length + 1 });
+    }
+  }, [forecast, bars.length]);
 
   useEffect(() => {
     if (!candles.current || !forming || !bars.length) return;

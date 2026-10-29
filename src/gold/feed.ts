@@ -3,16 +3,17 @@
 
 import type { Candle } from "./indicators";
 
-export const TIMEFRAME_MIN = 15;
-export const TF_SECONDS = TIMEFRAME_MIN * 60;
+export const TIMEFRAMES = [1, 5, 15] as const;
+export type Timeframe = (typeof TIMEFRAMES)[number];
 export const HISTORY_BARS = 3000;
+/** Bars per request when fetching long history (Pyth answers ~6k bars comfortably). */
+const CHUNK_BARS = 5760;
 
 const FN_URL = import.meta.env.VITE_SUPABASE_URL ? `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/gold` : "";
 const ANON_KEY: string = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
 
 export const backendConfigured = () => FN_URL.length > 0;
 
-const bucket = (t: number) => Math.floor(t / TF_SECONDS) * TF_SECONDS;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 async function callFn<T>(body: Record<string, unknown>): Promise<T> {
@@ -37,6 +38,7 @@ export interface TickStatus {
 
 export interface Feed {
   readonly name: string;
+  readonly tfMin: number;
   readonly jev: boolean; // backend has a TypeSafe key
   /** Current time on this feed's clock, unix seconds. */
   now(): number;
@@ -56,9 +58,14 @@ export class LiveFeed implements Feed {
   readonly name = "Pyth";
   jev = false;
   private lastClosed = 0;
+  private readonly tf: number;
   now = () => Date.now() / 1000;
+  constructor(readonly tfMin: Timeframe = 15) {
+    this.tf = tfMin * 60;
+  }
+  private bucket = (t: number) => Math.floor(t / this.tf) * this.tf;
 
-  private async fetchRange(from: number, to: number, resolution = TIMEFRAME_MIN): Promise<Candle[]> {
+  private async fetchRange(from: number, to: number, resolution: number = this.tfMin): Promise<Candle[]> {
     const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution });
     this.jev = r.jev;
     return r.candles;
@@ -67,16 +74,20 @@ export class LiveFeed implements Feed {
   async history(): Promise<Candle[]> {
     const to = nowSec();
     // Gold trades ~23h × 5 days, so ask for ~1.7× the wall-clock span.
-    const all = await this.fetchRange(to - Math.round(HISTORY_BARS * TF_SECONDS * 1.7), to);
-    const closed = all.filter((c) => c.time < bucket(to)).slice(-HISTORY_BARS);
+    const all = await this.fetchRange(to - Math.round(HISTORY_BARS * this.tf * 1.7), to);
+    const closed = all.filter((c) => c.time < this.bucket(to)).slice(-HISTORY_BARS);
     this.lastClosed = closed.length ? closed[closed.length - 1].time : 0;
     return closed;
   }
 
-  /** ~A year of 15-minute candles (closed only), fetched in 60-day chunks. The pool for forecast analogs. */
-  async deepHistory(days = 365): Promise<Candle[]> {
-    const end = Math.floor(nowSec() / TF_SECONDS) * TF_SECONDS;
-    const chunk = 60 * 86400;
+  /**
+   * Long history (closed only), fetched in chunks: ~a year of 15m, ~4 months of 5m, ~25 days of 1m (about 35k
+   * candles each). Trains the model and is the pool for forecast analogs.
+   */
+  async deepHistory(): Promise<Candle[]> {
+    const days = this.tfMin === 15 ? 365 : this.tfMin === 5 ? 120 : 25;
+    const end = this.bucket(nowSec());
+    const chunk = CHUNK_BARS * this.tf;
     const out: Candle[] = [];
     for (let from = end - days * 86400; from < end; from += chunk) {
       try {
@@ -111,14 +122,14 @@ export class LiveFeed implements Feed {
 
     const emitForming = () => forming && onBar({ ...forming }, false);
 
-    // Closed candles (authoritative OHLC) come from the history API.
+    // Closed candles (authoritative OHLC) come from the history API (every 5 s; every 2 s on 1-minute candles).
     const poll = async () => {
       if (busy || stopped) return;
       busy = true;
       try {
         const now = nowSec();
-        const recent = await this.fetchRange(Math.max(this.lastClosed, now - 10 * TF_SECONDS), now);
-        const current = bucket(now);
+        const recent = await this.fetchRange(Math.max(this.lastClosed, now - 10 * this.tf), now);
+        const current = this.bucket(now);
         for (const c of recent) {
           if (c.time <= this.lastClosed) continue;
           if (c.time < current) {
@@ -153,7 +164,7 @@ export class LiveFeed implements Feed {
     const onTick = (t: number, p: number) => {
       lastTickAt = Date.now();
       report({ state: "streaming", detail: "every Pyth price update" });
-      const b = bucket(t);
+      const b = this.bucket(t);
       if (b <= this.lastClosed) return;
       if (!forming || b > forming.time) {
         forming = { time: b, open: forming ? forming.close : p, high: p, low: p, close: p };
@@ -230,7 +241,7 @@ export class LiveFeed implements Feed {
       minuteBusy = true;
       try {
         const now = nowSec();
-        const current = bucket(now);
+        const current = this.bucket(now);
         const mins = (await this.fetchRange(current, now + 60, 1)).filter((m) => m.time >= current);
         if (!mins.length || current <= this.lastClosed) return;
         if (forming && current > forming.time) void poll(); // previous candle just closed
@@ -244,7 +255,7 @@ export class LiveFeed implements Feed {
         };
         emitForming();
       } catch {
-        // the 15-minute poll reports data errors
+        // the main poll reports data errors
       } finally {
         minuteBusy = false;
       }
@@ -259,7 +270,7 @@ export class LiveFeed implements Feed {
 
     void poll();
     void stream();
-    const id = window.setInterval(poll, 5000);
+    const id = window.setInterval(poll, this.tfMin === 1 ? 2000 : 5000);
     const mid = window.setInterval(minutePoll, 2000);
     return () => {
       stopped = true;
@@ -279,8 +290,18 @@ export interface CheckResult {
 }
 
 /** Ask Jev about the candle opening at `forTime`. Cached per candle on the backend, so viewers share one answer. */
-export async function askCheck(snapshot: unknown, forTime: number): Promise<CheckResult> {
-  return callFn<CheckResult>({ action: "check", snapshot, forTime });
+export async function askCheck(snapshot: unknown, forTime: number, timeframeMin: number): Promise<CheckResult> {
+  return callFn<CheckResult>({ action: "check", snapshot, forTime, timeframeMin });
+}
+
+/** Jev picks the most likely of the forecast paths (`options`: id → compact text). One answer per candle, shared. */
+export async function askForecast(
+  data: unknown,
+  options: Record<string, string>,
+  forTime: number,
+  timeframeMin: number,
+): Promise<{ choice: string; probabilities: Record<string, number> }> {
+  return callFn({ action: "forecast", data, options, forTime, timeframeMin });
 }
 
 export interface TickCheck {
@@ -297,9 +318,9 @@ export async function tickCheck(): Promise<TickCheck> {
   return callFn<TickCheck>({ action: "tickcheck" });
 }
 
-/** Jev: will the forming candle flip color before it closes? Shared per 30-second slot on the backend. */
-export async function askFlip(state: Record<string, unknown>, slotKey: string): Promise<{ pFlip: number }> {
-  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey });
+/** Jev: will the forming candle flip color before it closes? Shared per time slot on the backend. */
+export async function askFlip(state: Record<string, unknown>, slotKey: string, timeframeMin: number): Promise<{ pFlip: number }> {
+  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey, timeframeMin });
 }
 
 /** Which backend is deployed (older versions answer "unknown action"). */
@@ -327,6 +348,11 @@ function mulberry32(seed: number) {
 export class SimFeed implements Feed {
   readonly name = "Simulated";
   readonly jev = false;
+  private readonly tf: number;
+  constructor(readonly tfMin: Timeframe = 15) {
+    this.tf = tfMin * 60;
+  }
+  private bucket = (t: number) => Math.floor(t / this.tf) * this.tf;
   private price = 4000;
   private simNow = Date.now() / 1000;
   now = () => this.simNow;
@@ -338,7 +364,7 @@ export class SimFeed implements Feed {
   }
 
   async history(): Promise<Candle[]> {
-    const end = bucket(nowSec());
+    const end = this.bucket(nowSec());
     const out: Candle[] = [];
     for (let i = HISTORY_BARS; i > 0; i--) {
       const open = Number(this.price.toFixed(2));
@@ -348,7 +374,7 @@ export class SimFeed implements Feed {
         high = Math.max(high, close);
         low = Math.min(low, close);
       }
-      out.push({ time: end - i * TF_SECONDS, open, high, low, close });
+      out.push({ time: end - i * this.tf, open, high, low, close });
     }
     return out;
   }
@@ -357,7 +383,7 @@ export class SimFeed implements Feed {
     // Time runs fast: a candle closes every ~10s.
     const ticksPerBar = 40;
     let ticks = 0;
-    let barTime = bucket(nowSec());
+    let barTime = this.bucket(nowSec());
     let f: Candle | null = null;
     const id = window.setInterval(() => {
       const p = this.step();
@@ -366,11 +392,11 @@ export class SimFeed implements Feed {
       f.low = Math.min(f.low, p);
       f.close = p;
       ticks += 1;
-      this.simNow = barTime + (ticks / ticksPerBar) * TF_SECONDS;
+      this.simNow = barTime + (ticks / ticksPerBar) * this.tf;
       if (ticks >= ticksPerBar) {
         onBar({ ...f }, true);
         ticks = 0;
-        barTime += TF_SECONDS;
+        barTime += this.tf;
         f = null;
       } else {
         onBar({ ...f }, false);

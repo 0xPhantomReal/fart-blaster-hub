@@ -3,8 +3,9 @@
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
-// POST { action: "check", snapshot, forTime }       → { pGreen, support, confidence }  (Jev: own call + fact-check)
-// POST { action: "flip", state, slotKey }           → { pFlip, confidence }  (Jev: will the forming candle flip?)
+// POST { action: "check", snapshot, forTime, timeframeMin }  → { pGreen, support, confidence }  (Jev: own call + fact-check)
+// POST { action: "flip", state, slotKey, timeframeMin }      → { pFlip, confidence }  (Jev: will the forming candle flip?)
+// POST { action: "forecast", data, options, forTime, timeframeMin } → { choice, probabilities }  (Jev: most likely 5-candle path)
 // POST { action: "tickcheck" }                    → which Pyth host/feed works for live ticks, or exactly why not
 // POST { action: "version" }                        → { version, features }
 
@@ -214,7 +215,10 @@ async function tickStream(): Promise<Response> {
 // sees the same data plus the model's call. Cached per candle, so every viewer and the backfill share one answer.
 
 const inflight = new Map<string, Promise<unknown>>();
-const INSTRUMENT = "Gold (XAU/USD), 15-minute candles";
+const TIMEFRAMES = new Set([1, 5, 15]);
+const instrument = (tf: number) => `Gold (XAU/USD), ${tf}-minute candles`;
+/** Timeframe from the request (older pages don't send one: they are on 15-minute candles). */
+const tfOf = (b: Record<string, unknown>) => (TIMEFRAMES.has(b.timeframeMin as number) ? (b.timeframeMin as number) : 15);
 
 async function ask(state: Record<string, unknown>, question: Record<string, unknown>) {
   const res = await fetch(TYPESAFE_URL, {
@@ -229,13 +233,13 @@ async function ask(state: Record<string, unknown>, question: Record<string, unkn
   return a;
 }
 
-async function check(data: Record<string, unknown>, model: Record<string, unknown>) {
+async function check(data: Record<string, unknown>, model: Record<string, unknown>, tf: number) {
   const own = ask(
-    { instrument: INSTRUMENT, ...data },
+    { instrument: instrument(tf), ...data },
     {
       type: "choice",
       instructions:
-        "Using only the candles and signals given, will the NEXT 15-minute candle close above or below its open?",
+        `Using only the candles and signals given, will the NEXT ${tf}-minute candle close above or below its open?`,
       criteria: {
         green: "It closes above its open",
         red: "It closes below its open",
@@ -246,11 +250,11 @@ async function check(data: Record<string, unknown>, model: Record<string, unknow
   const factCheck =
     modelCall === "green" || modelCall === "red"
       ? ask(
-          { instrument: INSTRUMENT, ...data, model },
+          { instrument: instrument(tf), ...data, model },
           {
             type: "score",
             instructions:
-              `A model predicts the next 15-minute candle will close ${modelCall} (see model.p_green and its track record). ` +
+              `A model predicts the next ${tf}-minute candle will close ${modelCall} (see model.p_green and its track record). ` +
               "Fact-check that call against the candles and signals: how well does the evidence support it?",
             criteria: [
               "The evidence points the other way",
@@ -274,13 +278,13 @@ async function check(data: Record<string, unknown>, model: Record<string, unknow
 
 // ── Jev: will the forming candle flip before it closes? ─────────────────
 
-async function flip(state: Record<string, unknown>) {
+async function flip(state: Record<string, unknown>, tf: number) {
   const a = await ask(
-    { instrument: INSTRUMENT, candle_so_far: state },
+    { instrument: instrument(tf), candle_so_far: state },
     {
       type: "choice",
       instructions:
-        "This 15-minute candle is still forming (see candle_so_far, current_color). Will it HOLD its current color " +
+        `This ${tf}-minute candle is still forming (see candle_so_far, current_color). Will it HOLD its current color ` +
         "until it closes, or FLIP to the other color? Compare move_so_far with typical_move_in_time_left, and weigh " +
         "how far it has already pulled back from its extreme and the last few candles.",
       criteria: {
@@ -291,6 +295,24 @@ async function flip(state: Record<string, unknown>) {
   );
   if (typeof a.probabilities?.flips !== "number") throw new Error("unexpected TypeSafe response shape");
   return { pFlip: a.probabilities.flips, confidence: typeof a.confidence === "number" ? a.confidence : null };
+}
+
+// ── Jev: which of ~50 real past 5-candle paths is most likely next? ─────
+
+async function forecast(data: Record<string, unknown>, options: Record<string, string>, tf: number) {
+  const a = await ask(
+    { instrument: instrument(tf), ...data },
+    {
+      type: "choice",
+      instructions:
+        `Each option is a sequence of the next 5 ${tf}-minute candles that gold really produced after a moment that ` +
+        "looked like now. Per candle: G/R = green/red, then the body (signed), ^ upper wick, v lower wick, all in ATR " +
+        "units. Given the recent candles and signals, which sequence is the most likely to happen next?",
+      criteria: options,
+    },
+  );
+  if (typeof a.choice !== "string" || !(a.choice in options)) throw new Error("unexpected TypeSafe response shape");
+  return { choice: a.choice, probabilities: a.probabilities ?? {} };
 }
 
 // ── Handler ────────────────────────────────────────────────────────────
@@ -320,7 +342,11 @@ Deno.serve(async (req) => {
 
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
-      return json({ version: 10, features: ["stream", "tickcheck", "jev-check", "jev-flip"], jev: !!env("TYPESAFE_API_KEY") });
+      return json({
+        version: 11,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast"],
+        jev: !!env("TYPESAFE_API_KEY"),
+      });
     }
 
     if (body.action === "tickcheck") {
@@ -342,12 +368,13 @@ Deno.serve(async (req) => {
       if (JSON.stringify(snapshot).length > 6000) return json({ error: "snapshot too large" }, 400);
       if (typeof forTime !== "number") return json({ error: "forTime must be a number" }, 400);
 
-      const key = `check:${forTime}`;
+      const tf = tfOf(body);
+      const key = `check:${tf}:${forTime}`;
       const hit = cached<unknown>(jevCache, key, 60 * 60 * 1000);
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        run = check(snapshot.data as Record<string, unknown>, snapshot.model as Record<string, unknown>).then((r) => {
+        run = check(snapshot.data as Record<string, unknown>, snapshot.model as Record<string, unknown>, tf).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });
@@ -363,12 +390,43 @@ Deno.serve(async (req) => {
       if (!state || typeof state !== "object" || JSON.stringify(state).length > 2000) return json({ error: "bad state" }, 400);
       if (typeof slotKey !== "string" || slotKey.length > 64) return json({ error: "bad slotKey" }, 400);
       // Shared per 30-second slot (live) or per past candle (replay), so viewers and reloads reuse one answer.
-      const key = `flip:${slotKey}`;
+      const tf = tfOf(body);
+      const key = `flip:${tf}:${slotKey}`;
       const hit = cached<unknown>(jevCache, key, slotKey.startsWith("past:") ? 6 * 3600 * 1000 : 60_000);
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        run = flip(state as Record<string, unknown>).then((r) => {
+        run = flip(state as Record<string, unknown>, tf).then((r) => {
+          jevCache.set(key, { at: Date.now(), body: r });
+          return r;
+        });
+        inflight.set(key, run);
+        run.finally(() => inflight.delete(key)).catch(() => {});
+      }
+      return json(await run);
+    }
+
+    if (body.action === "forecast") {
+      if (!env("TYPESAFE_API_KEY")) return json({ error: "TYPESAFE_API_KEY secret is not set" }, 503);
+      const { data, options, forTime } = body as { data?: unknown; options?: unknown; forTime?: unknown };
+      if (!data || typeof data !== "object" || JSON.stringify(data).length > 5000) return json({ error: "bad data" }, 400);
+      const opts = options as Record<string, unknown> | undefined;
+      const valid =
+        !!opts &&
+        typeof opts === "object" &&
+        Object.keys(opts).length >= 2 &&
+        Object.keys(opts).length <= 60 &&
+        Object.entries(opts).every(([k, v]) => /^s\d{1,3}$/.test(k) && typeof v === "string" && v.length <= 120);
+      if (!valid) return json({ error: "bad forecast options" }, 400);
+      if (typeof forTime !== "number") return json({ error: "forTime must be a number" }, 400);
+      // One pick per candle, shared by every viewer.
+      const tf = tfOf(body);
+      const key = `forecast:${tf}:${forTime}`;
+      const hit = cached<unknown>(jevCache, key, 60 * 60 * 1000);
+      if (hit) return json(hit);
+      let run = inflight.get(key);
+      if (!run) {
+        run = forecast(data as Record<string, unknown>, opts as Record<string, string>, tf).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });

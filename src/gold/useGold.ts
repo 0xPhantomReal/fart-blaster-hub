@@ -1,17 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import { AnalogPool, HORIZON, label, scorePath, toCandles, PathTally, type Path, type PathRecord } from "./forecast";
 import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords, type FlipRow } from "./flip";
 import {
   askCheck,
   askFlip,
+  askForecast,
   backendConfigured,
   backendVersion,
   LiveFeed,
   SimFeed,
-  TF_SECONDS,
   tickCheck,
   type Feed,
+  type Timeframe,
   type TickCheck,
   type TickStatus,
 } from "./feed";
@@ -32,6 +34,18 @@ export interface FlipView {
   backfill: FlipRecords | null;
   live: FlipRecords | null;
   weights: { math: number; jev: number } | null;
+  calls: number;
+}
+
+/** The 5-candle bar forecast from the last close. */
+export interface ForecastView {
+  status: string;
+  candles: Candle[] | null; //  the path drawn on the chart (starts at the candle forming now)
+  source: "jev" | "typical" | null; // Jev's pick of the paths, or the most typical path
+  endsHigherPct: number | null; //    share of the 50 paths that end above the last close
+  pickedPct: number | null; //        Jev's probability for its pick
+  replay: PathRecord | null; //       the typical path, replayed on recent past candles
+  live: { jev: PathRecord; typical: PathRecord } | null;
   calls: number;
 }
 
@@ -57,6 +71,7 @@ export interface GoldState {
   trust: { model: number; jev: number } | null;
   jev: { on: boolean; status: string; calls: number };
   flip: FlipView;
+  forecast: ForecastView;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
   ticks: TickStatus & { check: TickCheck | null };
   version: number; //              bumps when the chart should redraw
@@ -75,42 +90,56 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 // Jev answers for past candles never change, so keep them in the browser to avoid paying twice.
-const CACHE_KEY = "gold.jevcheck.v1";
-function readCache(): Record<string, JevAnswer> {
+// One store per timeframe (15m keeps its original name so its answers carry over).
+const tfKey = (base: string, tf: number) => (tf === 15 ? base : `${base}.${tf}m`);
+function readCache(tf: number): Record<string, JevAnswer> {
   try {
-    return JSON.parse(localStorage.getItem(CACHE_KEY) ?? "{}");
+    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v1", tf)) ?? "{}");
   } catch {
     return {};
   }
 }
-function writeCache(c: Record<string, JevAnswer>) {
+function writeCache(c: Record<string, JevAnswer>, tf: number) {
   try {
     const keys = Object.keys(c).sort();
     const trimmed = Object.fromEntries(keys.slice(-600).map((k) => [k, c[k]]));
-    localStorage.setItem(CACHE_KEY, JSON.stringify(trimmed));
+    localStorage.setItem(tfKey("gold.jevcheck.v1", tf), JSON.stringify(trimmed));
   } catch {
     // storage unavailable: answers are just fetched again next visit
   }
 }
 
-const FLIP_CACHE = "gold.flipcheck.v1";
-function readFlipCache(): Record<string, number> {
+function readFlipCache(tf: number): Record<string, number> {
   try {
-    return JSON.parse(localStorage.getItem(FLIP_CACHE) ?? "{}");
+    return JSON.parse(localStorage.getItem(tfKey("gold.flipcheck.v1", tf)) ?? "{}");
   } catch {
     return {};
   }
 }
-function writeFlipCache(c: Record<string, number>) {
+function writeFlipCache(c: Record<string, number>, tf: number) {
   try {
     const keys = Object.keys(c).sort();
-    localStorage.setItem(FLIP_CACHE, JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
+    localStorage.setItem(tfKey("gold.flipcheck.v1", tf), JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
   } catch {
     // fine: fetched again next visit
   }
 }
 
-export function useGold(): GoldState {
+const FLIP_START = { status: "starting…", pFlip: null, pMath: null, at: null, backfill: null, live: null, weights: null, calls: 0 };
+const FORECAST_START: ForecastView = { status: "waiting for history…", candles: null, source: null, endsHigherPct: null, pickedPct: null, replay: null, live: null, calls: 0 };
+
+/**
+ * Everything on the /gold page for one timeframe. Switching timeframe starts over (fresh history, model, Jev
+ * checks). `forecastOn` only controls whether Jev is asked to pick the forecast path (the typical path is free).
+ */
+export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
+  const forecastOnRef = useRef(forecastOn);
+  const kickForecast = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    forecastOnRef.current = forecastOn;
+    if (forecastOn) kickForecast.current?.();
+  }, [forecastOn]);
+
   const [state, setState] = useState<GoldState>({
     status: "loading",
     source: backendConfigured() ? "Pyth" : "Simulated",
@@ -126,14 +155,33 @@ export function useGold(): GoldState {
     trust: null,
     jev: { on: false, status: "starting…", calls: 0 },
     ticks: { state: "connecting", detail: "", check: null },
-    flip: { status: "starting…", pFlip: null, pMath: null, at: null, backfill: null, live: null, weights: null, calls: 0 },
+    flip: FLIP_START,
+    forecast: FORECAST_START,
     version: 0,
   });
 
   useEffect(() => {
     let cancelled = false;
-    let feed: Feed = backendConfigured() ? new LiveFeed() : new SimFeed();
+    const TF_SECONDS = tfMin * 60;
+    let feed: Feed = backendConfigured() ? new LiveFeed(tfMin) : new SimFeed(tfMin);
     let predictor = new Predictor(TF_SECONDS);
+    setState((s) => ({
+      ...s,
+      status: "loading",
+      error: null,
+      bars: [],
+      forming: null,
+      prediction: null,
+      live: null,
+      walkForward: null,
+      backfill: null,
+      liveRecord: null,
+      trust: null,
+      jev: { on: false, status: "starting…", calls: 0 },
+      flip: FLIP_START,
+      forecast: FORECAST_START,
+      version: s.version + 1,
+    }));
     let bars: ClosedBar[] = [];
     let queue = Promise.resolve();
     let stop: (() => void) | null = null;
@@ -169,7 +217,7 @@ export function useGold(): GoldState {
       if (!snap) return;
       setJev({ status: "checking this candle…" });
       try {
-        const a = await withTimeout(askCheck(snap, pred.forTime), 20_000);
+        const a = await withTimeout(askCheck(snap, pred.forTime, tfMin), 20_000);
         jevCalls += a.support === null ? 1 : 2;
         const updated = predictor.applyJev({ pGreen: a.pGreen, support: a.support });
         if (updated) set({ prediction: updated, trust: predictor.summary().trust });
@@ -181,7 +229,7 @@ export function useGold(): GoldState {
 
     /** Check Jev on the latest ~200 past candles before trusting it live. */
     const runBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
-      const cache = readCache();
+      const cache = readCache(tfMin);
       const targets = history.slice(-BACKFILL).filter((c) => preds.get(c.time)?.pModel != null && predictor.snapshotFor(c.time));
       const answers = new Map<number, JevAnswer>();
       let done = 0;
@@ -192,7 +240,7 @@ export function useGold(): GoldState {
           if (cachedA) answers.set(c.time, cachedA);
           else {
             try {
-              const a = await withTimeout(askCheck(predictor.snapshotFor(c.time), c.time), 30_000);
+              const a = await withTimeout(askCheck(predictor.snapshotFor(c.time), c.time, tfMin), 30_000);
               const ans = { pGreen: a.pGreen, support: a.support };
               answers.set(c.time, ans);
               cache[String(c.time)] = ans;
@@ -208,7 +256,7 @@ export function useGold(): GoldState {
       // 6 at a time
       const lanes = Array.from({ length: 6 }, (_, k) => targets.filter((_, i) => i % 6 === k));
       await Promise.all(lanes.map(worker));
-      writeCache(cache);
+      writeCache(cache, tfMin);
       const rows = targets
         .filter((c) => answers.has(c.time) && c.close !== c.open)
         .map((c) => ({ pModel: preds.get(c.time)!.pModel!, jev: answers.get(c.time)!, y: (c.close > c.open ? 1 : 0) as 0 | 1 }));
@@ -256,7 +304,8 @@ export function useGold(): GoldState {
       const secondsLeft = c.time + TF_SECONDS - now;
       const atr = predictor.atr;
       const sd = bodySd(bars.map((b) => b.candle));
-      if (secondsLeft < 30 || secondsLeft > TF_SECONDS - 30 || !atr || !sd) return;
+      const edge = Math.min(30, TF_SECONDS * 0.1); // skip the very start and end of the candle
+      if (secondsLeft < edge || secondsLeft > TF_SECONDS - edge || !atr || !sd) return;
       const state = flipState({ forming: c, secondsLeft, tfSeconds: TF_SECONDS, atr, sd, previous: bars.slice(-3).map((b) => b.candle) });
       if (!state) return;
       // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
@@ -271,7 +320,7 @@ export function useGold(): GoldState {
       }
       flipBusy = true;
       try {
-        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`), 15_000);
+        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`, tfMin), 15_000);
         lastAsked = { key: shape, at: Date.now() };
         flipCalls += 1;
         lastFlip = { forTime: c.time, move: c.close - c.open, pFlip: a.pFlip, at: Date.now() };
@@ -288,12 +337,19 @@ export function useGold(): GoldState {
     /** Replay Jev's flip read on ~150 recent candles rebuilt partway through, before trusting it live. */
     const flipBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
       if (!(feed instanceof LiveFeed)) return setFlip({ status: "needs live data" });
+      if (tfMin === 1) {
+        // A 1-minute candle can't be rebuilt partway through from 1-minute data, so there's nothing to replay:
+        // Jev starts at half weight and is scored live only.
+        setFlip({ status: "ok", backfill: null, weights: blender.weights, calls: flipCalls });
+        flipReady = true;
+        return void flipTick();
+      }
       setFlip({ status: "loading 1-minute history…" });
       const minutes = await feed.minuteHistory(3).catch(() => [] as Candle[]);
       const atrs = atrByTime(history);
       const snaps = pastSnapshots(minutes, history, TF_SECONDS, (t) => atrs.get(t - TF_SECONDS) ?? null, (t) => preds.get(t)?.pFinal ?? 0.5, FLIP_BACKFILL);
       if (snaps.length < 30) return setFlip({ status: "not enough 1-minute history to test the flip check yet" });
-      const cache = readFlipCache();
+      const cache = readFlipCache(tfMin);
       const rows: FlipRow[] = [];
       let done = 0;
       const lanes = Array.from({ length: 6 }, (_, k) => snaps.filter((_, i) => i % 6 === k));
@@ -305,7 +361,7 @@ export function useGold(): GoldState {
             let pFlip = cache[String(sn.time)];
             if (pFlip === undefined) {
               try {
-                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`), 30_000)).pFlip;
+                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`, tfMin), 30_000)).pFlip;
                 cache[String(sn.time)] = pFlip;
                 flipCalls += 1;
               } catch {
@@ -317,7 +373,7 @@ export function useGold(): GoldState {
           }
         }),
       );
-      writeFlipCache(cache);
+      writeFlipCache(cache, tfMin);
       for (const sn of snaps) {
         const pf = answers.get(sn.time);
         if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), move: sn.move, y: sn.y });
@@ -326,6 +382,94 @@ export function useGold(): GoldState {
       setFlip({ status: "ok", backfill: blender.backfill(rows), weights: blender.weights, calls: flipCalls });
       flipReady = true;
       void flipTick();
+    };
+
+    // ── Bar forecast: the next 5 candles, from look-alike moments in history ──
+    let pool: AnalogPool | null = null;
+    let poolHistory: Candle[] = [];
+    let features: string[] = [];
+    let forecastCalls = 0;
+    const tallies = { jev: new PathTally(), typical: new PathTally() };
+    let pending: { startTime: number; startPrice: number; typical: Path; jev: Path | null }[] = [];
+    let shown: { startTime: number; startPrice: number; atr: number; paths: Path[]; options: Record<string, string> } | null = null;
+    const setForecast = (patch: Partial<ForecastView>) => !cancelled && setState((s) => ({ ...s, forecast: { ...s.forecast, ...patch } }));
+    const jevCanPick = () => feed.jev && features.includes("jev-forecast");
+
+    const draw = (p: Path, source: "jev" | "typical", pickedPct: number | null) => {
+      if (!shown) return;
+      setForecast({ candles: toCandles(p, shown.startTime, shown.startPrice, shown.atr, TF_SECONDS), source, pickedPct });
+    };
+
+    /** Ask Jev once per candle which path is most likely (only while the forecast is switched on). */
+    const pickWithJev = async () => {
+      const f = shown;
+      if (!f || cancelled || !forecastOnRef.current || !jevCanPick()) return;
+      const pend = pending.find((p) => p.startTime === f.startTime);
+      if (!pend || pend.jev) return;
+      const snap = predictor.snapshotFor(f.startTime);
+      if (!snap) return;
+      setForecast({ status: "Jev is picking the most likely path…" });
+      try {
+        const a = await withTimeout(askForecast(snap.data, f.options, f.startTime, tfMin), 30_000);
+        forecastCalls += 1;
+        const pick = f.paths.find((p) => p.id === a.choice);
+        if (!pick) throw new Error("unknown pick");
+        pend.jev = pick;
+        if (shown === f) draw(pick, "jev", a.probabilities[a.choice] ?? null);
+        setForecast({ status: "ok", calls: forecastCalls });
+      } catch (e) {
+        setForecast({ status: `Jev couldn't pick (${(e as Error).message}); showing the most typical path`, calls: forecastCalls });
+      }
+    };
+    kickForecast.current = () => void pickWithJev();
+
+    /** New forecast from the last close: draw the typical path now, then let Jev pick. */
+    const makeForecast = () => {
+      const set = pool?.paths();
+      const last = poolHistory[poolHistory.length - 1];
+      if (!set || !last) return setForecast({ status: "not enough history for a forecast yet" });
+      shown = {
+        startTime: last.time + TF_SECONDS,
+        startPrice: last.close,
+        atr: set.atr,
+        paths: set.paths,
+        options: Object.fromEntries(set.paths.map((p) => [p.id, label(p)])),
+      };
+      pending.push({ startTime: shown.startTime, startPrice: shown.startPrice, typical: set.typical, jev: null });
+      if (pending.length > 20) pending.shift();
+      draw(set.typical, "typical", null);
+      setForecast({
+        endsHigherPct: set.endsHigherPct,
+        status: jevCanPick() ? (forecastOnRef.current ? "ok" : "Jev picks when the forecast is on") : feed.jev ? "waiting for the new backend" : "ok",
+      });
+      void pickWithJev();
+    };
+
+    /** Score forecasts whose 5 candles have all closed. */
+    const scoreForecasts = () => {
+      pending = pending.filter((p) => {
+        const after: Candle[] = [];
+        for (let k = poolHistory.length - 1; k >= 0 && poolHistory[k].time >= p.startTime; k--) after.unshift(poolHistory[k]);
+        if (after.length < HORIZON) return true;
+        const actual = after.slice(0, HORIZON);
+        tallies.typical.add(scorePath(p.typical, actual, p.startPrice));
+        if (p.jev) tallies.jev.add(scorePath(p.jev, actual, p.startPrice));
+        setForecast({ live: { jev: tallies.jev.summary(), typical: tallies.typical.summary() } });
+        return false;
+      });
+    };
+
+    /** Rebuild the analog pool on `history`, replay the typical path on the last 200 candles, forecast. */
+    const buildForecast = (history: Candle[]) => {
+      poolHistory = [...history];
+      pool = new AnalogPool(poolHistory, TF_SECONDS);
+      const replay = new PathTally();
+      for (let i = Math.max(60, poolHistory.length - 200 - HORIZON); i < poolHistory.length - HORIZON; i++) {
+        const set = pool.paths(i);
+        if (set) replay.add(scorePath(set.typical, poolHistory.slice(i + 1, i + 1 + HORIZON), poolHistory[i].close));
+      }
+      setForecast({ replay: replay.summary() });
+      makeForecast();
     };
 
     /** (Re)train on `history` (walk-forward) and make it the live predictor. */
@@ -345,6 +489,7 @@ export function useGold(): GoldState {
         trust: predictor.summary().trust,
       });
       setState((s) => ({ ...s, version: s.version + 1 }));
+      buildForecast(history);
       return t;
     };
 
@@ -353,6 +498,8 @@ export function useGold(): GoldState {
       if (!feed.jev) return setJev({ on: false, status: "off (no TypeSafe key on the backend)" });
       setJev({ on: true });
       const v = await backendVersion().catch(() => null);
+      features = v?.features ?? [];
+      void pickWithJev();
       if (!v || !v.features.includes("jev-check")) {
         return setJev({ status: "waiting for the new backend: ask Lovable to “Deploy the gold edge function”" });
       }
@@ -370,6 +517,12 @@ export function useGold(): GoldState {
       lastFlip = null;
       setFlip({ pFlip: null, at: null });
       const { outcome, next } = predictor.close(c);
+      if (!poolHistory.length || c.time > poolHistory[poolHistory.length - 1].time) {
+        poolHistory.push(c);
+        pool = new AnalogPool(poolHistory, TF_SECONDS);
+        scoreForecasts();
+        makeForecast();
+      }
       bars.push({ candle: c, outcome });
       if (bars.length > MAX_BARS) bars.shift();
       current = next;
@@ -397,7 +550,7 @@ export function useGold(): GoldState {
         // then hook Jev up to the final model.
         const lf = feed;
         void lf
-          .deepHistory(365)
+          .deepHistory()
           .catch(() => [] as Candle[])
           .then((deep) => {
             if (cancelled) return;
@@ -448,9 +601,10 @@ export function useGold(): GoldState {
       cancelled = true;
       window.clearInterval(clock);
       window.clearInterval(flipClock);
+      kickForecast.current = null;
       stop?.();
     };
-  }, []);
+  }, [tfMin]);
 
   return state;
 }

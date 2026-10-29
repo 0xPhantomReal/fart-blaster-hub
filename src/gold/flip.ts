@@ -68,7 +68,7 @@ export function flipState(x: FlipInput): Record<string, unknown> | null {
   const color = move > 0 ? "green" : "red";
   const frac = Math.max(0.005, x.secondsLeft / x.tfSeconds);
   return {
-    how_to_read: "Sizes are in ATR units (average 15-minute candle range), measured from this candle's open.",
+    how_to_read: "Sizes are in ATR units (average candle range), measured from this candle's open.",
     current_color: color,
     move_so_far: r2(move / x.atr),
     high_so_far: r2((f.high - f.open) / x.atr),
@@ -171,7 +171,8 @@ export interface FlipRow {
 
 /**
  * Rebuild past candles at a point partway through, from 1-minute bars, for the Jev replay.
- * Returns one sample per candle at a deterministic "random" minute between 2 and 12.
+ * Returns one sample per candle at a deterministic "random" minute partway through (2–12 on 15m, 1–4 on 5m).
+ * 1-minute candles can't be rebuilt partway from 1-minute bars, so that timeframe returns nothing.
  */
 export function pastSnapshots(
   minutes: Candle[],
@@ -189,13 +190,17 @@ export function pastSnapshots(
     byCandle.set(t, list);
   }
   const out: { time: number; state: Record<string, unknown>; pMath: number; move: number; y: 0 | 1 }[] = [];
+  const tfMin = Math.round(tfSeconds / 60);
+  if (tfMin < 2) return out;
+  const lo = Math.max(1, Math.round(tfMin * 0.13));
+  const hi = tfMin - Math.max(1, Math.round(tfMin * 0.2));
   const idx = new Map(closed.map((c, i) => [c.time, i]));
   const recent = closed.slice(-count - 1, -1);
   for (const c of recent) {
     if (c.close === c.open) continue;
     const mins = (byCandle.get(c.time) ?? []).sort((a, b) => a.time - b.time);
-    if (mins.length < 13) continue;
-    const minute = 2 + ((c.time / tfSeconds) % 11); // 2..12, varies by candle
+    if (mins.length < Math.max(3, tfMin - 2)) continue;
+    const minute = lo + ((c.time / tfSeconds) % (hi - lo + 1)); // varies by candle
     const seen = mins.filter((m) => m.time < c.time + minute * 60);
     if (!seen.length) continue;
     const forming: Candle = {

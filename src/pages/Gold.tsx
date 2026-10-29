@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
-import { TIMEFRAME_MIN } from "@/gold/feed";
+import { TIMEFRAMES, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
 import type { CatchRecord, FlipRecords } from "@/gold/flip";
+import type { PathRecord } from "@/gold/forecast";
 
 const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
 const time = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -72,8 +73,8 @@ function FlipTable({ rec, where }: { rec: FlipRecords; where: string }) {
           <tr className={`text-xs ${MUTED}`}>
             <th className="pb-1 text-left font-medium"></th>
             <th className="pb-1 text-right font-medium">Caught</th>
-            <th className="pb-1 text-right font-medium">False alarms</th>
-            <th className="pb-1 text-right font-medium">Right when it says flip</th>
+            <th className="pb-1 text-right font-medium">False alarm</th>
+            <th className="pb-1 text-right font-medium">Right on flip</th>
           </tr>
         </thead>
         <tbody>
@@ -86,12 +87,51 @@ function FlipTable({ rec, where }: { rec: FlipRecords; where: string }) {
   );
 }
 
+function load<T>(key: string, ok: (v: unknown) => v is T, fallback: T): T {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) ?? "null");
+    return ok(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function save(key: string, v: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(v));
+  } catch {
+    // remembered for this visit only
+  }
+}
+const isTf = (v: unknown): v is Timeframe => (TIMEFRAMES as readonly unknown[]).includes(v);
+const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+
+/** Forecast scores: first bar's color, and direction after 5 bars. */
+function PathRow({ name, r, note }: { name: string; r: PathRecord; note: string }) {
+  const cell = (x: { right: number; n: number }) => (x.n >= 10 ? `${pct(x.right / x.n, 0)}` : "—");
+  return (
+    <tr className="border-t border-[#262c36]">
+      <td className="py-1.5 text-left">
+        {name}
+        <span className={`text-xs ${MUTED}`}> · {note}</span>
+      </td>
+      <td className="py-1.5 text-right">{cell(r.first)}</td>
+      <td className="py-1.5 text-right">{cell(r.end)}</td>
+      <td className="py-1.5 text-right">{r.end.n}</td>
+    </tr>
+  );
+}
+
 const Label = ({ children }: { children: React.ReactNode }) => (
   <h2 className={`mb-2 text-xs font-semibold uppercase tracking-wider ${MUTED}`}>{children}</h2>
 );
 
 export default function Gold() {
-  const g = useGold();
+  const [tfMin, setTfMin] = useState<Timeframe>(() => load("gold.tf", isTf, 15));
+  const [forecastOn, setForecastOn] = useState<boolean>(() => load("gold.forecast", isBool, true));
+  useEffect(() => save("gold.tf", tfMin), [tfMin]);
+  useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
+  const g = useGold(tfMin, forecastOn);
+  const fc = g.forecast;
   const p = g.prediction;
   const [, tick] = useState(0);
 
@@ -106,7 +146,7 @@ export default function Gold() {
   }, []);
 
   const last = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
-  const tf = TIMEFRAME_MIN * 60;
+  const tf = tfMin * 60;
   const isForming = !!(p && g.forming && g.forming.time === p.forTime);
   const closesAt = p ? p.forTime + tf : null;
   const secsLeft = closesAt && g.source !== "Simulated" ? Math.max(0, Math.round(closesAt - Date.now() / 1000)) : null;
@@ -124,8 +164,25 @@ export default function Gold() {
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
       <header className="flex flex-wrap items-baseline gap-3 border-b border-[#262c36] px-4 py-3">
         <h1 className="text-base font-semibold">
-          <span className="text-[#d4a72c]">XAU/USD</span> · <span className="text-[#d4a72c]">{TIMEFRAME_MIN}m</span>
+          <span className="text-[#d4a72c]">XAU/USD</span>
         </h1>
+        <div className="flex self-center overflow-hidden rounded-md border border-[#262c36] text-xs">
+          {TIMEFRAMES.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTfMin(t)}
+              className={`px-2.5 py-1 ${t === tfMin ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
+            >
+              {t}m
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setForecastOn((v) => !v)}
+          className={`self-center rounded-md border px-2.5 py-1 text-xs ${forecastOn ? "border-[#d4a72c] text-[#d4a72c]" : "border-[#262c36] text-[#8b949e]"}`}
+        >
+          Forecast {forecastOn ? "on" : "off"}
+        </button>
         <div className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}>{last ? last.close.toFixed(2) : "—"}</div>
         <div className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}>
           {g.status === "loading" ? "loading…" : g.source === "Simulated" ? "SIMULATED DATA" : "Pyth live"}
@@ -134,7 +191,7 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart bars={g.bars} forming={g.forming} version={g.version} />
+          <GoldChart key={tfMin} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} />
           {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading gold history…</div>}
         </div>
 
@@ -235,7 +292,7 @@ export default function Gold() {
               has done so far, so it naturally gets more certain as the candle runs.
               Right = share of calls that were correct. A call needs at least 55% one way; Final also needs Jev's fact-check to
               score {SUPPORT_NEEDED}+ of 3. Skill above 0 means the forecasts carry real information beyond the base rate; at or
-              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: 15-minute gold is close to a coin
+              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: {tfMin}-minute gold is close to a coin
               flip.
             </p>
           </section>
@@ -253,6 +310,45 @@ export default function Gold() {
               </p>
             )}
           </section>
+
+          {forecastOn && (
+            <section>
+              <Label>Forecast · next 5 candles</Label>
+              <p className="text-sm">
+                {fc.source === "jev"
+                  ? `Jev's pick of the 50 most similar past moments${fc.pickedPct != null ? ` (${pct(fc.pickedPct, 0)} of its vote)` : ""}.`
+                  : fc.source === "typical"
+                    ? "The most typical of the 50 most similar past moments."
+                    : "—"}
+                {fc.endsHigherPct != null && (
+                  <span className={MUTED}> {pct(fc.endsHigherPct, 0)} of those 50 ended higher after 5 candles.</span>
+                )}
+              </p>
+              {fc.status !== "ok" && <p className={`mt-1 text-xs ${/couldn|waiting/.test(fc.status) ? "text-[#d4a72c]" : MUTED}`}>{fc.status}</p>}
+              {(fc.replay || fc.live) && (
+                <table className="mt-3 w-full text-sm tabular-nums">
+                  <thead>
+                    <tr className={`text-xs ${MUTED}`}>
+                      <th className="pb-1 text-left font-medium"></th>
+                      <th className="pb-1 text-right font-medium">1st bar color</th>
+                      <th className="pb-1 text-right font-medium">Direction at 5</th>
+                      <th className="pb-1 text-right font-medium">n</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fc.replay && <PathRow name="Typical" r={fc.replay} note="past 200" />}
+                    {fc.live && fc.live.typical.end.n > 0 && <PathRow name="Typical" r={fc.live.typical} note="live" />}
+                    {fc.live && fc.live.jev.end.n > 0 && <PathRow name="Jev's pick" r={fc.live.jev} note="live" />}
+                  </tbody>
+                </table>
+              )}
+              <p className={`mt-2 text-xs ${MUTED}`}>
+                Faded bars on the chart. Each is something gold really did after a moment like this one, rescaled to today's
+                volatility and redrawn at every close. Right % above 50 is an edge; around 50 the bars are only a picture of
+                typical behaviour, not a prediction. {fc.calls} Jev picks this session.
+              </p>
+            </section>
+          )}
 
           <section>
             <Label>Jev flip check</Label>

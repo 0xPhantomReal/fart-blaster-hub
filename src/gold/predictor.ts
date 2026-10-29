@@ -1,4 +1,4 @@
-// Next-candle predictor: will the next 15-minute candle close green or red?
+// Next-candle predictor: will the next candle (1, 5 or 15 minutes) close green or red?
 //
 //   model  — online logistic regression on short-term, scale-free features, trained walk-forward
 //            (every prediction is made before that candle's outcome is seen)
@@ -389,9 +389,11 @@ export class Predictor {
       up_wick: r2((c.high - Math.max(c.open, c.close)) / atr),
       dn_wick: r2((Math.min(c.open, c.close) - c.low) / atr),
     });
+    // The same candles grouped 4 at a time (1h bars on the 15m chart, 20m on 5m, 4m on 1m).
+    const groupSec = this.tfSeconds * 4;
     const hourly: Candle[] = [];
     for (const c of rc) {
-      const b = Math.floor(c.time / 3600) * 3600;
+      const b = Math.floor(c.time / groupSec) * groupSec;
       const cur = hourly[hourly.length - 1];
       if (cur && cur.time === b) {
         cur.high = Math.max(cur.high, c.high);
@@ -408,8 +410,9 @@ export class Predictor {
           "c = color (G/R/D). body (signed), range and wicks in ATR units; close_at 0 = closed at the low, 1 = at the high. Lists are oldest first.",
         session_of_next_candle:
           h >= 13 && h < 16 ? "London/New York overlap" : h >= 7 && h < 13 ? "London" : h >= 16 && h < 21 ? "New York" : "Asia / quiet hours",
-        candles_15m_last_12: rc.slice(-12).map(describe),
-        candles_1h_last_4: hourly.slice(-4).map(describe),
+        candle_minutes: this.tfSeconds / 60,
+        candles_last_12: rc.slice(-12).map(describe),
+        candles_4x_longer_last_4: hourly.slice(-4).map(describe),
         signals: Object.fromEntries(FEATURES.slice(0, 13).map((name, i) => [name, r2(x[i])])),
       },
       model: {
