@@ -120,7 +120,20 @@ export default function Gold() {
                     {lv.move >= 0 ? "+" : ""}
                     {lv.move.toFixed(2)} so far
                   </span>
+                  {lv.move !== 0 && (
+                    <span className={MUTED}> · currently {lv.move > 0 ? "green" : "red"}</span>
+                  )}
                 </div>
+                {g.flip.pFlip !== null && lv.move !== 0 && (
+                  <div className="mt-1 text-sm tabular-nums">
+                    Jev: <span className={g.flip.pFlip >= 0.5 ? "text-[#d4a72c]" : ""}>{pct(g.flip.pFlip, 0)} chance it flips</span>
+                    {g.flip.pMath !== null && (
+                      <span className={`text-xs ${MUTED}`}>
+                        {" "}· math alone {pct(lv.move > 0 ? 1 - g.flip.pMath : g.flip.pMath, 0)}
+                      </span>
+                    )}
+                  </div>
+                )}
               </>
             )}
             <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
@@ -166,6 +179,27 @@ export default function Gold() {
                 </RecordTable>
               </>
             )}
+            {(g.flip.backfill || (g.flip.live && g.flip.live.math.n > 0)) && (
+              <>
+                <p className={`mb-2 mt-4 text-xs ${MUTED}`}>Will the forming candle flip? (scored on its final color)</p>
+                <RecordTable>
+                  {g.flip.backfill && (
+                    <>
+                      <Row name="Math" r={g.flip.backfill.math} note={`past ${g.flip.backfill.math.n}`} />
+                      <Row name="Jev" r={g.flip.backfill.jev} note={`past ${g.flip.backfill.jev.n}`} />
+                      <Row name="Live %" r={g.flip.backfill.blend} note={`past ${g.flip.backfill.blend.n}`} />
+                    </>
+                  )}
+                  {g.flip.live && g.flip.live.math.n > 0 && (
+                    <>
+                      <Row name="Math" r={g.flip.live.math} note="live" />
+                      <Row name="Jev" r={g.flip.live.jev} note="live" />
+                      <Row name="Live %" r={g.flip.live.blend} note="live" />
+                    </>
+                  )}
+                </RecordTable>
+              </>
+            )}
             <p className={`mt-3 text-xs ${MUTED}`}>
               The open forecast (Model, Jev, Final) is made before the candle starts; the live % also uses what the candle
               has done so far, so it naturally gets more certain as the candle runs.
@@ -188,6 +222,20 @@ export default function Gold() {
                 {g.trust ? ` · weight in the blend: Jev ${g.trust.jev.toFixed(2)}, model ${g.trust.model.toFixed(2)}` : ""}.
               </p>
             )}
+          </section>
+
+          <section>
+            <Label>Jev flip check</Label>
+            <p className={`text-sm ${g.flip.status.startsWith("error") || g.flip.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
+              {g.flip.status === "ok" ? "Reading the forming candle every 30 seconds." : g.flip.status}
+            </p>
+            <p className={`mt-1 text-xs ${MUTED}`}>
+              While a candle forms, Jev sees how far it has moved, its high/low, how much it has pulled back, the time left and
+              the last 3 candles (sizes only, no prices) and answers one question: does it hold its color or flip? The live % blends
+              that with the math, weighted by how each scored on past candles rebuilt partway through from 1-minute data.
+              {` ${g.flip.calls} flip calls this session`}
+              {g.flip.weights ? ` · weight: Jev ${g.flip.weights.jev.toFixed(2)}, math ${g.flip.weights.math.toFixed(2)}` : ""}.
+            </p>
           </section>
 
           {g.source !== "Simulated" && (

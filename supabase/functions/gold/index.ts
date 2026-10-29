@@ -4,6 +4,7 @@
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
 // POST { action: "check", snapshot, forTime }       → { pGreen, support, confidence }  (Jev: own call + fact-check)
+// POST { action: "flip", state, slotKey }           → { pFlip, confidence }  (Jev: will the forming candle flip?)
 // POST { action: "tickcheck" }                    → which Pyth host/feed works for live ticks, or exactly why not
 // POST { action: "version" }                        → { version, features }
 
@@ -271,6 +272,27 @@ async function check(data: Record<string, unknown>, model: Record<string, unknow
   };
 }
 
+// ── Jev: will the forming candle flip before it closes? ─────────────────
+
+async function flip(state: Record<string, unknown>) {
+  const a = await ask(
+    { instrument: INSTRUMENT, candle_so_far: state },
+    {
+      type: "choice",
+      instructions:
+        "This 15-minute candle is still forming (see candle_so_far, current_color). Will it HOLD its current color " +
+        "until it closes, or FLIP to the other color? Compare move_so_far with typical_move_in_time_left, and weigh " +
+        "how far it has already pulled back from its extreme and the last few candles.",
+      criteria: {
+        holds: "It closes the same color it is now",
+        flips: "It reverses and closes the opposite color",
+      },
+    },
+  );
+  if (typeof a.probabilities?.flips !== "number") throw new Error("unexpected TypeSafe response shape");
+  return { pFlip: a.probabilities.flips, confidence: typeof a.confidence === "number" ? a.confidence : null };
+}
+
 // ── Handler ────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -298,7 +320,7 @@ Deno.serve(async (req) => {
 
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
-      return json({ version: 9, features: ["stream", "tickcheck", "jev-check"], jev: !!env("TYPESAFE_API_KEY") });
+      return json({ version: 10, features: ["stream", "tickcheck", "jev-check", "jev-flip"], jev: !!env("TYPESAFE_API_KEY") });
     }
 
     if (body.action === "tickcheck") {
@@ -326,6 +348,27 @@ Deno.serve(async (req) => {
       let run = inflight.get(key);
       if (!run) {
         run = check(snapshot.data as Record<string, unknown>, snapshot.model as Record<string, unknown>).then((r) => {
+          jevCache.set(key, { at: Date.now(), body: r });
+          return r;
+        });
+        inflight.set(key, run);
+        run.finally(() => inflight.delete(key)).catch(() => {});
+      }
+      return json(await run);
+    }
+
+    if (body.action === "flip") {
+      if (!env("TYPESAFE_API_KEY")) return json({ error: "TYPESAFE_API_KEY secret is not set" }, 503);
+      const { state, slotKey } = body as { state?: unknown; slotKey?: unknown };
+      if (!state || typeof state !== "object" || JSON.stringify(state).length > 2000) return json({ error: "bad state" }, 400);
+      if (typeof slotKey !== "string" || slotKey.length > 64) return json({ error: "bad slotKey" }, 400);
+      // Shared per 30-second slot (live) or per past candle (replay), so viewers and reloads reuse one answer.
+      const key = `flip:${slotKey}`;
+      const hit = cached<unknown>(jevCache, key, slotKey.startsWith("past:") ? 6 * 3600 * 1000 : 60_000);
+      if (hit) return json(hit);
+      let run = inflight.get(key);
+      if (!run) {
+        run = flip(state as Record<string, unknown>).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });

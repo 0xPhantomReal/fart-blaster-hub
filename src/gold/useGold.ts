@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords } from "./flip";
 import {
   askCheck,
+  askFlip,
   backendConfigured,
   backendVersion,
   LiveFeed,
@@ -16,6 +18,22 @@ import {
 
 /** How many recent past candles Jev is checked on before it is used live. */
 export const BACKFILL = 200;
+/** How many past candles Jev's flip read is replayed on (rebuilt partway through from 1-minute data). */
+export const FLIP_BACKFILL = 150;
+/** How often Jev re-reads the forming candle. */
+export const FLIP_SECONDS = 30;
+
+/** Jev's read on whether the forming candle will flip, and how the flip check has scored. */
+export interface FlipView {
+  status: string;
+  pFlip: number | null; //    Jev's latest chance the candle flips
+  pMath: number | null; //    the math's chance of green, for comparison
+  at: number | null; //       ms timestamp of Jev's latest read
+  backfill: FlipRecords | null;
+  live: FlipRecords | null;
+  weights: { math: number; jev: number } | null;
+  calls: number;
+}
 
 export interface ClosedBar {
   candle: Candle;
@@ -38,6 +56,7 @@ export interface GoldState {
   liveRecord: Trio | null; //      this session
   trust: { model: number; jev: number } | null;
   jev: { on: boolean; status: string; calls: number };
+  flip: FlipView;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
   ticks: TickStatus & { check: TickCheck | null };
   version: number; //              bumps when the chart should redraw
@@ -74,6 +93,23 @@ function writeCache(c: Record<string, JevAnswer>) {
   }
 }
 
+const FLIP_CACHE = "gold.flipcheck.v1";
+function readFlipCache(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(FLIP_CACHE) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+function writeFlipCache(c: Record<string, number>) {
+  try {
+    const keys = Object.keys(c).sort();
+    localStorage.setItem(FLIP_CACHE, JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
+  } catch {
+    // fine: fetched again next visit
+  }
+}
+
 export function useGold(): GoldState {
   const [state, setState] = useState<GoldState>({
     status: "loading",
@@ -90,6 +126,7 @@ export function useGold(): GoldState {
     trust: null,
     jev: { on: false, status: "starting…", calls: 0 },
     ticks: { state: "connecting", detail: "", check: null },
+    flip: { status: "starting…", pFlip: null, pMath: null, at: null, backfill: null, live: null, weights: null, calls: 0 },
     version: 0,
   });
 
@@ -187,6 +224,94 @@ export function useGold(): GoldState {
     let current: Prediction | null = null;
     let lastForming: Candle | null = null;
 
+    // ── Flip check: will the forming candle flip before it closes? ──────
+    const blender = new FlipBlender();
+    let flipReady = false;
+    let flipCalls = 0;
+    let lastFlip: { forTime: number; move: number; pFlip: number; at: number } | null = null;
+    let halfwayFlip: { forTime: number; pMath: number; pJev: number } | null = null;
+    const setFlip = (patch: Partial<FlipView>) => !cancelled && setState((s) => ({ ...s, flip: { ...s.flip, ...patch } }));
+
+    /** Live read: the math, blended with Jev's latest flip read when it is fresh (< 45 s old). */
+    const computeLive = (c: Candle): Live | null => {
+      const math = predictor.live(c, feed.now());
+      if (!math) return null;
+      const move = c.close - c.open;
+      const fresh = lastFlip && lastFlip.forTime === c.time && Date.now() - lastFlip.at < 45_000 && move !== 0;
+      if (!fresh) return math;
+      const pJev = greenFromFlip(move, lastFlip!.pFlip);
+      const pGreen = blender.blend(math.pGreen, pJev);
+      // Keep one mid-candle sample per candle for scoring the flip check.
+      if (math.timeLeftFrac <= 0.5 && (!halfwayFlip || halfwayFlip.forTime !== c.time)) halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev };
+      return { ...math, pGreen, call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0 };
+    };
+
+    /** Ask Jev about the forming candle (every FLIP_SECONDS; shared per slot by all viewers). */
+    const flipTick = async () => {
+      const c = lastForming;
+      if (cancelled || !flipReady || !c || document.hidden) return;
+      const now = feed.now();
+      const secondsLeft = c.time + TF_SECONDS - now;
+      const atr = predictor.atr;
+      const sd = bodySd(bars.map((b) => b.candle));
+      if (secondsLeft < 30 || secondsLeft > TF_SECONDS - 30 || !atr || !sd) return;
+      const state = flipState({ forming: c, secondsLeft, tfSeconds: TF_SECONDS, atr, sd, previous: bars.slice(-3).map((b) => b.candle) });
+      if (!state) return;
+      try {
+        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`), 15_000);
+        flipCalls += 1;
+        lastFlip = { forTime: c.time, move: c.close - c.open, pFlip: a.pFlip, at: Date.now() };
+        const math = predictor.live(c, feed.now());
+        setFlip({ status: "ok", pFlip: a.pFlip, pMath: math?.pGreen ?? null, at: Date.now(), calls: flipCalls, weights: blender.weights });
+        setState((s) => ({ ...s, live: computeLive(c) }));
+      } catch (e) {
+        setFlip({ status: `error: ${(e as Error).message}` });
+      }
+    };
+
+    /** Replay Jev's flip read on ~150 recent candles rebuilt partway through, before trusting it live. */
+    const flipBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
+      if (!(feed instanceof LiveFeed)) return setFlip({ status: "needs live data" });
+      setFlip({ status: "loading 1-minute history…" });
+      const minutes = await feed.minuteHistory(3).catch(() => [] as Candle[]);
+      const atrs = atrByTime(history);
+      const snaps = pastSnapshots(minutes, history, TF_SECONDS, (t) => atrs.get(t - TF_SECONDS) ?? null, (t) => preds.get(t)?.pFinal ?? 0.5, FLIP_BACKFILL);
+      if (snaps.length < 30) return setFlip({ status: "not enough 1-minute history to test the flip check yet" });
+      const cache = readFlipCache();
+      const rows: { pMath: number; pJev: number; y: 0 | 1 }[] = [];
+      let done = 0;
+      const lanes = Array.from({ length: 6 }, (_, k) => snaps.filter((_, i) => i % 6 === k));
+      const answers = new Map<number, number>();
+      await Promise.all(
+        lanes.map(async (list) => {
+          for (const sn of list) {
+            if (cancelled) return;
+            let pFlip = cache[String(sn.time)];
+            if (pFlip === undefined) {
+              try {
+                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`), 30_000)).pFlip;
+                cache[String(sn.time)] = pFlip;
+                flipCalls += 1;
+              } catch {
+                continue;
+              }
+            }
+            answers.set(sn.time, pFlip);
+            if (++done % 10 === 0) setFlip({ status: `testing Jev's flip read on past candles: ${done} of ${snaps.length}`, calls: flipCalls });
+          }
+        }),
+      );
+      writeFlipCache(cache);
+      for (const sn of snaps) {
+        const pf = answers.get(sn.time);
+        if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), y: sn.y });
+      }
+      if (rows.length < 30) return setFlip({ status: "couldn't test the flip check on enough past candles" });
+      setFlip({ status: "ok", backfill: blender.backfill(rows), weights: blender.weights, calls: flipCalls });
+      flipReady = true;
+      void flipTick();
+    };
+
     /** (Re)train on `history` (walk-forward) and make it the live predictor. */
     const adopt = (history: Candle[]) => {
       const t = train(history);
@@ -217,9 +342,17 @@ export function useGold(): GoldState {
       }
       jevReady = await runBackfill(t.preds, history);
       if (jevReady && current) await consult(current);
+      if (v.features.includes("jev-flip")) await flipBackfill(t.preds, history);
+      else setFlip({ status: "waiting for the new backend: ask Lovable to “Deploy the gold edge function”" });
     };
 
     const onClose = async (c: Candle) => {
+      if (halfwayFlip && halfwayFlip.forTime === c.time && c.close !== c.open) {
+        setFlip({ live: blender.recordLive(halfwayFlip.pMath, halfwayFlip.pJev, c.close > c.open ? 1 : 0), weights: blender.weights });
+        halfwayFlip = null;
+      }
+      lastFlip = null;
+      setFlip({ pFlip: null, at: null });
       const { outcome, next } = predictor.close(c);
       bars.push({ candle: c, outcome });
       if (bars.length > MAX_BARS) bars.shift();
@@ -268,7 +401,7 @@ export function useGold(): GoldState {
           // Data is flowing again, so a previous hiccup message no longer applies.
           else {
             lastForming = c;
-            const live = predictor.live(c, feed.now());
+            const live = computeLive(c);
             setState((s) => ({ ...s, forming: c, live, error: s.error?.startsWith("Live data hiccup") ? null : s.error }));
           }
         },
@@ -290,13 +423,15 @@ export function useGold(): GoldState {
     // Time running out changes the odds too, so refresh the live read every second.
     const clock = window.setInterval(() => {
       if (!lastForming || cancelled) return;
-      const live = predictor.live(lastForming, feed.now());
+      const live = computeLive(lastForming);
       setState((s) => ({ ...s, live }));
     }, 1000);
+    const flipClock = window.setInterval(() => void flipTick(), FLIP_SECONDS * 1000);
 
     return () => {
       cancelled = true;
       window.clearInterval(clock);
+      window.clearInterval(flipClock);
       stop?.();
     };
   }, []);

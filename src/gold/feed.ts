@@ -89,6 +89,17 @@ export class LiveFeed implements Feed {
     return out.filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
   }
 
+  /** 1-minute candles for the last `days` days (2-day chunks). Used to replay Jev's flip read on past candles. */
+  async minuteHistory(days = 3): Promise<Candle[]> {
+    const end = Math.floor(nowSec() / 60) * 60;
+    const out: Candle[] = [];
+    for (let from = end - days * 86400; from < end; from += 2 * 86400) {
+      out.push(...(await this.fetchRange(from, Math.min(end, from + 2 * 86400), 1)));
+    }
+    const seen = new Set<number>();
+    return out.filter((m) => !seen.has(m.time) && seen.add(m.time)).sort((a, b) => a.time - b.time);
+  }
+
   start(
     onBar: (c: Candle, closed: boolean) => void,
     onError: (msg: string) => void,
@@ -284,6 +295,11 @@ export interface TickCheck {
 /** Ask the backend to test the Pyth tick stream end to end and say exactly what's wrong. */
 export async function tickCheck(): Promise<TickCheck> {
   return callFn<TickCheck>({ action: "tickcheck" });
+}
+
+/** Jev: will the forming candle flip color before it closes? Shared per 30-second slot on the backend. */
+export async function askFlip(state: Record<string, unknown>, slotKey: string): Promise<{ pFlip: number }> {
+  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey });
 }
 
 /** Which backend is deployed (older versions answer "unknown action"). */
