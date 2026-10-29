@@ -1,158 +1,80 @@
-import { useEffect } from "react";
-import { GoldChart, type FanLines } from "@/gold/GoldChart";
-import type { BandCalibration, FanScore } from "@/gold/fan";
+import { useEffect, useState } from "react";
+import { GoldChart } from "@/gold/GoldChart";
 import { TIMEFRAME_MIN } from "@/gold/feed";
-import type { TrackSummary } from "@/gold/model";
-import { useGoldEngine } from "@/gold/useGoldEngine";
-import { reversionAt } from "@/gold/reversion";
+import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
+import { BACKFILL, useGold } from "@/gold/useGold";
 
 const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
-const px = (x: number | null | undefined) => (x == null ? "—" : x.toFixed(2));
+const time = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const GREEN = "text-[#26a69a]";
+const RED = "text-[#ef5350]";
+const MUTED = "text-[#8b949e]";
 
-function RecordRow({ name, t }: { name: string; t: TrackSummary }) {
-  const skillCls = t.skill == null ? "" : t.skill > 0 ? "text-[#26a69a]" : "text-[#ef5350]";
+const SUPPORT_WORDS = ["points the other way", "is mixed or weak", "mostly supports it", "clearly supports it"];
+
+function Row({ name, r, note }: { name: string; r: TrackRecord | null | undefined; note?: string }) {
+  if (!r) return null;
+  const skill = r.skill;
   return (
     <tr className="border-t border-[#262c36]">
-      <td className="py-1 text-left">{name}</td>
-      <td className="py-1 text-right">{t.calls >= 20 ? pct(t.hitRate) : "—"}</td>
-      <td className="py-1 text-right">{t.calls || "—"}</td>
-      <td className={`py-1 text-right ${skillCls}`}>{t.skill == null ? "—" : t.skill.toFixed(3)}</td>
+      <td className="py-1.5 text-left">
+        {name}
+        {note && <span className={`text-xs ${MUTED}`}> · {note}</span>}
+      </td>
+      <td className="py-1.5 text-right">{r.calls >= 20 ? pct(r.hitRate) : "—"}</td>
+      <td className="py-1.5 text-right">{r.calls.toLocaleString()}</td>
+      <td className={`py-1.5 text-right ${skill == null ? "" : skill > 0.002 ? GREEN : skill < -0.002 ? RED : ""}`}>
+        {skill == null ? "—" : (Math.abs(skill) < 0.0005 ? 0 : skill).toFixed(3)}
+      </td>
     </tr>
+  );
+}
+
+function RecordTable({ children }: { children: React.ReactNode }) {
+  return (
+    <table className="w-full text-sm tabular-nums">
+      <thead>
+        <tr className={`text-xs ${MUTED}`}>
+          <th className="pb-1 text-left font-medium"></th>
+          <th className="pb-1 text-right font-medium">Right</th>
+          <th className="pb-1 text-right font-medium">Calls</th>
+          <th className="pb-1 text-right font-medium">Skill</th>
+        </tr>
+      </thead>
+      <tbody>{children}</tbody>
+    </table>
   );
 }
 
 const Label = ({ children }: { children: React.ReactNode }) => (
-  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[#8b949e]">{children}</h2>
+  <h2 className={`mb-2 text-xs font-semibold uppercase tracking-wider ${MUTED}`}>{children}</h2>
 );
 
-function ScoreRow({ name, sc }: { name: string; sc: FanScore | null }) {
-  if (!sc) return null;
-  const good = (v: number) => (v > 0.005 ? "text-[#26a69a]" : v < -0.005 ? "text-[#ef5350]" : "");
-  const near = (v: number, aim: number) => (Math.abs(v - aim) <= 0.07 ? "text-[#26a69a]" : "text-[#d4a72c]");
-  return (
-    <tr className="border-t border-[#262c36]">
-      <td className="py-1 text-left">
-        {name}
-        <span className="text-xs text-[#8b949e]"> · {sc.windows}</span>
-      </td>
-      <td className={`py-1 text-right ${near(sc.in80, 0.8)}`}>{pct(sc.in80, 0)}</td>
-      <td className={`py-1 text-right ${near(sc.in50, 0.5)}`}>{pct(sc.in50, 0)}</td>
-      <td className={`py-1 text-right ${good(sc.centerSkill)}`}>
-        {sc.centerSkill >= 0 ? "+" : ""}
-        {(sc.centerSkill * 100).toFixed(1)}%
-      </td>
-    </tr>
-  );
-}
-
-function ForecastScoreboard(props: {
-  backtest: FanScore | null;
-  calibration: BandCalibration | null;
-  running: boolean;
-  livePlain: FanScore | null;
-  liveJev: FanScore | null;
-}) {
-  const any = props.backtest || props.livePlain || props.liveJev;
-  return (
-    <div className="mt-3">
-      <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[#8b949e]">How accurate is it?</div>
-      {any ? (
-        <table className="w-full text-sm tabular-nums">
-          <thead>
-            <tr className="text-xs text-[#8b949e]">
-              <th className="pb-1 text-left font-medium"></th>
-              <th className="pb-1 text-right font-medium">In 80%</th>
-              <th className="pb-1 text-right font-medium">In 50%</th>
-              <th className="pb-1 text-right font-medium">vs no move</th>
-            </tr>
-          </thead>
-          <tbody>
-            <ScoreRow name="Replay" sc={props.backtest} />
-            <ScoreRow name="Live" sc={props.livePlain} />
-            <ScoreRow name="Live + Jev" sc={props.liveJev} />
-          </tbody>
-        </table>
-      ) : (
-        <p className="text-sm text-[#8b949e]">{props.running ? "Replaying past forecasts…" : "No scores yet."}</p>
-      )}
-      <p className="mt-1 text-xs text-[#8b949e]">
-        Good = the 80% band holds ~80% of real prices, the 50% band ~50%, and the middle line beats assuming no move (above
-        0). Replay = the same method run on past moments using only data before each one; its misses set how much the live
-        bands are stretched
-        {props.calibration ? ` (80% band ×${props.calibration.k80.toFixed(2)}, 50% band ×${props.calibration.k50.toFixed(2)}).` : "."} Live scores fill in as forecasts play out; the small number is how many 5-candle windows were scored.
-      </p>
-    </div>
-  );
-}
-
 export default function Gold() {
-  const g = useGoldEngine();
+  const g = useGold();
   const p = g.prediction;
-  const s = g.summary;
+  const [, tick] = useState(0);
 
   useEffect(() => {
     const prev = document.title;
     document.title = "Gold Next Candle";
+    const id = setInterval(() => tick((n) => n + 1), 1000); // keep the countdown moving
     return () => {
       document.title = prev;
+      clearInterval(id);
     };
   }, []);
 
-  const lastCandle = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
-  const nc = g.live; // live read of the forming candle (null between candles)
-  const isLive = !!nc;
-  const colorOf = (c: -1 | 0 | 1 | undefined) => (c === 1 ? "green" : c === -1 ? "red" : "none");
-  const clsOf = (d: string) => (d === "green" ? "text-[#26a69a]" : d === "red" ? "text-[#ef5350]" : "text-[#8b949e]");
-
-  const dir = colorOf(isLive ? nc.call : p?.call);
-  const prob = isLive ? nc.pGreen : (p?.pFinal ?? null);
-  const dirText = !s?.warm ? "LEARNING" : dir === "none" ? (isLive ? "TOO CLOSE" : "NO CALL") : dir.toUpperCase();
-
-  const move = nc?.move ?? 0;
-  const secsLeft = nc ? Math.round(nc.timeLeftFrac * TIMEFRAME_MIN * 60) : 0;
-  const clock = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")}`;
-  const fc = g.forecastOn ? g.forecast : null;
-  const fcFan = fc ? (fc.jev ?? fc.plain) : null;
+  const last = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
   const tf = TIMEFRAME_MIN * 60;
-  const toPrice = (v: number) => (fc ? fc.startPrice + v * fc.atr : 0);
-  const fanLines: FanLines | null =
-    fc && fcFan
-      ? {
-          anchor: { time: fc.forTime - tf, price: fc.startPrice },
-          points: fcFan.steps.map((st, k) => ({
-            time: fc.forTime + k * tf,
-            p10: toPrice(st.p10),
-            p25: toPrice(st.p25),
-            p50: toPrice(st.p50),
-            p75: toPrice(st.p75),
-            p90: toPrice(st.p90),
-          })),
-        }
-      : null;
-  const fs = g.forecastScores;
-  // With the forecast on, its first candle replaces the single ghost.
-  const ghost = fc ? null : (nc?.ghost ?? p?.ghost ?? null);
-  const ghostInfo = nc?.ghost ?? p?.ghost ?? null;
+  const isForming = !!(p && g.forming && g.forming.time === p.forTime);
+  const closesAt = p ? p.forTime + tf : null;
+  const secsLeft = closesAt && g.source !== "Simulated" ? Math.max(0, Math.round(closesAt - Date.now() / 1000)) : null;
 
-  const atOpen: string[] = [];
-  if (p?.pModel != null) atOpen.push(`Model ${pct(p.pModel, 0)}`);
-  if (g.jevOn) {
-    if (p?.pJev != null) atOpen.push(`Jev ${pct(p.pJev, 0)}`);
-    else if (g.jevPending) atOpen.push("Jev thinking…");
-    else if (g.jevError) atOpen.push("Jev error (see below)");
-  }
-  const rd = g.next.reads;
-  if (rd) {
-    const pts = (rd.pattern / 4) * 100; // log-odds → approx. percentage points near 50%
-    atOpen.push(`Patterns ${pts >= 0 ? "+" : ""}${pts.toFixed(1)} pts`);
-    if (rd.analog !== null) atOpen.push(`Analogs ${pct(rd.analog, 0)}`);
-  }
-  if (p?.pFinal != null && (g.jevOn || isLive || rd)) atOpen.push(`→ ${pct(p.pFinal, 0)}`);
-
-  // Label only the recent candles so the chart stays readable.
-  const recentFrom = g.bars.length > 40 ? g.bars[g.bars.length - 40].candle.time : 0;
-  const patternMarks = (g.patterns?.candleMarks ?? []).filter((m) => m.time >= recentFrom);
-  const patternLines = (g.patterns?.chart ?? []).flatMap((cp) => cp.lines.map((l) => ({ ...l, bias: cp.bias }))).slice(0, 8);
+  const dir = p?.call === 1 ? "green" : p?.call === -1 ? "red" : "none";
+  const big = !p ? "—" : dir === "none" ? "NO CALL" : dir.toUpperCase();
+  const bigCls = dir === "green" ? GREEN : dir === "red" ? RED : MUTED;
+  const modelDir = p?.modelCall === 1 ? "green" : p?.modelCall === -1 ? "red" : null;
 
   return (
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
@@ -160,274 +82,89 @@ export default function Gold() {
         <h1 className="text-base font-semibold">
           <span className="text-[#d4a72c]">XAU/USD</span> · <span className="text-[#d4a72c]">{TIMEFRAME_MIN}m</span>
         </h1>
-        <div className={`text-lg font-semibold tabular-nums ${lastCandle && lastCandle.close < lastCandle.open ? "text-[#ef5350]" : "text-[#26a69a]"}`}>
-          {lastCandle ? lastCandle.close.toFixed(2) : "—"}
-        </div>
-        <button
-          type="button"
-          aria-pressed={g.forecastOn}
-          onClick={() => g.setForecastOn(!g.forecastOn)}
-          className={`ml-auto rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-            g.forecastOn ? "border-[#d4a72c] bg-[#d4a72c]/15 text-[#d4a72c]" : "border-[#262c36] text-[#8b949e] hover:text-[#e6e8eb]"
-          }`}
-        >
-          Forecast 5 {g.forecastOn ? "on" : "off"}
-        </button>
-        <div className={`text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : "text-[#8b949e]"}`}>
+        <div className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}>{last ? last.close.toFixed(2) : "—"}</div>
+        <div className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}>
           {g.status === "loading" ? "loading…" : g.source === "Simulated" ? "SIMULATED DATA" : "Pyth live"}
         </div>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[58vh_auto] md:grid-cols-[1fr_300px] md:grid-rows-1">
+      <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart
-            bars={g.bars}
-            forming={g.forming}
-            ghost={ghost}
-            fan={fanLines}
-            patternMarks={patternMarks}
-            patternLines={patternLines}
-            version={g.version}
-          />
-          {g.status === "loading" && (
-            <div className="absolute inset-0 grid place-items-center text-sm text-[#8b949e]">Training on history…</div>
-          )}
+          <GoldChart bars={g.bars} forming={g.forming} version={g.version} />
+          {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading gold history…</div>}
         </div>
 
-        <aside className="flex flex-col gap-5 overflow-auto border-t border-[#262c36] bg-[#161b22] p-4 md:border-l md:border-t-0">
+        <aside className="flex flex-col gap-6 overflow-auto border-t border-[#262c36] bg-[#161b22] p-4 md:border-l md:border-t-0">
           <div className="rounded-xl bg-[#1f252e] p-4 text-center">
-            <div className="text-xs uppercase tracking-wider text-[#8b949e]">
-              {isLive ? "This candle · live" : "Next candle"}
+            <div className={`text-xs uppercase tracking-wider ${MUTED}`}>
+              {isForming ? "This candle" : "Next candle"}
+              {closesAt ? ` · closes ${time(closesAt)}` : ""}
+              {secsLeft !== null ? ` · ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")} left` : ""}
             </div>
-            <div className={`my-0.5 text-3xl font-bold ${clsOf(dir)}`}>{p ? dirText : "—"}</div>
-            <div className="tabular-nums">{prob == null ? "—" : `${pct(prob)} chance green`}</div>
-            {isLive && (
-              <>
-                <div className="mx-auto mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#ef5350]/40">
-                  <div className="h-full bg-[#26a69a] transition-[width] duration-300" style={{ width: `${(prob ?? 0.5) * 100}%` }} />
-                </div>
-                <div className="mt-2 text-sm tabular-nums">
-                  <span className={clsOf(move > 0 ? "green" : move < 0 ? "red" : "none")}>
-                    {move >= 0 ? "+" : ""}
-                    {move.toFixed(2)} so far
-                  </span>
-                  <span className="text-[#8b949e]"> · {clock} left</span>
-                </div>
-                {g.jevOn && (
-                  <div className="mt-1 text-xs tabular-nums text-[#8b949e]">
-                    {g.jevLive
-                      ? `Jev live: ${pct(g.jevLive.pGreen, 0)} green · ${Math.max(0, Math.round((Date.now() - g.jevLive.at) / 1000))}s ago`
-                      : "Jev live: —"}
-                    {g.jevLiveStatus !== "reading" && <div className="text-[#d4a72c]">{g.jevLiveStatus}</div>}
-                  </div>
-                )}
-              </>
+            <div className={`my-1 text-3xl font-bold ${bigCls}`}>{big}</div>
+            <div className="tabular-nums">{p?.pFinal == null ? "—" : `${pct(p.pFinal)} chance green`}</div>
+            <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
+              Model {pct(p?.pModel, 0)}
+              {p?.jev ? ` · Jev ${pct(p.jev.pGreen, 0)}` : ""}
+            </div>
+            {p?.jev && p.jev.support !== null && modelDir && (
+              <div className={`mt-1 text-xs ${p.blockedByCheck ? "text-[#d4a72c]" : MUTED}`}>
+                Jev's fact-check of the model's {modelDir} call: the evidence{" "}
+                {SUPPORT_WORDS[Math.round(Math.min(3, Math.max(0, p.jev.support)))]} ({p.jev.support.toFixed(1)}/3)
+                {p.blockedByCheck ? " → no call" : ""}
+              </div>
             )}
-            <div className="mt-1.5 text-xs tabular-nums text-[#8b949e]">
-              {atOpen.length ? `${isLive ? "At the open: " : ""}${atOpen.join(" · ")}` : "\u00a0"}
-            </div>
           </div>
 
-          {g.forecastOn && (
-            <section>
-              <Label>Forecast · next 5 candles</Label>
-              {!fc || !fcFan ? (
-                <p className="text-sm text-[#8b949e]">building the range…</p>
-              ) : (
+          <section>
+            <Label>How accurate is it?</Label>
+            <p className={`mb-2 text-xs ${MUTED}`}>Tested on past candles, each predicted before it happened:</p>
+            <RecordTable>
+              <Row name="Model" r={g.walkForward} note={`${g.walkForward?.n.toLocaleString() ?? 0} candles`} />
+              {g.backfill && (
                 <>
-                  <p className="mb-2 text-xs text-[#8b949e]">
-                    Range from {fc.scenarios.toLocaleString()} real gold paths
-                    {fc.jev ? ", weighted by Jev" : ""}. Gold line = middle, dashed = 50% band, dotted = 80% band.{" "}
-                    <span className="text-[#e6e8eb]">{pct(fcFan.endsHigher, 0)}</span> chance it ends higher. Updated{" "}
-                    {Math.max(0, Math.round((Date.now() - fc.updatedAt) / 1000))}s ago{g.forecastBusy ? " · Jev re-weighting…" : ""}.
-                  </p>
-                  <table className="w-full text-sm tabular-nums">
-                    <thead>
-                      <tr className="text-xs text-[#8b949e]">
-                        <th className="pb-1 text-left font-medium">Close at</th>
-                        <th className="pb-1 text-right font-medium">Green</th>
-                        <th className="pb-1 text-right font-medium">Middle</th>
-                        <th className="pb-1 text-right font-medium">80% range</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {fcFan.steps.map((st, k) => (
-                        <tr key={k} className="border-t border-[#262c36]">
-                          <td className="py-1 text-left text-[#8b949e]">
-                            {new Date((fc.forTime + (k + 1) * tf) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                          </td>
-                          <td className={`py-1 text-right ${st.pGreen >= 0.55 ? "text-[#26a69a]" : st.pGreen <= 0.45 ? "text-[#ef5350]" : ""}`}>
-                            {pct(st.pGreen, 0)}
-                          </td>
-                          <td className="py-1 text-right">{toPrice(st.p50).toFixed(1)}</td>
-                          <td className="py-1 text-right text-[#8b949e]">
-                            {toPrice(st.p10).toFixed(0)}–{toPrice(st.p90).toFixed(0)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {fc.note && <p className="mt-2 text-xs text-[#d4a72c]">{fc.note}</p>}
+                  <Row name="Model" r={g.backfill.model} note={`last ${BACKFILL}`} />
+                  <Row name="Jev" r={g.backfill.jev} note={`last ${BACKFILL}`} />
+                  <Row name="Final" r={g.backfill.final} note={`last ${BACKFILL}`} />
                 </>
               )}
-              <ForecastScoreboard backtest={fs.backtest} calibration={fs.calibration} running={fs.backtestRunning} livePlain={fs.livePlain} liveJev={fs.liveJev} />
-            </section>
-          )}
-
-          <section>
-            <Label>Ghost candle</Label>
-            <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 tabular-nums">
-              <dt className="text-[#8b949e]">Expected high</dt>
-              <dd className="text-right">{px(ghostInfo?.high)}</dd>
-              <dt className="text-[#8b949e]">Expected close</dt>
-              <dd className="text-right">{px(ghostInfo?.close)}</dd>
-              <dt className="text-[#8b949e]">Expected low</dt>
-              <dd className="text-right">{px(ghostInfo?.low)}</dd>
-            </dl>
-          </section>
-
-          <section>
-            <Label>Mean reversion (measured)</Label>
-            {g.reversion ? (
-              <p className="text-sm text-[#8b949e]">
-                A move at the halfway point keeps{" "}
-                <span className="text-[#e6e8eb]">{pct(reversionAt(g.reversion, g.reversion.minutesPerCandle / 2).hold, 0)}</span> of itself by
-                the close, on average. After 3 minutes it keeps{" "}
-                <span className="text-[#e6e8eb]">{pct(reversionAt(g.reversion, 3).hold, 0)}</span>. Measured from {g.reversion.candles} candles of
-                1-minute gold data.
-              </p>
-            ) : (
-              <p className="text-sm text-[#8b949e]">{g.source === "Simulated" ? "Needs live data." : "Measuring from 1-minute history…"}</p>
-            )}
-          </section>
-
-          <section>
-            <Label>Patterns now</Label>
-            {g.patterns && g.patterns.active.length ? (
-              <ul className="grid gap-1.5 text-sm">
-                {g.patterns.active.map((a) => (
-                  <li key={a.key} className="flex justify-between gap-3">
-                    <span className={a.bias === "bull" ? "text-[#26a69a]" : a.bias === "bear" ? "text-[#ef5350]" : "text-[#e6e8eb]"}>{a.key}</span>
-                    <span className="text-right text-xs tabular-nums text-[#8b949e]">
-                      {a.n
-                        ? `next green ${pct(a.greenNext, 0)} of ${a.n.toLocaleString()}${a.edge !== null && Math.abs(a.edge) < 0.02 ? " · no real edge" : ""}`
-                        : "not measured yet"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-[#8b949e]">No candlestick or chart pattern on the last candle.</p>
-            )}
-            <p className="mt-2 text-xs text-[#8b949e]">
-              Each pattern is measured on gold's own history{g.patterns?.base != null ? ` (base rate: ${pct(g.patterns.base, 0)} of candles close green)` : ""}.
-              A pattern only moves the forecast as much as it has actually beaten that base rate.
-            </p>
-          </section>
-
-          <section>
-            <Label>Next-candle accuracy</Label>
-            {g.next.report ? (
+            </RecordTable>
+            {g.live && g.live.model.n > 0 && (
               <>
-                <table className="w-full text-sm tabular-nums">
-                  <thead>
-                    <tr className="text-xs text-[#8b949e]">
-                      <th className="pb-1 text-left font-medium"></th>
-                      <th className="pb-1 text-right font-medium">Hit rate</th>
-                      <th className="pb-1 text-right font-medium">Calls</th>
-                      <th className="pb-1 text-right font-medium">Skill</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(
-                      [
-                        ["Combined", g.next.report.test.combined],
-                        ["Model", g.next.report.test.model],
-                        ["Patterns", g.next.report.test.patterns],
-                        ["Analogs", g.next.report.test.analogs],
-                      ] as const
-                    ).map(([name, sc]) => (
-                      <tr key={name} className="border-t border-[#262c36]">
-                        <td className="py-1 text-left">{name}</td>
-                        <td className="py-1 text-right">{sc.calls >= 20 ? pct(sc.hitRate) : "—"}</td>
-                        <td className="py-1 text-right">{sc.calls}</td>
-                        <td className={`py-1 text-right ${sc.skill > 0.002 ? "text-[#26a69a]" : sc.skill < -0.002 ? "text-[#ef5350]" : ""}`}>
-                          {sc.skill.toFixed(3)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <p className="mt-1 text-xs text-[#8b949e]">
-                  Fitted on {g.next.report.trainN.toLocaleString()} older candles, scored on the {g.next.report.test.combined.n.toLocaleString()} most
-                  recent ones it never saw. A call = leaning at least 4 points off 50%. Skill above 0 = better than guessing the base rate.
-                </p>
+                <p className={`mb-2 mt-4 text-xs ${MUTED}`}>Live, since this page opened:</p>
+                <RecordTable>
+                  <Row name="Model" r={g.live.model} />
+                  {g.jev.on && <Row name="Jev" r={g.live.jev} />}
+                  <Row name="Final" r={g.live.final} />
+                </RecordTable>
               </>
-            ) : (
-              <p className="text-sm text-[#8b949e]">{g.next.running ? "Testing on history…" : "Waits for history to load."}</p>
             )}
+            <p className={`mt-3 text-xs ${MUTED}`}>
+              Right = share of calls that were correct. A call needs at least 55% one way; Final also needs Jev's fact-check to
+              score {SUPPORT_NEEDED}+ of 3. Skill above 0 means the forecasts carry real information beyond the base rate; at or
+              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: 15-minute gold is close to a coin
+              flip.
+            </p>
           </section>
 
           <section>
-            <Label>Why</Label>
-            <ul className="grid gap-1.5">
-              {p?.drivers.length ? (
-                p.drivers.map((d) => (
-                  <li key={d.name} className="flex justify-between gap-2">
-                    <span>{d.name}</span>
-                    <span className={d.push > 0 ? "text-[#26a69a]" : "text-[#ef5350]"}>{d.push > 0 ? "↑ green" : "↓ red"}</span>
-                  </li>
-                ))
-              ) : (
-                <li className="text-[#8b949e]">{s?.warm ? "nothing stands out" : "warming up"}</li>
-              )}
-            </ul>
-          </section>
-
-          <section>
-            <Label>Out-of-sample record</Label>
-            {s && (
-              <table className="w-full tabular-nums">
-                <thead>
-                  <tr className="text-xs text-[#8b949e]">
-                    <th className="pb-1.5 text-left font-medium"></th>
-                    <th className="pb-1.5 text-right font-medium">Hit rate</th>
-                    <th className="pb-1.5 text-right font-medium">Calls</th>
-                    <th className="pb-1.5 text-right font-medium">Skill</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {g.jevOn && <RecordRow name="Blend" t={s.final} />}
-                  <RecordRow name="Model" t={s.model} />
-                  <RecordRow name="Live @ halfway" t={s.halfway} />
-                  {g.jevOn && <RecordRow name="Jev" t={s.jev} />}
-                </tbody>
-              </table>
-            )}
-            <p className="mt-2 text-xs text-[#8b949e]">
-              Always guessing the more common color: {pct(s?.model.majority)}. Ghost held the candle {pct(s?.shape.insideRate, 0)} of the time.
+            <Label>Jev</Label>
+            <p className={`text-sm ${g.jev.status.startsWith("error") || g.jev.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
+              {g.jev.status === "ok" ? "Checking each candle." : g.jev.status}
             </p>
-            {g.jevOn && (
-              <p className="mt-2 text-xs tabular-nums text-[#8b949e]">
-                Jev calls this session: {g.jevCalls.open} at candle open · {g.jevCalls.live} live · {g.jevCalls.skipped} skipped (nothing new)
-              </p>
-            )}
-            <p className="mt-2 text-xs text-[#8b949e]">
-              Skill above 0 means real information beyond the base rate. Every number here comes from predictions made before the candle happened.
-            </p>
-            {(g.error || g.jevError || (s && !s.warm)) && (
-              <p className="mt-2 text-xs text-[#d4a72c]">
-                {s && !s.warm && `Learning: ${s.learnedFrom} of ${s.warmup} candles before calls count. `}
-                {g.error && `${g.error} `}
-                {g.jevError && `Jev error: ${g.jevError}`}
+            {g.jev.on && (
+              <p className={`mt-1 text-xs ${MUTED}`}>
+                Each candle, Jev makes its own call from the candles and signals (without seeing the model), and separately
+                fact-checks the model's call. {g.jev.calls} Jev calls this session
+                {g.trust ? ` · weight in the blend: Jev ${g.trust.jev.toFixed(2)}, model ${g.trust.model.toFixed(2)}` : ""}.
               </p>
             )}
           </section>
 
-          <div className="flex flex-wrap gap-3 text-xs text-[#8b949e]">
-            <span>▲▼ call on that candle (gray = missed)</span>
-            <span>faded candle = ghost</span>
-          </div>
+          {g.error && <p className="text-xs text-[#d4a72c]">{g.error}</p>}
+          <p className={`text-xs ${MUTED}`}>
+            Arrows mark candles a call was made for: colored = right, gray = wrong. Trained on {g.trainedOn.toLocaleString()} candles.
+          </p>
         </aside>
       </main>
     </div>

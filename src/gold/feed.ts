@@ -83,18 +83,6 @@ export class LiveFeed implements Feed {
     return out.filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
   }
 
-  /** 1-minute candles for the last `days` days, fetched in 2-day chunks. Used to measure mean reversion. */
-  async minuteHistory(days = 10): Promise<Candle[]> {
-    const end = Math.floor(nowSec() / 60) * 60;
-    const chunk = 2 * 86400;
-    const out: Candle[] = [];
-    for (let from = end - days * 86400; from < end; from += chunk) {
-      out.push(...(await this.fetchRange(from, Math.min(end, from + chunk), 1)));
-    }
-    const seen = new Set<number>();
-    return out.filter((m) => !seen.has(m.time) && seen.add(m.time)).sort((a, b) => a.time - b.time);
-  }
-
   start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void): () => void {
     let stopped = false;
     let forming: Candle | null = null;
@@ -245,61 +233,26 @@ export class LiveFeed implements Feed {
   }
 }
 
-export interface JevVerdict {
-  choice: "green" | "red";
-  probGreen: number;
-  confidence: number;
-  /** Only the current backend returns this key; its absence means the old version is deployed. */
-  usage?: unknown;
+/** Jev's answers for one candle: its own chance of green, and its fact-check score (0–3) of the model's call. */
+export interface CheckResult {
+  pGreen: number;
+  support: number | null;
+  confidence: number | null;
 }
 
-export interface ForecastVerdict {
-  choice: string;
-  probabilities: Record<string, number>;
-  confidence: number;
+/** Ask Jev about the candle opening at `forTime`. Cached per candle on the backend, so viewers share one answer. */
+export async function askCheck(snapshot: unknown, forTime: number): Promise<CheckResult> {
+  return callFn<CheckResult>({ action: "check", snapshot, forTime });
 }
 
-/** Ask Jev which of the scenario paths is most likely. One call per candle, shared by all viewers. */
-export async function askForecast(
-  snapshot: Record<string, unknown>,
-  options: Record<string, string>,
-  slotKey: string,
-): Promise<ForecastVerdict> {
-  return callFn<ForecastVerdict>({ action: "jev", mode: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
-}
-
-export interface PathRatings {
-  ratings: Record<string, number>; // Jev's probability for each path within its batch
-  batch: number; //                   batch size used (probabilities sum to 1 within each batch)
-  calls: number;
-  tokens: number;
-}
-
-/** Jev rates up to 2,000 forecast paths (batches of 250 in parallel). One run per minute, shared by all viewers. */
-export async function ratePaths(
-  snapshot: Record<string, unknown>,
-  options: Record<string, string>,
-  slotKey: string,
-): Promise<PathRatings> {
-  return callFn<PathRatings>({ action: "forecast", snapshot, options, slotKey, timeframeMin: TIMEFRAME_MIN });
-}
-
-/** Which backend is deployed. Old versions don't know this action, which tells us live Jev isn't available yet. */
+/** Which backend is deployed (older versions answer "unknown action"). */
 export async function backendVersion(): Promise<{ version: number; features: string[] } | null> {
-  // (features: "stream", "jev-live", "jev-forecast")
   try {
     return await callFn<{ version: number; features: string[] }>({ action: "version" });
   } catch (e) {
     if (/unknown action/i.test((e as Error).message)) return null;
     throw e;
   }
-}
-
-export async function askJev(
-  snapshot: Record<string, unknown>,
-  opts: { mode?: "open" | "live"; slotKey?: string } = {},
-): Promise<JevVerdict> {
-  return callFn<JevVerdict>({ action: "jev", snapshot, timeframeMin: TIMEFRAME_MIN, ...opts });
 }
 
 // ── Simulated gold (no backend needed) ─────────────────────────────────
