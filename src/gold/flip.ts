@@ -9,7 +9,7 @@
 // Everything is scored on the final color of the candle.
 
 import type { Candle } from "./indicators";
-import { normCdf, Stacker, Tracker, type TrackRecord } from "./predictor";
+import { normCdf, Stacker } from "./predictor";
 
 const r2 = (v: number) => Number(v.toFixed(2));
 const logit = (p: number) => {
@@ -89,21 +89,46 @@ export function greenFromFlip(move: number, pFlip: number): number {
   return clamp(move > 0 ? 1 - pFlip : pFlip);
 }
 
+/** Of the candles that actually flipped, how many were seen coming — and how many false alarms. */
+export interface CatchRecord {
+  flips: number; //   candles that flipped after the read
+  caught: number; //  flipped, and the read said "flips" (more likely than not)
+  alarms: number; //  said "flips" but the candle held
+}
+
+/** Running count of flips caught and false alarms. */
+export class CatchTracker {
+  private r: CatchRecord = { flips: 0, caught: 0, alarms: 0 };
+  record(pGreen: number, move: number, y: 0 | 1) {
+    if (move === 0) return;
+    const pFlip = move > 0 ? 1 - pGreen : pGreen;
+    const flipped = (move > 0 ? 1 : 0) !== y;
+    const saysFlip = pFlip > 0.5;
+    if (flipped) this.r.flips += 1;
+    if (flipped && saysFlip) this.r.caught += 1;
+    if (!flipped && saysFlip) this.r.alarms += 1;
+  }
+  summary(): CatchRecord {
+    return { ...this.r };
+  }
+}
+
 export interface FlipRecords {
-  math: TrackRecord;
-  jev: TrackRecord;
-  blend: TrackRecord;
+  n: number; // reads scored
+  math: CatchRecord;
+  jev: CatchRecord;
+  blend: CatchRecord;
 }
 
 /** Learns how much to trust the math vs Jev's flip read, and keeps their records. */
 export class FlipBlender {
   private stacker = new Stacker();
-  private live = { math: new Tracker(), jev: new Tracker(), blend: new Tracker() };
-  constructor(readonly edge = 0.55) {
+  private live = FlipBlender.fresh();
+  constructor() {
     this.stacker.wJev = 0.5; // Jev starts at half weight until its record says otherwise
   }
-  private callFor(p: number): -1 | 0 | 1 {
-    return p >= this.edge ? 1 : p <= 1 - this.edge ? -1 : 0;
+  private static fresh() {
+    return { n: 0, math: new CatchTracker(), jev: new CatchTracker(), blend: new CatchTracker() };
   }
   blend(pMath: number, pJevGreen: number | null): number {
     return pJevGreen === null ? pMath : clamp(this.stacker.predict(pMath, pJevGreen));
@@ -111,25 +136,37 @@ export class FlipBlender {
   get weights() {
     return { math: this.stacker.wModel, jev: this.stacker.wJev };
   }
+  private static out(t: ReturnType<typeof FlipBlender.fresh>): FlipRecords {
+    return { n: t.n, math: t.math.summary(), jev: t.jev.summary(), blend: t.blend.summary() };
+  }
   /** Score one read against the candle's final color and learn from it. */
-  private score(t: { math: Tracker; jev: Tracker; blend: Tracker }, pMath: number, pJev: number, y: 0 | 1) {
-    const pb = this.blend(pMath, pJev);
-    t.math.record(pMath, this.callFor(pMath), y);
-    t.jev.record(pJev, this.callFor(pJev), y);
-    t.blend.record(pb, this.callFor(pb), y);
-    this.stacker.update(pMath, pJev, y);
+  private score(t: ReturnType<typeof FlipBlender.fresh>, r: FlipRow) {
+    const pb = this.blend(r.pMath, r.pJev);
+    t.n += 1;
+    t.math.record(r.pMath, r.move, r.y);
+    t.jev.record(r.pJev, r.move, r.y);
+    t.blend.record(pb, r.move, r.y);
+    this.stacker.update(r.pMath, r.pJev, r.y);
   }
   /** Replay on past candles (oldest first) before going live. */
-  backfill(rows: { pMath: number; pJev: number; y: 0 | 1 }[]): FlipRecords {
-    const t = { math: new Tracker(), jev: new Tracker(), blend: new Tracker() };
-    for (const r of rows) this.score(t, r.pMath, r.pJev, r.y);
-    return { math: t.math.summary(), jev: t.jev.summary(), blend: t.blend.summary() };
+  backfill(rows: FlipRow[]): FlipRecords {
+    const t = FlipBlender.fresh();
+    for (const r of rows) this.score(t, r);
+    return FlipBlender.out(t);
   }
   /** One live read per candle (taken mid-candle), scored when the candle closes. */
-  recordLive(pMath: number, pJev: number, y: 0 | 1): FlipRecords {
-    this.score(this.live, pMath, pJev, y);
-    return { math: this.live.math.summary(), jev: this.live.jev.summary(), blend: this.live.blend.summary() };
+  recordLive(r: FlipRow): FlipRecords {
+    this.score(this.live, r);
+    return FlipBlender.out(this.live);
   }
+}
+
+/** One read: math and Jev chances of green, the move so far at the read, and the final color. */
+export interface FlipRow {
+  pMath: number;
+  pJev: number;
+  move: number;
+  y: 0 | 1;
 }
 
 /**

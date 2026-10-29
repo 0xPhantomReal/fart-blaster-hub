@@ -42,14 +42,24 @@ describe("flip check", () => {
     const b = new FlipBlender();
     const rows = Array.from({ length: 400 }, () => {
       const y = (r() < 0.5 ? 1 : 0) as 0 | 1;
-      const pMath = 0.5; // math with no information
       const right = r() < 0.7;
-      return { pMath, pJev: (y === 1) === right ? 0.7 : 0.3, y };
+      return { pMath: 0.5, pJev: (y === 1) === right ? 0.7 : 0.3, move: r() < 0.5 ? 1 : -1, y };
     });
-    const rec = b.backfill(rows);
-    expect(rec.jev.hitRate!).toBeGreaterThan(0.64);
+    b.backfill(rows);
     expect(b.weights.jev).toBeGreaterThan(0.5);
     expect(b.blend(0.5, 0.7)).toBeGreaterThan(0.6);
+  });
+
+  it("counts flips caught and false alarms", () => {
+    const b = new FlipBlender();
+    const rec = b.backfill([
+      { pMath: 0.2, pJev: 0.8, move: +1, y: 1 }, // green held: math raised a false alarm, Jev said holds
+      { pMath: 0.9, pJev: 0.3, move: +1, y: 0 }, // green flipped red: Jev caught it, math missed
+      { pMath: 0.4, pJev: 0.6, move: -1, y: 0 }, // red held: Jev raised a false alarm
+    ]);
+    expect(rec.n).toBe(3);
+    expect(rec.jev).toEqual({ flips: 1, caught: 1, alarms: 1 });
+    expect(rec.math).toEqual({ flips: 1, caught: 0, alarms: 1 });
   });
 
   it("rebuilds past candles partway through from 1-minute bars", () => {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
-import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords } from "./flip";
+import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords, type FlipRow } from "./flip";
 import {
   askCheck,
   askFlip,
@@ -229,7 +229,7 @@ export function useGold(): GoldState {
     let flipReady = false;
     let flipCalls = 0;
     let lastFlip: { forTime: number; move: number; pFlip: number; at: number } | null = null;
-    let halfwayFlip: { forTime: number; pMath: number; pJev: number } | null = null;
+    let halfwayFlip: { forTime: number; pMath: number; pJev: number; move: number } | null = null;
     const setFlip = (patch: Partial<FlipView>) => !cancelled && setState((s) => ({ ...s, flip: { ...s.flip, ...patch } }));
 
     /** Live read: the math, blended with Jev's latest flip read when it is fresh (< 45 s old). */
@@ -242,7 +242,7 @@ export function useGold(): GoldState {
       const pJev = greenFromFlip(move, lastFlip!.pFlip);
       const pGreen = blender.blend(math.pGreen, pJev);
       // Keep one mid-candle sample per candle for scoring the flip check.
-      if (math.timeLeftFrac <= 0.5 && (!halfwayFlip || halfwayFlip.forTime !== c.time)) halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev };
+      if (math.timeLeftFrac <= 0.5 && (!halfwayFlip || halfwayFlip.forTime !== c.time)) halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev, move };
       return { ...math, pGreen, call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0 };
     };
 
@@ -278,7 +278,7 @@ export function useGold(): GoldState {
       const snaps = pastSnapshots(minutes, history, TF_SECONDS, (t) => atrs.get(t - TF_SECONDS) ?? null, (t) => preds.get(t)?.pFinal ?? 0.5, FLIP_BACKFILL);
       if (snaps.length < 30) return setFlip({ status: "not enough 1-minute history to test the flip check yet" });
       const cache = readFlipCache();
-      const rows: { pMath: number; pJev: number; y: 0 | 1 }[] = [];
+      const rows: FlipRow[] = [];
       let done = 0;
       const lanes = Array.from({ length: 6 }, (_, k) => snaps.filter((_, i) => i % 6 === k));
       const answers = new Map<number, number>();
@@ -304,7 +304,7 @@ export function useGold(): GoldState {
       writeFlipCache(cache);
       for (const sn of snaps) {
         const pf = answers.get(sn.time);
-        if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), y: sn.y });
+        if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), move: sn.move, y: sn.y });
       }
       if (rows.length < 30) return setFlip({ status: "couldn't test the flip check on enough past candles" });
       setFlip({ status: "ok", backfill: blender.backfill(rows), weights: blender.weights, calls: flipCalls });
@@ -348,7 +348,7 @@ export function useGold(): GoldState {
 
     const onClose = async (c: Candle) => {
       if (halfwayFlip && halfwayFlip.forTime === c.time && c.close !== c.open) {
-        setFlip({ live: blender.recordLive(halfwayFlip.pMath, halfwayFlip.pJev, c.close > c.open ? 1 : 0), weights: blender.weights });
+        setFlip({ live: blender.recordLive({ ...halfwayFlip, y: c.close > c.open ? 1 : 0 }), weights: blender.weights });
         halfwayFlip = null;
       }
       lastFlip = null;

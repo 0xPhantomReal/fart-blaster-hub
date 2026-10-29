@@ -3,6 +3,7 @@ import { GoldChart } from "@/gold/GoldChart";
 import { TIMEFRAME_MIN } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
+import type { CatchRecord, FlipRecords } from "@/gold/flip";
 
 const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
 const time = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -43,6 +44,45 @@ function RecordTable({ children }: { children: React.ReactNode }) {
       </thead>
       <tbody>{children}</tbody>
     </table>
+  );
+}
+
+/** Flips caught: of the candles that flipped after the read, how many each one saw coming. */
+function FlipTable({ rec, where }: { rec: FlipRecords; where: string }) {
+  const row = (name: string, r: CatchRecord) => {
+    const said = r.caught + r.alarms;
+    return (
+      <tr key={name} className="border-t border-[#262c36]">
+        <td className="py-1.5 text-left">{name}</td>
+        <td className="py-1.5 text-right">
+          {r.caught} of {r.flips}
+        </td>
+        <td className="py-1.5 text-right">{r.alarms}</td>
+        <td className="py-1.5 text-right">{said ? `${pct(r.caught / said, 0)} (${said})` : "—"}</td>
+      </tr>
+    );
+  };
+  return (
+    <>
+      <p className={`mb-2 mt-4 text-xs ${MUTED}`}>
+        {where}: {rec.math.flips} of {rec.n} candles flipped after the read ({pct(rec.n ? rec.math.flips / rec.n : null, 0)}).
+      </p>
+      <table className="w-full text-sm tabular-nums">
+        <thead>
+          <tr className={`text-xs ${MUTED}`}>
+            <th className="pb-1 text-left font-medium"></th>
+            <th className="pb-1 text-right font-medium">Caught</th>
+            <th className="pb-1 text-right font-medium">False alarms</th>
+            <th className="pb-1 text-right font-medium">Right when it says flip</th>
+          </tr>
+        </thead>
+        <tbody>
+          {row("Math", rec.math)}
+          {row("Jev", rec.jev)}
+          {row("Live %", rec.blend)}
+        </tbody>
+      </table>
+    </>
   );
 }
 
@@ -179,25 +219,15 @@ export default function Gold() {
                 </RecordTable>
               </>
             )}
-            {(g.flip.backfill || (g.flip.live && g.flip.live.math.n > 0)) && (
+            {(g.flip.backfill || (g.flip.live && g.flip.live.n > 0)) && (
               <>
-                <p className={`mb-2 mt-4 text-xs ${MUTED}`}>Will the forming candle flip? (scored on its final color)</p>
-                <RecordTable>
-                  {g.flip.backfill && (
-                    <>
-                      <Row name="Math" r={g.flip.backfill.math} note={`past ${g.flip.backfill.math.n}`} />
-                      <Row name="Jev" r={g.flip.backfill.jev} note={`past ${g.flip.backfill.jev.n}`} />
-                      <Row name="Live %" r={g.flip.backfill.blend} note={`past ${g.flip.backfill.blend.n}`} />
-                    </>
-                  )}
-                  {g.flip.live && g.flip.live.math.n > 0 && (
-                    <>
-                      <Row name="Math" r={g.flip.live.math} note="live" />
-                      <Row name="Jev" r={g.flip.live.jev} note="live" />
-                      <Row name="Live %" r={g.flip.live.blend} note="live" />
-                    </>
-                  )}
-                </RecordTable>
+                <h3 className="mt-5 text-sm font-medium">Flips caught</h3>
+                <p className={`mt-1 text-xs ${MUTED}`}>
+                  Read partway through each candle. Counts only candles that changed color after the read. A read "says flip"
+                  when it gives the flip more than 50%.
+                </p>
+                {g.flip.backfill && <FlipTable rec={g.flip.backfill} where="Past candles" />}
+                {g.flip.live && g.flip.live.n > 0 && <FlipTable rec={g.flip.live} where="Live, one read per candle at halfway" />}
               </>
             )}
             <p className={`mt-3 text-xs ${MUTED}`}>
