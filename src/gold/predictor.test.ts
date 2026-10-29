@@ -101,4 +101,40 @@ describe("next-candle predictor", () => {
     expect(res.jev.hitRate!).toBeGreaterThan(0.58);
     expect(p.summary().trust!.jev).toBeGreaterThan(0.5);
   });
+
+  it("live % is calibrated (70% means ~70%) and gets sharper as the candle runs", () => {
+    const r = rng(11);
+    const p = new Predictor(900);
+    let price = 4000;
+    const bins = new Map<number, { n: number; g: number; sumP: number }>();
+    let hitsHalf = 0;
+    let nHalf = 0;
+    for (let i = 0; i < 4000; i++) {
+      const t0 = 1_700_000_100 - (1_700_000_100 % 900) + i * 900;
+      const path = [price];
+      for (let k = 0; k < 15; k++) path.push(path[path.length - 1] + (r() - 0.5) * 2);
+      const close = path[15];
+      for (const minute of [3, 7, 12]) {
+        const seen = path.slice(0, minute + 1);
+        const live = p.live({ time: t0, open: price, high: Math.max(...seen), low: Math.min(...seen), close: seen[minute] }, t0 + minute * 60);
+        if (!live || close === price || i < 400) continue;
+        const b = Math.round(live.pGreen * 10);
+        const e = bins.get(b) ?? { n: 0, g: 0, sumP: 0 };
+        e.n += 1;
+        e.g += close > price ? 1 : 0;
+        e.sumP += live.pGreen;
+        bins.set(b, e);
+        if (minute === 7 && live.call !== 0) {
+          nHalf += 1;
+          if ((live.call === 1) === close > price) hitsHalf += 1;
+        }
+      }
+      p.close({ time: t0, open: price, high: Math.max(...path), low: Math.min(...path), close });
+      price = close;
+    }
+    for (const [, e] of bins) if (e.n > 200) expect(Math.abs(e.sumP / e.n - e.g / e.n)).toBeLessThan(0.07);
+    console.log(`live at the halfway point: ${nHalf} calls, ${((hitsHalf / nHalf) * 100).toFixed(1)}% right`);
+    expect(hitsHalf / nHalf).toBeGreaterThan(0.7);
+    expect(p.summary().halfway.n).toBeGreaterThan(1000);
+  });
 });

@@ -228,6 +228,21 @@ export interface Outcome {
 /** Fact-check score needed for the final call to stand (2 = "evidence mostly supports the call"). */
 export const SUPPORT_NEEDED = 1.5;
 
+/** Standard normal CDF (Abramowitz–Stegun 7.1.26). */
+function normCdf(z: number): number {
+  const t = 1 / (1 + (0.3275911 * Math.abs(z)) / Math.SQRT2);
+  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-(z * z) / 2);
+  return z >= 0 ? (1 + y) / 2 : (1 - y) / 2;
+}
+
+/** Live read of the candle forming now. */
+export interface Live {
+  pGreen: number; //      chance it closes green, given the open forecast and what it has done so far
+  call: -1 | 0 | 1;
+  move: number; //        close − open so far
+  timeLeftFrac: number; // 1 at the open, 0 at the close
+}
+
 export class Predictor {
   private features = new FeatureBuilder();
   private model = new OnlineLogit();
@@ -235,7 +250,8 @@ export class Predictor {
   private recent: Candle[] = [];
   private pending: (Prediction & { x: number[] | null; counted: boolean }) | null = null;
   private snapshots = new Map<number, JevSnapshot>();
-  readonly track = { model: new Tracker(), jev: new Tracker(), final: new Tracker() };
+  readonly track = { model: new Tracker(), jev: new Tracker(), final: new Tracker(), halfway: new Tracker() };
+  private halfway: { forTime: number; p: number } | null = null; // live read captured at the candle's midpoint
 
   constructor(
     readonly tfSeconds: number,
@@ -267,12 +283,16 @@ export class Predictor {
         if (p.counted && p.jev) this.track.jev.record(p.jev.pGreen, this.callFor(p.jev.pGreen), y);
         if (p.counted && p.pFinal !== null) this.track.final.record(p.pFinal, p.call, y);
         if (p.pModel !== null && p.jev) this.stacker.update(p.pModel, p.jev.pGreen, y);
+        if (p.counted && this.halfway && this.halfway.forTime === p.forTime) {
+          const hp = this.halfway.p;
+          this.track.halfway.record(hp, this.callFor(hp), y);
+        }
         if (p.x) this.model.update(p.x, y);
       } else if (p.x) this.model.observe(p.x);
       outcome = { call: p.call, hit: p.call === 0 || y === null ? null : (p.call === 1) === (y === 1) };
     }
     this.recent.push(c);
-    if (this.recent.length > 40) this.recent.shift();
+    if (this.recent.length > 100) this.recent.shift();
 
     const x = this.features.push(c);
     const pModel = x ? this.model.predict(x) : null;
@@ -288,6 +308,29 @@ export class Predictor {
       }
     }
     return { outcome, next: this.view() };
+  }
+
+  /**
+   * Live chance the forming candle closes green, recomputed on every tick and every second. It starts at the
+   * open forecast and then follows the candle: the move so far against how far price typically still travels
+   * in the time left (recent candle bodies, scaled by the square root of time left).
+   */
+  live(f: Candle, nowSec: number): Live | null {
+    const p = this.pending;
+    if (!p || f.time !== p.forTime) return null;
+    const bodies = this.recent.slice(-100).map((c) => c.close - c.open);
+    if (bodies.length < 30) return null;
+    const mean = bodies.reduce((a, v) => a + v, 0) / bodies.length;
+    const sd = Math.sqrt(bodies.reduce((a, v) => a + (v - mean) ** 2, 0) / (bodies.length - 1));
+    if (!(sd > 0)) return null;
+    const frac = Math.min(1, Math.max(0.005, (f.time + this.tfSeconds - nowSec) / this.tfSeconds));
+    const prior = p.pFinal ?? 0.5;
+    const drift = sd * (logit(prior) / 1.702) * frac; // the open forecast's lean, fading as time runs out
+    const move = f.close - f.open;
+    const raw = normCdf((move + drift) / (sd * Math.sqrt(frac)));
+    const pGreen = Math.min(0.99, Math.max(0.01, raw));
+    if (frac <= 0.5 && (!this.halfway || this.halfway.forTime !== f.time)) this.halfway = { forTime: f.time, p: pGreen };
+    return { pGreen, call: this.callFor(pGreen), move, timeLeftFrac: frac };
   }
 
   /** Fold in Jev's answers for the pending candle. */
@@ -386,6 +429,7 @@ export class Predictor {
       model: this.track.model.summary(),
       jev: this.track.jev.summary(),
       final: this.track.final.summary(),
+      halfway: this.track.halfway.summary(),
       trust: this.stacker.updates ? { model: this.stacker.wModel, jev: this.stacker.wJev } : null,
     };
   }

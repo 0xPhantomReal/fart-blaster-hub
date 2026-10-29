@@ -71,9 +71,13 @@ export default function Gold() {
   const closesAt = p ? p.forTime + tf : null;
   const secsLeft = closesAt && g.source !== "Simulated" ? Math.max(0, Math.round(closesAt - Date.now() / 1000)) : null;
 
-  const dir = p?.call === 1 ? "green" : p?.call === -1 ? "red" : "none";
-  const big = !p ? "—" : dir === "none" ? "NO CALL" : dir.toUpperCase();
+  const lv = isForming ? g.live : null; // live read while the candle forms
+  const openDir = p?.call === 1 ? "green" : p?.call === -1 ? "red" : "none";
+  const callOf = (c: -1 | 0 | 1 | undefined) => (c === 1 ? "green" : c === -1 ? "red" : "none");
+  const dir = lv ? callOf(lv.call) : openDir;
+  const big = !p ? "—" : dir === "none" ? (lv ? "TOO CLOSE" : "NO CALL") : dir.toUpperCase();
   const bigCls = dir === "green" ? GREEN : dir === "red" ? RED : MUTED;
+  const prob = lv ? lv.pGreen : (p?.pFinal ?? null);
   const modelDir = p?.modelCall === 1 ? "green" : p?.modelCall === -1 ? "red" : null;
 
   return (
@@ -102,8 +106,30 @@ export default function Gold() {
               {secsLeft !== null ? ` · ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")} left` : ""}
             </div>
             <div className={`my-1 text-3xl font-bold ${bigCls}`}>{big}</div>
-            <div className="tabular-nums">{p?.pFinal == null ? "—" : `${pct(p.pFinal)} chance green`}</div>
+            <div className="text-lg tabular-nums">
+              {prob == null ? "—" : `${pct(prob)} chance green`}
+              {lv && <span className={`ml-1 text-xs ${MUTED}`}>live</span>}
+            </div>
+            {lv && (
+              <>
+                <div className="mx-auto mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#ef5350]/40">
+                  <div className="h-full bg-[#26a69a] transition-[width] duration-300" style={{ width: `${lv.pGreen * 100}%` }} />
+                </div>
+                <div className="mt-2 text-sm tabular-nums">
+                  <span className={lv.move > 0 ? GREEN : lv.move < 0 ? RED : MUTED}>
+                    {lv.move >= 0 ? "+" : ""}
+                    {lv.move.toFixed(2)} so far
+                  </span>
+                </div>
+              </>
+            )}
             <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
+              {lv ? (
+                <>
+                  At the open: <span className={openDir === "green" ? GREEN : openDir === "red" ? RED : ""}>{openDir === "none" ? "no call" : openDir}</span>{" "}
+                  {pct(p?.pFinal, 0)} ·{" "}
+                </>
+              ) : null}
               Model {pct(p?.pModel, 0)}
               {p?.jev ? ` · Jev ${pct(p.jev.pGreen, 0)}` : ""}
             </div>
@@ -129,17 +155,20 @@ export default function Gold() {
                 </>
               )}
             </RecordTable>
-            {g.live && g.live.model.n > 0 && (
+            {g.liveRecord && g.liveRecord.model.n > 0 && (
               <>
                 <p className={`mb-2 mt-4 text-xs ${MUTED}`}>Live, since this page opened:</p>
                 <RecordTable>
-                  <Row name="Model" r={g.live.model} />
-                  {g.jev.on && <Row name="Jev" r={g.live.jev} />}
-                  <Row name="Final" r={g.live.final} />
+                  <Row name="Model" r={g.liveRecord.model} />
+                  {g.jev.on && <Row name="Jev" r={g.liveRecord.jev} />}
+                  <Row name="Final" r={g.liveRecord.final} />
+                  <Row name="Live % at halfway" r={g.liveRecord.halfway} />
                 </RecordTable>
               </>
             )}
             <p className={`mt-3 text-xs ${MUTED}`}>
+              The open forecast (Model, Jev, Final) is made before the candle starts; the live % also uses what the candle
+              has done so far, so it naturally gets more certain as the candle runs.
               Right = share of calls that were correct. A call needs at least 55% one way; Final also needs Jev's fact-check to
               score {SUPPORT_NEEDED}+ of 3. Skill above 0 means the forecasts carry real information beyond the base rate; at or
               below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: 15-minute gold is close to a coin

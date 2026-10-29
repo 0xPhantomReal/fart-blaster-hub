@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
-import { Predictor, type JevAnswer, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
 import {
   askCheck,
   backendConfigured,
@@ -22,7 +22,7 @@ export interface ClosedBar {
   outcome: Outcome | null;
 }
 
-type Trio = { model: TrackRecord; jev: TrackRecord; final: TrackRecord };
+type Trio = { model: TrackRecord; jev: TrackRecord; final: TrackRecord; halfway?: TrackRecord };
 
 export interface GoldState {
   status: "loading" | "ready";
@@ -30,11 +30,12 @@ export interface GoldState {
   error: string | null;
   bars: ClosedBar[]; //            last ~3,000 candles, for the chart
   forming: Candle | null;
-  prediction: Prediction | null; // for the candle forming now / next
+  prediction: Prediction | null; // for the candle forming now / next (made at its open)
+  live: Live | null; //            live chance the forming candle closes green (every tick / second)
   trainedOn: number; //            candles the model has learned from
   walkForward: TrackRecord | null; // model record over all history (each prediction made before its candle)
   backfill: Trio | null; //        model vs Jev vs final on the same recent past candles
-  live: Trio | null; //            this session
+  liveRecord: Trio | null; //      this session
   trust: { model: number; jev: number } | null;
   jev: { on: boolean; status: string; calls: number };
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
@@ -81,10 +82,11 @@ export function useGold(): GoldState {
     bars: [],
     forming: null,
     prediction: null,
+    live: null,
     trainedOn: 0,
     walkForward: null,
     backfill: null,
-    live: null,
+    liveRecord: null,
     trust: null,
     jev: { on: false, status: "starting…", calls: 0 },
     ticks: { state: "connecting", detail: "", check: null },
@@ -120,7 +122,7 @@ export function useGold(): GoldState {
 
     const liveRecord = (): Trio => {
       const s = predictor.summary();
-      return { model: s.model, jev: s.jev, final: s.final };
+      return { model: s.model, jev: s.jev, final: s.final, halfway: s.halfway };
     };
 
     /** Ask Jev about the pending candle and fold its answers in. */
@@ -183,6 +185,7 @@ export function useGold(): GoldState {
     };
 
     let current: Prediction | null = null;
+    let lastForming: Candle | null = null;
 
     /** (Re)train on `history` (walk-forward) and make it the live predictor. */
     const adopt = (history: Candle[]) => {
@@ -196,7 +199,7 @@ export function useGold(): GoldState {
         prediction: t.next,
         trainedOn: history.length,
         walkForward: predictor.summary().model,
-        live: null,
+        liveRecord: null,
         backfill: null,
         trust: predictor.summary().trust,
       });
@@ -221,7 +224,8 @@ export function useGold(): GoldState {
       bars.push({ candle: c, outcome });
       if (bars.length > MAX_BARS) bars.shift();
       current = next;
-      set({ bars: [...bars], forming: null, prediction: next, live: liveRecord() });
+      lastForming = null;
+      setState((s) => ({ ...s, bars: [...bars], forming: null, prediction: next, live: null, liveRecord: liveRecord() }));
       setState((s) => ({ ...s, version: s.version + 1 }));
       await consult(next);
     };
@@ -262,7 +266,11 @@ export function useGold(): GoldState {
         (c, closed) => {
           if (closed) queue = queue.then(() => onClose(c));
           // Data is flowing again, so a previous hiccup message no longer applies.
-          else setState((s) => ({ ...s, forming: c, error: s.error?.startsWith("Live data hiccup") ? null : s.error }));
+          else {
+            lastForming = c;
+            const live = predictor.live(c, feed.now());
+            setState((s) => ({ ...s, forming: c, live, error: s.error?.startsWith("Live data hiccup") ? null : s.error }));
+          }
         },
         (msg) => set({ error: `Live data hiccup: ${msg}` }),
         (st) => {
@@ -279,8 +287,16 @@ export function useGold(): GoldState {
       );
     })();
 
+    // Time running out changes the odds too, so refresh the live read every second.
+    const clock = window.setInterval(() => {
+      if (!lastForming || cancelled) return;
+      const live = predictor.live(lastForming, feed.now());
+      setState((s) => ({ ...s, live }));
+    }, 1000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(clock);
       stop?.();
     };
   }, []);
