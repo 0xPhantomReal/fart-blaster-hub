@@ -241,6 +241,7 @@ export interface Live {
   call: -1 | 0 | 1;
   move: number; //        close − open so far
   timeLeftFrac: number; // 1 at the open, 0 at the close
+  pMath?: number; //       the math alone, before Jev's flip read is blended in
 }
 
 export class Predictor {

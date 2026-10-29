@@ -21,7 +21,7 @@ export const BACKFILL = 200;
 /** How many past candles Jev's flip read is replayed on (rebuilt partway through from 1-minute data). */
 export const FLIP_BACKFILL = 150;
 /** How often Jev re-reads the forming candle. */
-export const FLIP_SECONDS = 30;
+export const FLIP_SECONDS = 3;
 
 /** Jev's read on whether the forming candle will flip, and how the flip check has scored. */
 export interface FlipView {
@@ -237,19 +237,21 @@ export function useGold(): GoldState {
       const math = predictor.live(c, feed.now());
       if (!math) return null;
       const move = c.close - c.open;
-      const fresh = lastFlip && lastFlip.forTime === c.time && Date.now() - lastFlip.at < 45_000 && move !== 0;
-      if (!fresh) return math;
+      const fresh = lastFlip && lastFlip.forTime === c.time && Date.now() - lastFlip.at < 10_000 && move !== 0;
+      if (!fresh) return { ...math, pMath: math.pGreen };
       const pJev = greenFromFlip(move, lastFlip!.pFlip);
       const pGreen = blender.blend(math.pGreen, pJev);
       // Keep one mid-candle sample per candle for scoring the flip check.
       if (math.timeLeftFrac <= 0.5 && (!halfwayFlip || halfwayFlip.forTime !== c.time)) halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev, move };
-      return { ...math, pGreen, call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0 };
+      return { ...math, pMath: math.pGreen, pGreen, call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0 };
     };
 
     /** Ask Jev about the forming candle (every FLIP_SECONDS; shared per slot by all viewers). */
+    let flipBusy = false;
+    let lastAsked: { key: string; at: number } | null = null;
     const flipTick = async () => {
       const c = lastForming;
-      if (cancelled || !flipReady || !c || document.hidden) return;
+      if (cancelled || !flipReady || !c || document.hidden || flipBusy) return;
       const now = feed.now();
       const secondsLeft = c.time + TF_SECONDS - now;
       const atr = predictor.atr;
@@ -257,8 +259,20 @@ export function useGold(): GoldState {
       if (secondsLeft < 30 || secondsLeft > TF_SECONDS - 30 || !atr || !sd) return;
       const state = flipState({ forming: c, secondsLeft, tfSeconds: TF_SECONDS, atr, sd, previous: bars.slice(-3).map((b) => b.candle) });
       if (!state) return;
+      // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
+      // again (re-ask at least every 15 s, since the time left still matters).
+      const shape = `${c.time}|${state.move_so_far}|${state.high_so_far}|${state.low_so_far}|${state.pulled_back_from_extreme}`;
+      if (lastAsked && lastAsked.key === shape && Date.now() - lastAsked.at < 15_000) {
+        if (lastFlip && lastFlip.forTime === c.time) {
+          lastFlip.at = Date.now(); // same candle shape, so the last answer is still current
+          setFlip({ at: lastFlip.at });
+        }
+        return;
+      }
+      flipBusy = true;
       try {
         const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`), 15_000);
+        lastAsked = { key: shape, at: Date.now() };
         flipCalls += 1;
         lastFlip = { forTime: c.time, move: c.close - c.open, pFlip: a.pFlip, at: Date.now() };
         const math = predictor.live(c, feed.now());
@@ -266,6 +280,8 @@ export function useGold(): GoldState {
         setState((s) => ({ ...s, live: computeLive(c) }));
       } catch (e) {
         setFlip({ status: `error: ${(e as Error).message}` });
+      } finally {
+        flipBusy = false;
       }
     };
 

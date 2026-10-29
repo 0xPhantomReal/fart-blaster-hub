@@ -164,12 +164,12 @@ export default function Gold() {
                     <span className={MUTED}> · currently {lv.move > 0 ? "green" : "red"}</span>
                   )}
                 </div>
-                {g.flip.pFlip !== null && lv.move !== 0 && (
+                {g.flip.pFlip !== null && g.flip.at !== null && Date.now() - g.flip.at < 20_000 && lv.move !== 0 && (
                   <div className="mt-1 text-sm tabular-nums">
                     Jev: <span className={g.flip.pFlip >= 0.5 ? "text-[#d4a72c]" : ""}>{pct(g.flip.pFlip, 0)} chance it flips</span>
-                    {g.flip.pMath !== null && (
+                    {lv.pMath != null && (
                       <span className={`text-xs ${MUTED}`}>
-                        {" "}· math alone {pct(lv.move > 0 ? 1 - g.flip.pMath : g.flip.pMath, 0)}
+                        {" "}· math alone {pct(lv.move > 0 ? 1 - lv.pMath : lv.pMath, 0)}
                       </span>
                     )}
                   </div>
@@ -257,7 +257,7 @@ export default function Gold() {
           <section>
             <Label>Jev flip check</Label>
             <p className={`text-sm ${g.flip.status.startsWith("error") || g.flip.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
-              {g.flip.status === "ok" ? "Reading the forming candle every 30 seconds." : g.flip.status}
+              {g.flip.status === "ok" ? "Reading the forming candle every 3 seconds (when it has changed)." : g.flip.status}
             </p>
             <p className={`mt-1 text-xs ${MUTED}`}>
               While a candle forms, Jev sees how far it has moved, its high/low, how much it has pulled back, the time left and
