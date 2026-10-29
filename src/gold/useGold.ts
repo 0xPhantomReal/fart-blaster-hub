@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Outcome, type Prediction, type TrackRecord } from "./predictor";
-import { askCheck, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
+import {
+  askCheck,
+  backendConfigured,
+  backendVersion,
+  LiveFeed,
+  SimFeed,
+  TF_SECONDS,
+  tickCheck,
+  type Feed,
+  type TickCheck,
+  type TickStatus,
+} from "./feed";
 
 /** How many recent past candles Jev is checked on before it is used live. */
 export const BACKFILL = 200;
@@ -26,6 +37,8 @@ export interface GoldState {
   live: Trio | null; //            this session
   trust: { model: number; jev: number } | null;
   jev: { on: boolean; status: string; calls: number };
+  /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
+  ticks: TickStatus & { check: TickCheck | null };
   version: number; //              bumps when the chart should redraw
 }
 
@@ -74,6 +87,7 @@ export function useGold(): GoldState {
     live: null,
     trust: null,
     jev: { on: false, status: "starting…", calls: 0 },
+    ticks: { state: "connecting", detail: "", check: null },
     version: 0,
   });
 
@@ -243,12 +257,25 @@ export function useGold(): GoldState {
           });
       } else void hookJev(first, history);
 
+      let diagnosed = false;
       stop = feed.start(
         (c, closed) => {
           if (closed) queue = queue.then(() => onClose(c));
-          else set({ forming: c });
+          // Data is flowing again, so a previous hiccup message no longer applies.
+          else setState((s) => ({ ...s, forming: c, error: s.error?.startsWith("Live data hiccup") ? null : s.error }));
         },
         (msg) => set({ error: `Live data hiccup: ${msg}` }),
+        (st) => {
+          setState((s) => ({ ...s, ticks: { ...st, check: st.state === "streaming" ? null : s.ticks.check } }));
+          // First time ticks fall back: ask the backend to test the stream and name the exact problem.
+          if (st.state === "fallback" && !diagnosed && feed instanceof LiveFeed) {
+            diagnosed = true;
+            void backendVersion()
+              .then((v) => (v?.features.includes("tickcheck") ? tickCheck() : null))
+              .then((check) => check && setState((s) => ({ ...s, ticks: { ...s.ticks, check } })))
+              .catch(() => {});
+          }
+        },
       );
     })();
 

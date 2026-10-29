@@ -4,6 +4,7 @@
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
 // POST { action: "check", snapshot, forTime }       → { pGreen, support, confidence }  (Jev: own call + fact-check)
+// POST { action: "tickcheck" }                    → which Pyth host/feed works for live ticks, or exactly why not
 // POST { action: "version" }                        → { version, features }
 
 const PYTH_BASE = "https://pyth.dourolabs.app/v1";
@@ -74,41 +75,96 @@ async function history(from: number, to: number, resolution: number) {
 
 // ── Live ticks (Pyth Hermes SSE → compact NDJSON for the browser) ─────
 
-const HERMES_BASE = () => env("PYTH_HERMES_BASE") || "https://hermes.pyth.network";
 const hermesKey = () => env("PYTH_HERMES_KEY") || env("PYTH_API_KEY");
-let goldFeedId = env("PYTH_GOLD_FEED_ID");
+// Pyth documents both hosts as serving the same Hermes API with the same key; try each.
+const HERMES_HOSTS = () =>
+  [...new Set([env("PYTH_HERMES_BASE"), "https://hermes.pyth.network", "https://pyth.dourolabs.app/hermes"].filter(Boolean))];
+// Used only if the lookup fails; PYTH_GOLD_FEED_ID overrides it.
+const KNOWN_XAU_USD = "0x765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2";
+let goldFeed: { id: string; source: "secret" | "lookup" | "fallback" } | null = env("PYTH_GOLD_FEED_ID")
+  ? { id: env("PYTH_GOLD_FEED_ID"), source: "secret" }
+  : null;
 
-async function resolveFeedId(): Promise<string> {
-  if (goldFeedId) return goldFeedId;
-  for (const assetType of ["metal", "metals"]) {
-    const res = await fetch(`${HERMES_BASE()}/v2/price_feeds?query=XAU&asset_type=${assetType}`, {
-      headers: { Authorization: `Bearer ${hermesKey()}` },
-    });
-    if (!res.ok) continue;
-    const rows: Array<{ id: string; attributes?: Record<string, string> }> = await res.json();
-    const isGoldUsd = (r: { attributes?: Record<string, string> }) =>
-      Object.values(r.attributes ?? {}).some((v) => /XAU\/?USD$/i.test(v));
-    const pick = rows.find(isGoldUsd);
-    if (pick) {
-      goldFeedId = pick.id.startsWith("0x") ? pick.id : `0x${pick.id}`;
-      return goldFeedId;
+async function resolveFeedId(host: string): Promise<{ id: string; source: "secret" | "lookup" | "fallback" }> {
+  if (goldFeed && goldFeed.source !== "fallback") return goldFeed;
+  for (const q of ["query=XAU&asset_type=metal", "query=XAU&asset_type=metals", "query=XAU"]) {
+    try {
+      const res = await fetch(`${host}/v2/price_feeds?${q}`, { headers: { Authorization: `Bearer ${hermesKey()}` } });
+      if (!res.ok) continue;
+      const rows: Array<{ id: string; attributes?: Record<string, string> }> = await res.json();
+      const pick = rows.find((r) => Object.values(r.attributes ?? {}).some((v) => /XAU\/?USD$/i.test(v)));
+      if (pick) {
+        goldFeed = { id: pick.id.startsWith("0x") ? pick.id : `0x${pick.id}`, source: "lookup" };
+        return goldFeed;
+      }
+    } catch {
+      // try the next query
     }
   }
-  throw new Error("could not find the XAU/USD feed on Hermes (set PYTH_GOLD_FEED_ID)");
+  goldFeed = { id: KNOWN_XAU_USD, source: "fallback" };
+  return goldFeed;
+}
+
+/** Open the Hermes price stream, trying each host. Collects a readable reason for every failure. */
+async function openUpstream() {
+  const errors: string[] = [];
+  for (const host of HERMES_HOSTS()) {
+    try {
+      const feed = await resolveFeedId(host);
+      const res = await fetch(`${host}/v2/updates/price/stream?ids[]=${feed.id}&parsed=true&encoding=hex`, {
+        headers: { Authorization: `Bearer ${hermesKey()}`, Accept: "text/event-stream" },
+      });
+      if (res.ok && res.body) return { res, host, feed, errors };
+      errors.push(`${new URL(host).host}: HTTP ${res.status} ${(await res.text()).slice(0, 120)}`);
+    } catch (e) {
+      errors.push(`${new URL(host).host}: ${(e as Error).message}`);
+    }
+  }
+  throw new Error(`Pyth tick stream unavailable — ${errors.join(" | ")}`);
+}
+
+/** One-shot check of the tick stream: which host and feed work, and the first price received. */
+async function tickDiagnostics() {
+  try {
+    const { res, host, feed, errors } = await openUpstream();
+    const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+    const deadline = Date.now() + 8000;
+    let buf = "";
+    let firstPrice: number | null = null;
+    while (Date.now() < deadline && firstPrice === null) {
+      const r = await Promise.race([reader.read(), new Promise<{ done: true; value?: undefined }>((ok) => setTimeout(() => ok({ done: true }), 8000))]);
+      if (r.done) break;
+      buf += r.value;
+      const m = buf.match(/data:(.*)\n/);
+      if (m) {
+        try {
+          const pr = JSON.parse(m[1]).parsed?.[0]?.price;
+          if (pr) firstPrice = Number(pr.price) * 10 ** Number(pr.expo);
+        } catch {
+          // keep reading
+        }
+      }
+    }
+    reader.cancel().catch(() => {});
+    return {
+      ok: firstPrice !== null,
+      host: new URL(host).host,
+      feedId: feed.id,
+      feedSource: feed.source,
+      firstPrice,
+      problems: firstPrice === null ? [...errors, "connected but no price arrived within 8s (wrong feed id, or market closed?)"] : errors,
+    };
+  } catch (e) {
+    return { ok: false, host: null, feedId: goldFeed?.id ?? null, feedSource: goldFeed?.source ?? null, firstPrice: null, problems: [(e as Error).message] };
+  }
 }
 
 // Edge functions have a wall-clock limit, so each stream ends after ~2 minutes and the page reconnects.
 const STREAM_MS = 120_000;
 
 async function tickStream(): Promise<Response> {
-  const id = await resolveFeedId();
-  const upstream = await fetch(`${HERMES_BASE()}/v2/updates/price/stream?ids[]=${id}&parsed=true&encoding=hex`, {
-    headers: { Authorization: `Bearer ${hermesKey()}`, Accept: "text/event-stream" },
-  });
-  if (!upstream.ok || !upstream.body) {
-    throw new Error(`Hermes ${upstream.status}: ${(await upstream.text()).slice(0, 160)}`);
-  }
-  const reader = upstream.body.pipeThrough(new TextDecoderStream()).getReader();
+  const { res: upstream } = await openUpstream();
+  const reader = upstream.body!.pipeThrough(new TextDecoderStream()).getReader();
   const enc = new TextEncoder();
   let buf = "";
 
@@ -242,7 +298,12 @@ Deno.serve(async (req) => {
 
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
-      return json({ version: 8, features: ["stream", "jev-check"], jev: !!env("TYPESAFE_API_KEY") });
+      return json({ version: 9, features: ["stream", "tickcheck", "jev-check"], jev: !!env("TYPESAFE_API_KEY") });
+    }
+
+    if (body.action === "tickcheck") {
+      if (!hermesKey()) return json({ ok: false, problems: ["PYTH_API_KEY secret is not set"] });
+      return json(await tickDiagnostics());
     }
 
     if (body.action === "stream") {

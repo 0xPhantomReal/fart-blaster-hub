@@ -29,6 +29,12 @@ async function callFn<T>(body: Record<string, unknown>): Promise<T> {
   return json as T;
 }
 
+/** Live tick stream health, shown on the page. */
+export interface TickStatus {
+  state: "connecting" | "streaming" | "fallback";
+  detail: string;
+}
+
 export interface Feed {
   readonly name: string;
   readonly jev: boolean; // backend has a TypeSafe key
@@ -36,7 +42,7 @@ export interface Feed {
   now(): number;
   history(): Promise<Candle[]>;
   /** onBar(candle, closed). Returns a stop function. */
-  start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void): () => void;
+  start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void, onTicks?: (s: TickStatus) => void): () => void;
 }
 
 // ── Live: Pyth via edge function ───────────────────────────────────────
@@ -83,7 +89,11 @@ export class LiveFeed implements Feed {
     return out.filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
   }
 
-  start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void): () => void {
+  start(
+    onBar: (c: Candle, closed: boolean) => void,
+    onError: (msg: string) => void,
+    onTicks: (s: TickStatus) => void = () => {},
+  ): () => void {
     let stopped = false;
     let forming: Candle | null = null;
     let busy = false;
@@ -123,8 +133,15 @@ export class LiveFeed implements Feed {
     let streamDown = false;
 
     // Every Pyth price tick updates the forming candle.
+    let reported: TickStatus["state"] | null = null;
+    const report = (st: TickStatus) => {
+      if (st.state === reported && st.state === "streaming") return;
+      reported = st.state;
+      onTicks(st);
+    };
     const onTick = (t: number, p: number) => {
       lastTickAt = Date.now();
+      report({ state: "streaming", detail: "every Pyth price update" });
       const b = bucket(t);
       if (b <= this.lastClosed) return;
       if (!forming || b > forming.time) {
@@ -143,6 +160,7 @@ export class LiveFeed implements Feed {
     let abort: AbortController | null = null;
     const stream = async () => {
       let backoff = 1000;
+      report({ state: "connecting", detail: "opening the Pyth tick stream" });
       while (!stopped) {
         abort = new AbortController();
         try {
@@ -181,11 +199,12 @@ export class LiveFeed implements Feed {
           const msg = (e as Error).message;
           if (!streamDown) {
             streamDown = true;
-            onError(
-              /unknown action/i.test(msg)
-                ? "Tick stream not deployed yet (ask Lovable to deploy the gold edge function). Updating from 1-minute data meanwhile."
-                : `Tick stream down (${msg}). Updating from 1-minute data meanwhile.`,
-            );
+            report({
+              state: "fallback",
+              detail: /unknown action/i.test(msg)
+                ? "the backend isn't deployed yet (ask Lovable to “Deploy the gold edge function”)"
+                : msg,
+            });
           }
           await new Promise((r) => setTimeout(r, /unknown action/i.test(msg) ? 60_000 : backoff));
           backoff = Math.min(backoff * 2, 30_000);
@@ -220,6 +239,13 @@ export class LiveFeed implements Feed {
       }
     };
 
+    // Connected but silent (wrong feed, or nothing flowing): say so; the 1-minute fallback keeps the candle moving.
+    const watchdog = window.setInterval(() => {
+      if (stopped) return;
+      if (Date.now() - lastTickAt > 20_000 && reported !== "fallback")
+        report({ state: "fallback", detail: lastTickAt ? "ticks stopped arriving" : "no ticks have arrived" });
+    }, 5000);
+
     void poll();
     void stream();
     const id = window.setInterval(poll, 5000);
@@ -228,6 +254,7 @@ export class LiveFeed implements Feed {
       stopped = true;
       window.clearInterval(id);
       window.clearInterval(mid);
+      window.clearInterval(watchdog);
       abort?.abort();
     };
   }
@@ -243,6 +270,20 @@ export interface CheckResult {
 /** Ask Jev about the candle opening at `forTime`. Cached per candle on the backend, so viewers share one answer. */
 export async function askCheck(snapshot: unknown, forTime: number): Promise<CheckResult> {
   return callFn<CheckResult>({ action: "check", snapshot, forTime });
+}
+
+export interface TickCheck {
+  ok: boolean;
+  host: string | null;
+  feedId: string | null;
+  feedSource: "secret" | "lookup" | "fallback" | null;
+  firstPrice: number | null;
+  problems: string[];
+}
+
+/** Ask the backend to test the Pyth tick stream end to end and say exactly what's wrong. */
+export async function tickCheck(): Promise<TickCheck> {
+  return callFn<TickCheck>({ action: "tickcheck" });
 }
 
 /** Which backend is deployed (older versions answer "unknown action"). */

@@ -161,6 +161,37 @@ export default function Gold() {
             )}
           </section>
 
+          {g.source !== "Simulated" && (
+            <section>
+              <Label>Live ticks</Label>
+              <p className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}>
+                {g.ticks.state === "streaming"
+                  ? "Streaming every Pyth price update."
+                  : g.ticks.state === "connecting"
+                    ? "Connecting to the Pyth tick stream…"
+                    : `Not streaming (${g.ticks.detail}). The candle updates from 1-minute data every few seconds instead.`}
+              </p>
+              {g.ticks.state === "fallback" && g.ticks.check && (
+                <div className={`mt-1 text-xs ${MUTED}`}>
+                  {g.ticks.check.ok ? (
+                    <>
+                      Backend test: the stream works ({g.ticks.check.host}, first price {g.ticks.check.firstPrice?.toFixed(2)}), so the
+                      problem is between the backend and this page. Reload; if it persists, tell Claude.
+                    </>
+                  ) : (
+                    <>
+                      Backend test: {g.ticks.check.problems.join(" · ")}
+                      {g.ticks.check.feedSource === "fallback" ? " (couldn't look up the gold feed; tried the standard XAU/USD feed id)" : ""}.
+                      {g.ticks.check.problems.some((x) => /401|403|unauthor|forbidden/i.test(x))
+                        ? " Your Pyth key isn't accepted for live ticks: add a Pyth Core/Hermes key as the secret PYTH_HERMES_KEY."
+                        : ""}
+                    </>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
           {g.error && <p className="text-xs text-[#d4a72c]">{g.error}</p>}
           <p className={`text-xs ${MUTED}`}>
             Arrows mark candles a call was made for: colored = right, gray = wrong. Trained on {g.trainedOn.toLocaleString()} candles.
