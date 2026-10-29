@@ -141,7 +141,18 @@ export default function Gold() {
     else if (g.jevPending) atOpen.push("Jev thinking…");
     else if (g.jevError) atOpen.push("Jev error (see below)");
   }
-  if (p?.pFinal != null && (g.jevOn || isLive)) atOpen.push(`→ ${pct(p.pFinal, 0)}`);
+  const rd = g.next.reads;
+  if (rd) {
+    const pts = (rd.pattern / 4) * 100; // log-odds → approx. percentage points near 50%
+    atOpen.push(`Patterns ${pts >= 0 ? "+" : ""}${pts.toFixed(1)} pts`);
+    if (rd.analog !== null) atOpen.push(`Analogs ${pct(rd.analog, 0)}`);
+  }
+  if (p?.pFinal != null && (g.jevOn || isLive || rd)) atOpen.push(`→ ${pct(p.pFinal, 0)}`);
+
+  // Label only the recent candles so the chart stays readable.
+  const recentFrom = g.bars.length > 40 ? g.bars[g.bars.length - 40].candle.time : 0;
+  const patternMarks = (g.patterns?.candleMarks ?? []).filter((m) => m.time >= recentFrom);
+  const patternLines = (g.patterns?.chart ?? []).flatMap((cp) => cp.lines.map((l) => ({ ...l, bias: cp.bias }))).slice(0, 8);
 
   return (
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
@@ -169,7 +180,15 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[58vh_auto] md:grid-cols-[1fr_300px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart bars={g.bars} forming={g.forming} ghost={ghost} fan={fanLines} version={g.version} />
+          <GoldChart
+            bars={g.bars}
+            forming={g.forming}
+            ghost={ghost}
+            fan={fanLines}
+            patternMarks={patternMarks}
+            patternLines={patternLines}
+            version={g.version}
+          />
           {g.status === "loading" && (
             <div className="absolute inset-0 grid place-items-center text-sm text-[#8b949e]">Training on history…</div>
           )}
@@ -279,6 +298,73 @@ export default function Gold() {
               </p>
             ) : (
               <p className="text-sm text-[#8b949e]">{g.source === "Simulated" ? "Needs live data." : "Measuring from 1-minute history…"}</p>
+            )}
+          </section>
+
+          <section>
+            <Label>Patterns now</Label>
+            {g.patterns && g.patterns.active.length ? (
+              <ul className="grid gap-1.5 text-sm">
+                {g.patterns.active.map((a) => (
+                  <li key={a.key} className="flex justify-between gap-3">
+                    <span className={a.bias === "bull" ? "text-[#26a69a]" : a.bias === "bear" ? "text-[#ef5350]" : "text-[#e6e8eb]"}>{a.key}</span>
+                    <span className="text-right text-xs tabular-nums text-[#8b949e]">
+                      {a.n
+                        ? `next green ${pct(a.greenNext, 0)} of ${a.n.toLocaleString()}${a.edge !== null && Math.abs(a.edge) < 0.02 ? " · no real edge" : ""}`
+                        : "not measured yet"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-[#8b949e]">No candlestick or chart pattern on the last candle.</p>
+            )}
+            <p className="mt-2 text-xs text-[#8b949e]">
+              Each pattern is measured on gold's own history{g.patterns?.base != null ? ` (base rate: ${pct(g.patterns.base, 0)} of candles close green)` : ""}.
+              A pattern only moves the forecast as much as it has actually beaten that base rate.
+            </p>
+          </section>
+
+          <section>
+            <Label>Next-candle accuracy</Label>
+            {g.next.report ? (
+              <>
+                <table className="w-full text-sm tabular-nums">
+                  <thead>
+                    <tr className="text-xs text-[#8b949e]">
+                      <th className="pb-1 text-left font-medium"></th>
+                      <th className="pb-1 text-right font-medium">Hit rate</th>
+                      <th className="pb-1 text-right font-medium">Calls</th>
+                      <th className="pb-1 text-right font-medium">Skill</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(
+                      [
+                        ["Combined", g.next.report.test.combined],
+                        ["Model", g.next.report.test.model],
+                        ["Patterns", g.next.report.test.patterns],
+                        ["Analogs", g.next.report.test.analogs],
+                      ] as const
+                    ).map(([name, sc]) => (
+                      <tr key={name} className="border-t border-[#262c36]">
+                        <td className="py-1 text-left">{name}</td>
+                        <td className="py-1 text-right">{sc.calls >= 20 ? pct(sc.hitRate) : "—"}</td>
+                        <td className="py-1 text-right">{sc.calls}</td>
+                        <td className={`py-1 text-right ${sc.skill > 0.002 ? "text-[#26a69a]" : sc.skill < -0.002 ? "text-[#ef5350]" : ""}`}>
+                          {sc.skill.toFixed(3)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="mt-1 text-xs text-[#8b949e]">
+                  Fitted on {g.next.report.trainN.toLocaleString()} older candles, scored on the {g.next.report.test.combined.n.toLocaleString()} most
+                  recent ones it never saw. A call = leaning at least 4 points off 50%. Skill above 0 = better than guessing the base rate.
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-[#8b949e]">{g.next.running ? "Testing on history…" : "Waits for history to load."}</p>
             )}
           </section>
 

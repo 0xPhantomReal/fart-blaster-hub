@@ -140,8 +140,8 @@ export class AnalogIndex {
     // Never use more than a third of history: beyond that the "analogs" stop resembling now.
     n = Math.min(n, Math.floor(cands.length / 3));
     if (n < 20) return null;
-    cands.sort((a, b) => a.d - b.d);
-    const scenarios: Scenario[] = cands.slice(0, n).map((c, k) => ({
+    const nearest = smallest(cands, n);
+    const scenarios: Scenario[] = nearest.map((c, k) => ({
       id: `s${k + 1}`,
       from: h[c.i].time,
       distance: c.d,
@@ -151,6 +151,33 @@ export class AnalogIndex {
     const endsHigher = scenarios.filter((s) => s.candles.reduce((a, c) => a + c.body, 0) > 0).length;
     return { scenarios, atr: atrNow, endsHigherPct: endsHigher / scenarios.length };
   }
+}
+
+/** The n entries with the smallest distance, in order. Quickselect, so it doesn't sort the whole list. */
+function smallest<T extends { d: number }>(xs: T[], n: number): T[] {
+  if (xs.length <= n * 4) return xs.sort((a, b) => a.d - b.d).slice(0, n);
+  const a = xs.slice();
+  let lo = 0;
+  let hi = a.length - 1;
+  const k = n - 1;
+  while (lo < hi) {
+    const pivot = a[(lo + hi) >> 1].d;
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (a[i].d < pivot) i++;
+      while (a[j].d > pivot) j--;
+      if (i <= j) {
+        [a[i], a[j]] = [a[j], a[i]];
+        i++;
+        j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return a.slice(0, n).sort((x, y) => x.d - y.d);
 }
 
 /** One-off version: analogs for the latest candle in `history`. */

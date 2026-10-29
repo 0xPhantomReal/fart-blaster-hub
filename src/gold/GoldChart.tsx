@@ -44,20 +44,56 @@ function markerFor(b: ClosedBar): SeriesMarker<Time>[] {
   ];
 }
 
+export interface PatternMark {
+  time: number;
+  name: string;
+  bias: "bull" | "bear" | "neutral";
+}
+export interface PatternLine {
+  from: { time: number; price: number };
+  to: { time: number; price: number };
+  bias: "bull" | "bear" | "neutral";
+}
+
+const SHORT: Record<string, string> = {
+  "Bullish engulfing": "Engulf",
+  "Bearish engulfing": "Engulf",
+  "Bullish harami": "Harami",
+  "Bearish harami": "Harami",
+  "Hanging man": "Hang man",
+  "Shooting star": "Shoot star",
+  "Inverted hammer": "Inv hammer",
+  "Piercing line": "Piercing",
+  "Dark cloud cover": "Dark cloud",
+  "Morning star": "Morn star",
+  "Evening star": "Eve star",
+  "Three white soldiers": "3 soldiers",
+  "Three black crows": "3 crows",
+  "Bullish marubozu": "Marubozu",
+  "Bearish marubozu": "Marubozu",
+  "Tweezer top": "Tweezer",
+  "Tweezer bottom": "Tweezer",
+};
+const BIAS_COLOR = { bull: "rgba(38,166,154,0.9)", bear: "rgba(239,83,80,0.9)", neutral: "rgba(139,148,158,0.9)" };
+const MAX_PATTERN_LINES = 8;
+
 interface Props {
   bars: ClosedBar[];
   forming: Candle | null;
   ghost: Ghost | null;
   fan: FanLines | null;
+  patternMarks: PatternMark[];
+  patternLines: PatternLine[];
   version: number;
 }
 
-export function GoldChart({ bars, forming, ghost, fan, version }: Props) {
+export function GoldChart({ bars, forming, ghost, fan, patternMarks, patternLines, version }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const ghostSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const fanSeries = useRef<Partial<Record<Band, ISeriesApi<"Line">>>>({});
+  const lineSeries = useRef<ISeriesApi<"Line">[]>([]);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawnVersion = useRef(-1);
   const zoomed = useRef(false);
@@ -125,6 +161,16 @@ export function GoldChart({ bars, forming, ghost, fan, version }: Props) {
       p25: line("rgba(212,167,44,0.75)", 1, LineStyle.Dashed),
       p10: line("rgba(212,167,44,0.45)", 1, LineStyle.Dotted),
     };
+    // Chart-pattern lines (necklines, trendlines, support/resistance): a small reusable pool.
+    lineSeries.current = Array.from({ length: MAX_PATTERN_LINES }, () =>
+      c.addSeries(LineSeries, {
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      }),
+    );
     markers.current = createSeriesMarkers(candles.current, []);
     chart.current = c;
     return () => {
@@ -140,13 +186,39 @@ export function GoldChart({ bars, forming, ghost, fan, version }: Props) {
     if (!candles.current || drawnVersion.current === version || !bars.length) return;
     drawnVersion.current = version;
     candles.current.setData(bars.map((b) => toBar(b.candle)));
-    markers.current?.setMarkers(bars.flatMap(markerFor));
     if (!zoomed.current && chart.current) {
       zoomed.current = true;
       const show = window.innerWidth < 640 ? 40 : 120;
       chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - show), to: bars.length + 4 });
     }
   }, [bars, version]);
+
+  // Call arrows + candlestick-pattern labels (markers must be in time order).
+  useEffect(() => {
+    if (!markers.current) return;
+    const pm: SeriesMarker<Time>[] = patternMarks.map((m) => ({
+      time: m.time as UTCTimestamp,
+      position: m.bias === "bull" ? "belowBar" : "aboveBar",
+      shape: "circle",
+      size: 0.4,
+      color: BIAS_COLOR[m.bias],
+      text: SHORT[m.name] ?? m.name,
+    }));
+    const all = [...bars.flatMap(markerFor), ...pm].sort((a, b) => (a.time as number) - (b.time as number));
+    markers.current.setMarkers(all);
+  }, [bars, version, patternMarks]);
+
+  useEffect(() => {
+    lineSeries.current.forEach((ser, k) => {
+      const l = patternLines[k];
+      if (!l || l.to.time <= l.from.time) return ser.setData([]);
+      ser.applyOptions({ color: BIAS_COLOR[l.bias] });
+      ser.setData([
+        { time: l.from.time as UTCTimestamp, value: l.from.price },
+        { time: l.to.time as UTCTimestamp, value: l.to.price },
+      ]);
+    });
+  }, [patternLines]);
 
   // Cheap update for the forming candle.
   useEffect(() => {

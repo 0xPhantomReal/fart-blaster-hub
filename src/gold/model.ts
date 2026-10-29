@@ -592,6 +592,23 @@ export class Engine {
     if (p && p.ghost && f.time === p.ghost.time) p.jevLive = pGreen;
   }
 
+  /** P(green) for the pending candle before the next-candle combiner (model, blended with Jev if it answered). */
+  get pendingModelP(): number | null {
+    const p = this.pending;
+    if (!p || p.pModel === null) return null;
+    return p.pJev === null ? p.pModel : this.stacker.predict(p.pModel, p.pJev);
+  }
+
+  /** Replace the pending call with the combined next-candle forecast (model + patterns + analogs). */
+  applyCombined(pGreen: number): Prediction | null {
+    const p = this.pending;
+    if (!p || !p.ghost) return null;
+    p.pFinal = pGreen;
+    p.call = this.callFor(pGreen);
+    p.ghost = this.shape.ghost(p.ghost.time, p.ghost.open, p.call);
+    return this.view(p.ghost?.time ?? 0);
+  }
+
   /** Fold Jev's answer into the pending prediction. pGreen is Jev's probability the next candle is green. */
   applyJev(pGreen: number, confidence: number): Prediction | null {
     const p = this.pending;

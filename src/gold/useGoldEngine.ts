@@ -3,6 +3,19 @@ import type { Candle } from "./indicators";
 import { Engine, type Nowcast, type Outcome, type Prediction } from "./model";
 import { fitReversion, type ReversionFit } from "./reversion";
 import { AnalogIndex, HORIZON, label } from "./forecast";
+import {
+  candlePatterns,
+  chartPatterns,
+  patternEdge,
+  patternKeysAt,
+  pivots,
+  pivotWindow,
+  wilderAtr,
+  type Bias,
+  type ChartPattern,
+  type PatternBook,
+} from "./patterns";
+import { replayNextCandle, type Combiner, type Reads, type Score } from "./nextcandle";
 import { backtestFan, buildFan, calibrateFan, FanTracker, jevWeights, type BandCalibration, type Fan, type FanScore } from "./fan";
 import { askJev, ratePaths, backendConfigured, backendVersion, LiveFeed, SimFeed, TF_SECONDS, type Feed } from "./feed";
 
@@ -39,6 +52,23 @@ export interface ForecastScores {
   liveJev: FanScore | null;
 }
 
+export interface PatternView {
+  /** Candlestick patterns on recent candles, for chart markers. */
+  candleMarks: { time: number; name: string; bias: Bias }[];
+  /** Chart patterns as of the last closed candle, with lines to draw. */
+  chart: ChartPattern[];
+  /** Everything active on the last closed candle, with what it has measured on gold's history. */
+  active: { key: string; bias: Bias; n: number | null; greenNext: number | null; edge: number | null }[];
+  base: number | null; // share of green candles in the measured history
+}
+
+export interface NextCandleView {
+  reads: Reads | null; //  model, pattern edge and analog read for the candle being forecast
+  p: number | null; //     combined chance of green
+  report: { test: { model: Score; patterns: Score; analogs: Score; combined: Score }; trainN: number } | null;
+  running: boolean;
+}
+
 export interface GoldState {
   status: "loading" | "ready" | "error";
   source: string;
@@ -55,6 +85,8 @@ export interface GoldState {
   /** Jev's latest read on the forming candle. */
   jevLive: { pGreen: number; at: number } | null;
   /** 5-candle forecast (only while the toggle is on). */
+  patterns: PatternView | null;
+  next: NextCandleView;
   forecastOn: boolean;
   forecast: Forecast | null;
   forecastBusy: boolean;
@@ -108,6 +140,8 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
     jevLive: null,
     jevLiveStatus: "starting…",
     reversion: null,
+    patterns: null,
+    next: { reads: null, p: null, report: null, running: false },
     forecastOn: readForecastPref(),
     forecast: null,
     forecastBusy: false,
@@ -169,14 +203,102 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
       lastForming = null;
       publish({ forming: null, live: null, prediction: next, jevPending: false, jevLive: null });
       scorePending();
+      computePatterns();
       await consultJev(next);
+      combineNow();
       await runForecast();
+    };
+
+    // ── Patterns and the combined next-candle forecast ─────────────────
+    let book: PatternBook | null = null;
+    let combiner: Combiner | null = null;
+    let patternsNow: { pattern: string; bias: Bias; times_seen: number | null; next_candle_green_pct: number | null }[] = [];
+
+    /** Recognize patterns on the recent candles and look up what each has measured. */
+    const computePatterns = () => {
+      const cs = bars.map((b) => b.candle);
+      if (cs.length < 60) return;
+      const atrs = wilderAtr(cs);
+      const piv = pivots(cs, atrs);
+      const t = cs.length - 1;
+      const atr = atrs[t];
+      if (!atr) return;
+      const candleMarks: PatternView["candleMarks"] = [];
+      for (let i = Math.max(3, t - 120); i <= t; i++) {
+        const a = atrs[i];
+        if (a) for (const cp of candlePatterns(cs, i, a)) candleMarks.push({ time: cs[i].time, name: cp.name, bias: cp.bias });
+      }
+      const chart = chartPatterns(cs, t, atr, pivotWindow(piv, t));
+      const active = patternKeysAt(cs, t, atr, piv).map(({ key, bias }) => {
+        const st = book?.stats.get(key);
+        return { key, bias, n: st?.n ?? null, greenNext: st?.greenNext ?? null, edge: st?.edge ?? null };
+      });
+      patternsNow = active.map((a) => ({
+        pattern: a.key,
+        bias: a.bias,
+        times_seen: a.n,
+        next_candle_green_pct: a.greenNext === null ? null : Math.round(a.greenNext * 100),
+      }));
+      if (!cancelled) setState((s) => ({ ...s, patterns: { candleMarks, chart, active, base: book?.base ?? null } }));
+    };
+
+    /** Combine model (+ Jev), measured patterns and analogs into the next-candle forecast. */
+    const combineNow = () => {
+      if (!combiner || !book || cancelled) return;
+      const cs = bars.map((b) => b.candle);
+      const t = cs.length - 1;
+      const atrs = wilderAtr(cs);
+      const atr = atrs[t];
+      if (!atr) return;
+      const idx = getIndex();
+      const set = idx.scenarios(idx.history.length - 1, 300);
+      const reads: Reads = {
+        model: engine.pendingModelP,
+        pattern: patternEdge(book, patternKeysAt(cs, t, atr, pivots(cs, atrs))),
+        analog: set ? buildFan(set).steps[0].pGreen : null,
+      };
+      const p = combiner.predict(reads);
+      const pred = engine.applyCombined(p);
+      if (pred) publish({ prediction: pred, next: { ...stateNext(), reads, p } });
+    };
+    let nextReport: NextCandleView["report"] = null;
+    let nextRunning = false;
+    const stateNext = (): NextCandleView => ({ reads: null, p: null, report: nextReport, running: nextRunning });
+
+    /** Fit the combination on older history and score it on newer history (once the year of history is in). */
+    let replayDone = false;
+    const runReplay = async () => {
+      if (replayDone || cancelled || bars.length < 400) return;
+      replayDone = true;
+      nextRunning = true;
+      setState((s) => ({ ...s, next: { ...s.next, running: true } }));
+      const history = analogPool();
+      const offset = history.length - bars.length;
+      // modelP[t] = the model's out-of-sample P(green) for candle t+1, made at the close of candle t.
+      const modelP: (number | null)[] = history.map(() => null);
+      for (let j = 0; j + 1 < bars.length; j++) modelP[offset + j] = bars[j + 1].outcome?.pFinal ?? null;
+      try {
+        const rep = await replayNextCandle(history, modelP, { rows: 2400, analogPaths: 300 });
+        if (rep && !cancelled) {
+          book = rep.book;
+          combiner = rep.combiner;
+          nextReport = { test: rep.test, trainN: rep.trainN };
+        }
+      } finally {
+        nextRunning = false;
+      }
+      if (!cancelled) {
+        setState((s) => ({ ...s, next: { ...s.next, report: nextReport, running: false } }));
+        computePatterns();
+        combineNow();
+      }
     };
 
     /** Ask Jev about the pending prediction (the candle forming now or next). */
     const consultJev = async (fallback: Prediction | null) => {
-      const snapshot = feed.jev && engine.warm ? engine.describeForJev() : null;
-      if (!snapshot) return;
+      const base = feed.jev && engine.warm ? engine.describeForJev() : null;
+      if (!base) return;
+      const snapshot = patternsNow.length ? { ...base, patterns_now: patternsNow } : base;
       publish({ jevPending: true });
       try {
         const v = await withTimeout(askJev(snapshot, { mode: "open" }), 20_000, "Jev took longer than 20s");
@@ -373,7 +495,7 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
           // keep using the recent history
         }
       };
-      void loadPool();
+      void loadPool().finally(() => void runReplay());
       poolTimer = window.setInterval(loadPool, 6 * 3600 * 1000);
 
       if (feed.name === "Pyth") {
@@ -391,8 +513,10 @@ export function useGoldEngine(): GoldState & { setForecastOn: (on: boolean) => v
         liveSupported = false;
         void runForecast();
       }
+      computePatterns();
       // Don't make the first Jev answer wait for the next candle close.
-      queue = queue.then(() => consultJev(prediction));
+      queue = queue.then(() => consultJev(prediction)).then(() => combineNow());
+      if (!(feed instanceof LiveFeed)) void runReplay();
 
       stop = feed.start(
         (c, closed) => {
