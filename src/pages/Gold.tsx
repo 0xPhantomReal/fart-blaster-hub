@@ -218,6 +218,11 @@ export default function Gold() {
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
           <GoldChart key={`${market}-${tfMin}`} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} />
+          {g.blocked && (
+            <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
+              <p className="max-w-md">{g.blocked}</p>
+            </div>
+          )}
           {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading {mk.label.toLowerCase()} history…</div>}
         </div>
 

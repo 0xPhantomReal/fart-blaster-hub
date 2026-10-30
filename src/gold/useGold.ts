@@ -73,6 +73,8 @@ export interface GoldState {
   jev: { on: boolean; status: string; calls: number };
   flip: FlipView;
   forecast: ForecastView;
+  /** Set when this market can't be shown yet (the page shows this instead of a chart). */
+  blocked: string | null;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
   ticks: TickStatus & { check: TickCheck | null };
   version: number; //              bumps when the chart should redraw
@@ -160,6 +162,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     ticks: { state: "connecting", detail: "", check: null },
     flip: FLIP_START,
     forecast: FORECAST_START,
+    blocked: null,
     version: 0,
   });
 
@@ -184,6 +187,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       jev: { on: false, status: "starting…", calls: 0 },
       flip: FLIP_START,
       forecast: FORECAST_START,
+      blocked: null,
       version: s.version + 1,
     }));
     let bars: ClosedBar[] = [];
@@ -537,6 +541,19 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     };
 
     (async () => {
+      // An older backend ignores the market and sends gold. Don't show gold under a bitcoin label.
+      if (market !== "gold" && feed instanceof LiveFeed) {
+        const v = await backendVersion().catch(() => null);
+        if (cancelled) return;
+        if (!v || !v.features.includes("markets")) {
+          set({
+            status: "ready",
+            blocked:
+              "The deployed backend only knows gold, so it sent gold candles. In Lovable, type “Deploy the gold edge function”, then reload this page.",
+          });
+          return;
+        }
+      }
       let history: Candle[];
       try {
         history = await feed.history();
