@@ -5,6 +5,13 @@ import type { Candle } from "./indicators";
 
 export const TIMEFRAMES = [1, 5, 15] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
+
+/** The markets the page can show. Bitcoin uses the CME CF Bitcoin Real Time Index (BRTI) live when available. */
+export type Market = "gold" | "btc";
+export const MARKETS: Record<Market, { label: string; pair: string; timeframes: Timeframe[]; simStart: number }> = {
+  gold: { label: "Gold", pair: "XAU/USD", timeframes: [1, 5, 15], simStart: 4000 },
+  btc: { label: "Bitcoin", pair: "BTC/USD · BRTI", timeframes: [5, 15], simStart: 100000 },
+};
 export const HISTORY_BARS = 3000;
 /** Bars per request when fetching long history (Pyth answers ~6k bars comfortably). */
 const CHUNK_BARS = 5760;
@@ -34,11 +41,15 @@ async function callFn<T>(body: Record<string, unknown>): Promise<T> {
 export interface TickStatus {
   state: "connecting" | "streaming" | "fallback";
   detail: string;
+  /** Where live ticks come from right now ("BRTI" or "Pyth"), and why if it's not the preferred one. */
+  source?: string;
+  note?: string | null;
 }
 
 export interface Feed {
   readonly name: string;
   readonly tfMin: number;
+  readonly market: Market;
   readonly jev: boolean; // backend has a TypeSafe key
   /** Current time on this feed's clock, unix seconds. */
   now(): number;
@@ -60,13 +71,19 @@ export class LiveFeed implements Feed {
   private lastClosed = 0;
   private readonly tf: number;
   now = () => Date.now() / 1000;
-  constructor(readonly tfMin: Timeframe = 15) {
+  constructor(
+    readonly market: Market = "gold",
+    readonly tfMin: Timeframe = 15,
+  ) {
     this.tf = tfMin * 60;
   }
   private bucket = (t: number) => Math.floor(t / this.tf) * this.tf;
+  /** True while ticks come from BRTI: then the candles built from those ticks are the ones shown and scored. */
+  private ticksRule = false;
+  private tickCandles = new Map<number, { c: Candle; firstTickAt: number }>();
 
   private async fetchRange(from: number, to: number, resolution: number = this.tfMin): Promise<Candle[]> {
-    const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution });
+    const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution, market: this.market });
     this.jev = r.jev;
     return r.candles;
   }
@@ -133,12 +150,15 @@ export class LiveFeed implements Feed {
         for (const c of recent) {
           if (c.time <= this.lastClosed) continue;
           if (c.time < current) {
-            onBar(c, true);
+            // Live BRTI candles that were streamed from their open are kept as streamed (history is Pyth's).
+            const tc = this.tickCandles.get(c.time);
+            onBar(this.ticksRule && tc && tc.firstTickAt - c.time <= 5 ? tc.c : c, true);
+            this.tickCandles.delete(c.time);
             this.lastClosed = c.time;
           } else if (!forming || forming.time !== c.time) {
             forming = { ...c };
             emitForming();
-          } else {
+          } else if (!this.ticksRule) {
             // Keep the API's open; widen high/low with anything the ticks saw.
             forming = { ...forming, open: c.open, high: Math.max(forming.high, c.high), low: Math.min(forming.low, c.low) };
             emitForming();
@@ -156,18 +176,21 @@ export class LiveFeed implements Feed {
 
     // Every Pyth price tick updates the forming candle.
     let reported: TickStatus["state"] | null = null;
+    let tickSource: { source: string; note: string | null } = { source: "Pyth", note: null };
     const report = (st: TickStatus) => {
       if (st.state === reported && st.state === "streaming") return;
       reported = st.state;
-      onTicks(st);
+      onTicks({ ...st, ...tickSource });
     };
     const onTick = (t: number, p: number) => {
       lastTickAt = Date.now();
-      report({ state: "streaming", detail: "every Pyth price update" });
+      report({ state: "streaming", detail: tickSource.source === "BRTI" ? "every BRTI value (CF Benchmarks via Kalshi)" : "every Pyth price update" });
       const b = this.bucket(t);
       if (b <= this.lastClosed) return;
       if (!forming || b > forming.time) {
         forming = { time: b, open: forming ? forming.close : p, high: p, low: p, close: p };
+        this.tickCandles.set(b, { c: { ...forming }, firstTickAt: t });
+        if (this.tickCandles.size > 50) this.tickCandles.delete(this.tickCandles.keys().next().value!);
         void poll(); // a candle just closed: fetch its final OHLC now
       } else if (b < forming.time) {
         return; // late tick from the previous candle
@@ -175,6 +198,8 @@ export class LiveFeed implements Feed {
         forming.high = Math.max(forming.high, p);
         forming.low = Math.min(forming.low, p);
         forming.close = p;
+        const tc = this.tickCandles.get(b);
+        if (tc) tc.c = { ...forming };
       }
       emitForming();
     };
@@ -192,7 +217,7 @@ export class LiveFeed implements Feed {
               "Content-Type": "application/json",
               ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
             },
-            body: JSON.stringify({ action: "stream" }),
+            body: JSON.stringify({ action: "stream", market: this.market }),
             signal: abort.signal,
           });
           if (!res.ok || !res.body) {
@@ -212,12 +237,20 @@ export class LiveFeed implements Feed {
               const line = buf.slice(0, nl);
               buf = buf.slice(nl + 1);
               if (!line) continue;
-              const m = JSON.parse(line) as { t: number; p: number };
-              onTick(m.t, m.p);
+              const m = JSON.parse(line) as { t?: number; p?: number; source?: string; note?: string | null };
+              if (m.source) {
+                // First line of each stream: where the ticks come from.
+                this.ticksRule = m.source === "BRTI";
+                tickSource = { source: m.source, note: m.note ?? null };
+                reported = null;
+                continue;
+              }
+              if (typeof m.t === "number" && typeof m.p === "number") onTick(m.t, m.p);
             }
           }
         } catch (e) {
           if (stopped) return;
+          this.ticksRule = false;
           const msg = (e as Error).message;
           if (!streamDown) {
             streamDown = true;
@@ -290,8 +323,8 @@ export interface CheckResult {
 }
 
 /** Ask Jev about the candle opening at `forTime`. Cached per candle on the backend, so viewers share one answer. */
-export async function askCheck(snapshot: unknown, forTime: number, timeframeMin: number): Promise<CheckResult> {
-  return callFn<CheckResult>({ action: "check", snapshot, forTime, timeframeMin });
+export async function askCheck(snapshot: unknown, forTime: number, timeframeMin: number, market: Market): Promise<CheckResult> {
+  return callFn<CheckResult>({ action: "check", snapshot, forTime, timeframeMin, market });
 }
 
 /** Jev picks the most likely of the forecast paths (`options`: id → compact text). One answer per candle, shared. */
@@ -300,8 +333,9 @@ export async function askForecast(
   options: Record<string, string>,
   forTime: number,
   timeframeMin: number,
+  market: Market,
 ): Promise<{ choice: string; probabilities: Record<string, number> }> {
-  return callFn({ action: "forecast", data, options, forTime, timeframeMin });
+  return callFn({ action: "forecast", data, options, forTime, timeframeMin, market });
 }
 
 export interface TickCheck {
@@ -311,16 +345,22 @@ export interface TickCheck {
   feedSource: "secret" | "lookup" | "fallback" | null;
   firstPrice: number | null;
   problems: string[];
+  brti?: { ok: boolean; problem: string | null };
 }
 
 /** Ask the backend to test the Pyth tick stream end to end and say exactly what's wrong. */
-export async function tickCheck(): Promise<TickCheck> {
-  return callFn<TickCheck>({ action: "tickcheck" });
+export async function tickCheck(market: Market): Promise<TickCheck> {
+  return callFn<TickCheck>({ action: "tickcheck", market });
 }
 
 /** Jev: will the forming candle flip color before it closes? Shared per time slot on the backend. */
-export async function askFlip(state: Record<string, unknown>, slotKey: string, timeframeMin: number): Promise<{ pFlip: number }> {
-  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey, timeframeMin });
+export async function askFlip(
+  state: Record<string, unknown>,
+  slotKey: string,
+  timeframeMin: number,
+  market: Market,
+): Promise<{ pFlip: number }> {
+  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey, timeframeMin, market });
 }
 
 /** Which backend is deployed (older versions answer "unknown action"). */
@@ -349,17 +389,21 @@ export class SimFeed implements Feed {
   readonly name = "Simulated";
   readonly jev = false;
   private readonly tf: number;
-  constructor(readonly tfMin: Timeframe = 15) {
+  constructor(
+    readonly market: Market = "gold",
+    readonly tfMin: Timeframe = 15,
+  ) {
     this.tf = tfMin * 60;
+    this.price = MARKETS[market].simStart;
   }
   private bucket = (t: number) => Math.floor(t / this.tf) * this.tf;
-  private price = 4000;
+  private price: number;
   private simNow = Date.now() / 1000;
   now = () => this.simNow;
   private rand = mulberry32(42);
 
   private step(): number {
-    this.price += (this.rand() - 0.5) * 1.2;
+    this.price += (this.rand() - 0.5) * 0.0003 * this.price;
     return Number(this.price.toFixed(2));
   }
 

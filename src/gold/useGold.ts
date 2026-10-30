@@ -13,6 +13,7 @@ import {
   SimFeed,
   tickCheck,
   type Feed,
+  type Market,
   type Timeframe,
   type TickCheck,
   type TickStatus,
@@ -90,36 +91,38 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 // Jev answers for past candles never change, so keep them in the browser to avoid paying twice.
-// One store per timeframe (15m keeps its original name so its answers carry over).
-const tfKey = (base: string, tf: number) => (tf === 15 ? base : `${base}.${tf}m`);
-function readCache(tf: number): Record<string, JevAnswer> {
+// One store per market and timeframe (gold 15m keeps its original name so its answers carry over).
+type Where = { market: Market; tf: number };
+const tfKey = (base: string, w: Where) =>
+  w.market === "gold" ? (w.tf === 15 ? base : `${base}.${w.tf}m`) : `${base}.${w.market}.${w.tf}m`;
+function readCache(w: Where): Record<string, JevAnswer> {
   try {
-    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v1", tf)) ?? "{}");
+    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v1", w)) ?? "{}");
   } catch {
     return {};
   }
 }
-function writeCache(c: Record<string, JevAnswer>, tf: number) {
+function writeCache(c: Record<string, JevAnswer>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
     const trimmed = Object.fromEntries(keys.slice(-600).map((k) => [k, c[k]]));
-    localStorage.setItem(tfKey("gold.jevcheck.v1", tf), JSON.stringify(trimmed));
+    localStorage.setItem(tfKey("gold.jevcheck.v1", w), JSON.stringify(trimmed));
   } catch {
     // storage unavailable: answers are just fetched again next visit
   }
 }
 
-function readFlipCache(tf: number): Record<string, number> {
+function readFlipCache(w: Where): Record<string, number> {
   try {
-    return JSON.parse(localStorage.getItem(tfKey("gold.flipcheck.v1", tf)) ?? "{}");
+    return JSON.parse(localStorage.getItem(tfKey("gold.flipcheck.v1", w)) ?? "{}");
   } catch {
     return {};
   }
 }
-function writeFlipCache(c: Record<string, number>, tf: number) {
+function writeFlipCache(c: Record<string, number>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
-    localStorage.setItem(tfKey("gold.flipcheck.v1", tf), JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
+    localStorage.setItem(tfKey("gold.flipcheck.v1", w), JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
   } catch {
     // fine: fetched again next visit
   }
@@ -132,7 +135,7 @@ const FORECAST_START: ForecastView = { status: "waiting for history…", candles
  * Everything on the /gold page for one timeframe. Switching timeframe starts over (fresh history, model, Jev
  * checks). `forecastOn` only controls whether Jev is asked to pick the forecast path (the typical path is free).
  */
-export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
+export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): GoldState {
   const forecastOnRef = useRef(forecastOn);
   const kickForecast = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -163,7 +166,8 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
   useEffect(() => {
     let cancelled = false;
     const TF_SECONDS = tfMin * 60;
-    let feed: Feed = backendConfigured() ? new LiveFeed(tfMin) : new SimFeed(tfMin);
+    const where: Where = { market, tf: tfMin };
+    let feed: Feed = backendConfigured() ? new LiveFeed(market, tfMin) : new SimFeed(market, tfMin);
     let predictor = new Predictor(TF_SECONDS);
     setState((s) => ({
       ...s,
@@ -217,7 +221,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       if (!snap) return;
       setJev({ status: "checking this candle…" });
       try {
-        const a = await withTimeout(askCheck(snap, pred.forTime, tfMin), 20_000);
+        const a = await withTimeout(askCheck(snap, pred.forTime, tfMin, market), 20_000);
         jevCalls += a.support === null ? 1 : 2;
         const updated = predictor.applyJev({ pGreen: a.pGreen, support: a.support });
         if (updated) set({ prediction: updated, trust: predictor.summary().trust });
@@ -229,7 +233,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
 
     /** Check Jev on the latest ~200 past candles before trusting it live. */
     const runBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
-      const cache = readCache(tfMin);
+      const cache = readCache(where);
       const targets = history.slice(-BACKFILL).filter((c) => preds.get(c.time)?.pModel != null && predictor.snapshotFor(c.time));
       const answers = new Map<number, JevAnswer>();
       let done = 0;
@@ -240,7 +244,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
           if (cachedA) answers.set(c.time, cachedA);
           else {
             try {
-              const a = await withTimeout(askCheck(predictor.snapshotFor(c.time), c.time, tfMin), 30_000);
+              const a = await withTimeout(askCheck(predictor.snapshotFor(c.time), c.time, tfMin, market), 30_000);
               const ans = { pGreen: a.pGreen, support: a.support };
               answers.set(c.time, ans);
               cache[String(c.time)] = ans;
@@ -256,7 +260,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       // 6 at a time
       const lanes = Array.from({ length: 6 }, (_, k) => targets.filter((_, i) => i % 6 === k));
       await Promise.all(lanes.map(worker));
-      writeCache(cache, tfMin);
+      writeCache(cache, where);
       const rows = targets
         .filter((c) => answers.has(c.time) && c.close !== c.open)
         .map((c) => ({ pModel: preds.get(c.time)!.pModel!, jev: answers.get(c.time)!, y: (c.close > c.open ? 1 : 0) as 0 | 1 }));
@@ -320,7 +324,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       }
       flipBusy = true;
       try {
-        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`, tfMin), 15_000);
+        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`, tfMin, market), 15_000);
         lastAsked = { key: shape, at: Date.now() };
         flipCalls += 1;
         lastFlip = { forTime: c.time, move: c.close - c.open, pFlip: a.pFlip, at: Date.now() };
@@ -349,7 +353,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       const atrs = atrByTime(history);
       const snaps = pastSnapshots(minutes, history, TF_SECONDS, (t) => atrs.get(t - TF_SECONDS) ?? null, (t) => preds.get(t)?.pFinal ?? 0.5, FLIP_BACKFILL);
       if (snaps.length < 30) return setFlip({ status: "not enough 1-minute history to test the flip check yet" });
-      const cache = readFlipCache(tfMin);
+      const cache = readFlipCache(where);
       const rows: FlipRow[] = [];
       let done = 0;
       const lanes = Array.from({ length: 6 }, (_, k) => snaps.filter((_, i) => i % 6 === k));
@@ -361,7 +365,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
             let pFlip = cache[String(sn.time)];
             if (pFlip === undefined) {
               try {
-                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`, tfMin), 30_000)).pFlip;
+                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`, tfMin, market), 30_000)).pFlip;
                 cache[String(sn.time)] = pFlip;
                 flipCalls += 1;
               } catch {
@@ -373,7 +377,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
           }
         }),
       );
-      writeFlipCache(cache, tfMin);
+      writeFlipCache(cache, where);
       for (const sn of snaps) {
         const pf = answers.get(sn.time);
         if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), move: sn.move, y: sn.y });
@@ -410,7 +414,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       if (!snap) return;
       setForecast({ status: "Jev is picking the most likely path…" });
       try {
-        const a = await withTimeout(askForecast(snap.data, f.options, f.startTime, tfMin), 30_000);
+        const a = await withTimeout(askForecast(snap.data, f.options, f.startTime, tfMin, market), 30_000);
         forecastCalls += 1;
         const pick = f.paths.find((p) => p.id === a.choice);
         if (!pick) throw new Error("unknown pick");
@@ -537,7 +541,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       try {
         history = await feed.history();
       } catch (e) {
-        feed = new SimFeed();
+        feed = new SimFeed(market, tfMin);
         history = await feed.history();
         set({ error: `Live data unavailable (${(e as Error).message}). Showing simulated gold.` });
       }
@@ -581,7 +585,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
           if (st.state === "fallback" && !diagnosed && feed instanceof LiveFeed) {
             diagnosed = true;
             void backendVersion()
-              .then((v) => (v?.features.includes("tickcheck") ? tickCheck() : null))
+              .then((v) => (v?.features.includes("tickcheck") ? tickCheck(market) : null))
               .then((check) => check && setState((s) => ({ ...s, ticks: { ...s.ticks, check } })))
               .catch(() => {});
           }
@@ -604,7 +608,7 @@ export function useGold(tfMin: Timeframe, forecastOn: boolean): GoldState {
       kickForecast.current = null;
       stop?.();
     };
-  }, [tfMin]);
+  }, [market, tfMin]);
 
   return state;
 }

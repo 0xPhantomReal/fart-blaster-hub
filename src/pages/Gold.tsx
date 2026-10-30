@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
-import { TIMEFRAMES, type Timeframe } from "@/gold/feed";
+import { MARKETS, TIMEFRAMES, type Market, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
 import type { CatchRecord, FlipRecords } from "@/gold/flip";
@@ -103,6 +103,7 @@ function save(key: string, v: unknown) {
   }
 }
 const isTf = (v: unknown): v is Timeframe => (TIMEFRAMES as readonly unknown[]).includes(v);
+const isMarket = (v: unknown): v is Market => v === "gold" || v === "btc";
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 
 /** Forecast scores: first bar's color, and direction after 5 bars. */
@@ -126,24 +127,31 @@ const Label = ({ children }: { children: React.ReactNode }) => (
 );
 
 export default function Gold() {
-  const [tfMin, setTfMin] = useState<Timeframe>(() => load("gold.tf", isTf, 15));
+  const [market, setMarket] = useState<Market>(() => load("gold.market", isMarket, "gold"));
+  const [tfPick, setTfMin] = useState<Timeframe>(() => load("gold.tf", isTf, 15));
+  const mk = MARKETS[market];
+  // Bitcoin offers 5m and 15m only; a 1m pick from gold falls back to 5m there.
+  const tfMin: Timeframe = mk.timeframes.includes(tfPick) ? tfPick : 5;
+  useEffect(() => save("gold.market", market), [market]);
   const [forecastOn, setForecastOn] = useState<boolean>(() => load("gold.forecast", isBool, true));
   useEffect(() => save("gold.tf", tfMin), [tfMin]);
   useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
-  const g = useGold(tfMin, forecastOn);
+  const g = useGold(market, tfMin, forecastOn);
   const fc = g.forecast;
   const p = g.prediction;
   const [, tick] = useState(0);
 
   useEffect(() => {
     const prev = document.title;
-    document.title = "Gold Next Candle";
     const id = setInterval(() => tick((n) => n + 1), 1000); // keep the countdown moving
     return () => {
       document.title = prev;
       clearInterval(id);
     };
   }, []);
+  useEffect(() => {
+    document.title = `${mk.label} Next Candle`;
+  }, [mk.label]);
 
   const last = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
   const tf = tfMin * 60;
@@ -164,10 +172,22 @@ export default function Gold() {
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
       <header className="flex flex-wrap items-baseline gap-3 border-b border-[#262c36] px-4 py-3">
         <h1 className="text-base font-semibold">
-          <span className="text-[#d4a72c]">XAU/USD</span>
+          <span className="text-[#d4a72c]">{mk.pair}</span>
         </h1>
+        <select
+          value={market}
+          onChange={(e) => setMarket(e.target.value as Market)}
+          className="self-center rounded-md border border-[#262c36] bg-[#161b22] px-2 py-1 text-xs text-[#e6e8eb]"
+          aria-label="Market"
+        >
+          {(Object.keys(MARKETS) as Market[]).map((m) => (
+            <option key={m} value={m}>
+              {MARKETS[m].label}
+            </option>
+          ))}
+        </select>
         <div className="flex self-center overflow-hidden rounded-md border border-[#262c36] text-xs">
-          {TIMEFRAMES.map((t) => (
+          {TIMEFRAMES.filter((t) => mk.timeframes.includes(t)).map((t) => (
             <button
               key={t}
               onClick={() => setTfMin(t)}
@@ -185,14 +205,20 @@ export default function Gold() {
         </button>
         <div className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}>{last ? last.close.toFixed(2) : "—"}</div>
         <div className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}>
-          {g.status === "loading" ? "loading…" : g.source === "Simulated" ? "SIMULATED DATA" : "Pyth live"}
+          {g.status === "loading"
+            ? "loading…"
+            : g.source === "Simulated"
+              ? "SIMULATED DATA"
+              : g.ticks.state === "streaming" && g.ticks.source === "BRTI"
+                ? "BRTI live"
+                : "Pyth live"}
         </div>
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart key={tfMin} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} />
-          {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading gold history…</div>}
+          <GoldChart key={`${market}-${tfMin}`} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} />
+          {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading {mk.label.toLowerCase()} history…</div>}
         </div>
 
         <aside className="flex flex-col gap-6 overflow-auto border-t border-[#262c36] bg-[#161b22] p-4 md:border-l md:border-t-0">
@@ -292,7 +318,7 @@ export default function Gold() {
               has done so far, so it naturally gets more certain as the candle runs.
               Right = share of calls that were correct. A call needs at least 55% one way; Final also needs Jev's fact-check to
               score {SUPPORT_NEEDED}+ of 3. Skill above 0 means the forecasts carry real information beyond the base rate; at or
-              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: {tfMin}-minute gold is close to a coin
+              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: {tfMin}-minute {mk.label.toLowerCase()} is close to a coin
               flip.
             </p>
           </section>
@@ -343,7 +369,7 @@ export default function Gold() {
                 </table>
               )}
               <p className={`mt-2 text-xs ${MUTED}`}>
-                Faded bars on the chart. Each is something gold really did after a moment like this one, rescaled to today's
+                Faded bars on the chart. Each is something {mk.label.toLowerCase()} really did after a moment like this one, rescaled to today's
                 volatility and redrawn at every close. Right % above 50 is an edge; around 50 the bars are only a picture of
                 typical behaviour, not a prediction. {fc.calls} Jev picks this session.
               </p>
@@ -369,11 +395,27 @@ export default function Gold() {
               <Label>Live ticks</Label>
               <p className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}>
                 {g.ticks.state === "streaming"
-                  ? "Streaming every Pyth price update."
+                  ? g.ticks.source === "BRTI"
+                    ? "Streaming the CME CF Bitcoin Real Time Index (BRTI) via Kalshi, up to 5 values a second."
+                    : "Streaming every Pyth price update."
                   : g.ticks.state === "connecting"
-                    ? "Connecting to the Pyth tick stream…"
+                    ? "Connecting to the tick stream…"
                     : `Not streaming (${g.ticks.detail}). The candle updates from 1-minute data every few seconds instead.`}
               </p>
+              {market === "btc" && g.ticks.source !== "BRTI" && g.ticks.note && (
+                <p className="mt-1 text-xs text-[#d4a72c]">
+                  {g.ticks.note}.{" "}
+                  {/not set/.test(g.ticks.note)
+                    ? "To use BRTI, create a Kalshi API key and add its ID and private key as the backend secrets KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY."
+                    : ""}
+                </p>
+              )}
+              {market === "btc" && (
+                <p className={`mt-1 text-xs ${MUTED}`}>
+                  Past candles (and the model's training) come from Pyth BTC/USD, which tracks BRTI closely; candles streamed
+                  live from BRTI are kept as BRTI.
+                </p>
+              )}
               {g.ticks.state === "fallback" && g.ticks.check && (
                 <div className={`mt-1 text-xs ${MUTED}`}>
                   {g.ticks.check.ok ? (
@@ -384,7 +426,7 @@ export default function Gold() {
                   ) : (
                     <>
                       Backend test: {g.ticks.check.problems.join(" · ")}
-                      {g.ticks.check.feedSource === "fallback" ? " (couldn't look up the gold feed; tried the standard XAU/USD feed id)" : ""}.
+                      {g.ticks.check.feedSource === "fallback" ? ` (couldn't look up the ${mk.label.toLowerCase()} feed; tried the standard feed id)` : ""}.
                       {g.ticks.check.problems.some((x) => /401|403|unauthor|forbidden/i.test(x))
                         ? " Your Pyth key isn't accepted for live ticks: add a Pyth Core/Hermes key as the secret PYTH_HERMES_KEY."
                         : ""}
