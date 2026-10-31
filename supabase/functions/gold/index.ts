@@ -243,6 +243,172 @@ async function kalshiHeaders(path: string) {
 }
 
 /**
+ * Minimal WebSocket client over a raw TLS (or TCP) connection, so the handshake can carry Kalshi's signed
+ * headers. Text messages, ping/pong and close only — all this feed needs. Same callback names as WebSocket.
+ */
+class HeaderSocket {
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onerror: ((e: { message: string }) => void) | null = null;
+  onclose: ((e: { code: number; reason: string }) => void) | null = null;
+  private conn: Deno.Conn | null = null;
+  private closed = false;
+  private enc = new TextEncoder();
+  private dec = new TextDecoder();
+
+  constructor(url: string, headers: Record<string, string>) {
+    this.run(new URL(url), headers).catch((e) => this.fail((e as Error).message));
+  }
+
+  private fail(message: string) {
+    if (this.closed) return;
+    this.onerror?.({ message });
+    this.finish(1006, message);
+  }
+
+  private finish(code: number, reason: string) {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.conn?.close();
+    } catch {
+      // already closed
+    }
+    this.onclose?.({ code, reason });
+  }
+
+  private async run(u: URL, headers: Record<string, string>) {
+    const secure = u.protocol === "wss:";
+    const port = Number(u.port || (secure ? 443 : 80));
+    this.conn = secure ? await Deno.connectTls({ hostname: u.hostname, port }) : await Deno.connect({ hostname: u.hostname, port });
+    const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+    const lines = [
+      `GET ${u.pathname}${u.search} HTTP/1.1`,
+      `Host: ${u.host}`,
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Key: ${key}`,
+      "Sec-WebSocket-Version: 13",
+      ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+    ];
+    await this.write(this.enc.encode(lines.join("\r\n") + "\r\n\r\n"));
+
+    // Read the HTTP response head.
+    let buf = new Uint8Array(0);
+    const chunk = new Uint8Array(16384);
+    let headEnd = -1;
+    while (headEnd < 0) {
+      const n = await this.conn.read(chunk);
+      if (n === null) throw new Error("connection closed during handshake");
+      buf = concat(buf, chunk.subarray(0, n));
+      headEnd = indexOfCrlf2(buf);
+      if (buf.length > 65536) throw new Error("bad handshake response");
+    }
+    const head = this.dec.decode(buf.subarray(0, headEnd));
+    const status = Number(head.split(" ")[1]);
+    if (status !== 101) throw new Error(`Invalid status code: ${status}`);
+    buf = buf.subarray(headEnd + 4);
+    this.onopen?.();
+
+    // Frames.
+    let parts: Uint8Array[] = [];
+    while (!this.closed) {
+      const f = parseFrame(buf);
+      if (!f) {
+        const n = await this.conn.read(chunk);
+        if (n === null) return this.finish(1006, "connection closed");
+        buf = concat(buf, chunk.subarray(0, n));
+        continue;
+      }
+      buf = buf.subarray(f.size);
+      if (f.op === 0x8) {
+        const code = f.payload.length >= 2 ? (f.payload[0] << 8) | f.payload[1] : 1005;
+        return this.finish(code, this.dec.decode(f.payload.subarray(2)));
+      }
+      if (f.op === 0x9) await this.frame(0xa, f.payload); // ping → pong
+      else if (f.op === 0x1 || f.op === 0x0) {
+        parts.push(f.payload);
+        if (f.fin) {
+          const all = parts.reduce((a, b) => concat(a, b), new Uint8Array(0));
+          parts = [];
+          this.onmessage?.({ data: this.dec.decode(all) });
+        }
+      }
+    }
+  }
+
+  private async write(b: Uint8Array) {
+    let off = 0;
+    while (off < b.length) off += await this.conn!.write(b.subarray(off));
+  }
+
+  /** Send one masked frame (clients must mask). */
+  private async frame(op: number, payload: Uint8Array) {
+    const len = payload.length;
+    const head = len < 126 ? [0x80 | op, 0x80 | len] : len < 65536 ? [0x80 | op, 0x80 | 126, len >> 8, len & 255] : null;
+    if (!head) throw new Error("message too large");
+    const mask = crypto.getRandomValues(new Uint8Array(4));
+    const out = new Uint8Array(head.length + 4 + len);
+    out.set(head, 0);
+    out.set(mask, head.length);
+    for (let i = 0; i < len; i++) out[head.length + 4 + i] = payload[i] ^ mask[i & 3];
+    await this.write(out);
+  }
+
+  send(text: string) {
+    if (this.closed) return;
+    this.frame(0x1, this.enc.encode(text)).catch((e) => this.fail((e as Error).message));
+  }
+
+  close() {
+    if (this.closed) return;
+    this.frame(0x8, new Uint8Array([0x03, 0xe8]))
+      .catch(() => {})
+      .finally(() => this.finish(1000, ""));
+  }
+}
+
+function concat(a: Uint8Array, b: Uint8Array) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function indexOfCrlf2(b: Uint8Array) {
+  for (let i = 0; i + 3 < b.length; i++) if (b[i] === 13 && b[i + 1] === 10 && b[i + 2] === 13 && b[i + 3] === 10) return i;
+  return -1;
+}
+
+/** One server frame from the start of `b`, or null if it hasn't fully arrived. */
+function parseFrame(b: Uint8Array): { fin: boolean; op: number; payload: Uint8Array; size: number } | null {
+  if (b.length < 2) return null;
+  const fin = (b[0] & 0x80) !== 0;
+  const op = b[0] & 0x0f;
+  const masked = (b[1] & 0x80) !== 0;
+  let len = b[1] & 0x7f;
+  let off = 2;
+  if (len === 126) {
+    if (b.length < 4) return null;
+    len = (b[2] << 8) | b[3];
+    off = 4;
+  } else if (len === 127) {
+    if (b.length < 10) return null;
+    len = Number(new DataView(b.buffer, b.byteOffset + 2, 8).getBigUint64(0));
+    off = 10;
+  }
+  const maskAt = off;
+  if (masked) off += 4;
+  if (b.length < off + len) return null;
+  let payload = b.subarray(off, off + len);
+  if (masked) {
+    const m = b.subarray(maskAt, maskAt + 4);
+    payload = payload.map((v, i) => v ^ m[i & 3]);
+  }
+  return { fin, op, payload, size: off + len };
+}
+
+/**
  * Open Kalshi's CF Benchmarks feed for BRTI and resolve once the first value arrives (or reject with the reason).
  * Tries the 5-per-second channel, then the once-per-second one.
  */
@@ -251,9 +417,9 @@ async function openBrti(onTick: (t: number, p: number) => void, onEnd: () => voi
   const url = KALSHI_WS();
   const headers = await kalshiHeaders(new URL(url).pathname);
   return await new Promise((resolve, reject) => {
-    // Deno accepts handshake headers as a second argument.
-    // deno-lint-ignore no-explicit-any
-    const ws: WebSocket = new (WebSocket as any)(url, { headers });
+    // Supabase's edge runtime can't send headers with its built-in WebSocket ("Invalid protocol value"),
+    // so connect with a small client that can.
+    const ws = new HeaderSocket(url, headers);
     let settled = false;
     let channel = "cfbenchmarks_value_5hz";
     const fail = (why: string) => {
