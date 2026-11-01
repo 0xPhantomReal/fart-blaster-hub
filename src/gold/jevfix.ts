@@ -7,7 +7,9 @@
 // It starts as "trust Jev exactly" and every weight is pulled back toward that, so with little evidence it
 // changes nothing; it only moves Jev's number when Jev's record keeps showing the same kind of miss.
 
-import { FEATURES } from "./predictor";
+import { FEATURES, TREND_FEATURES } from "./predictor";
+
+const INPUTS = [...FEATURES, ...TREND_FEATURES];
 
 const clip = (x: number, a = 4) => Math.max(-a, Math.min(a, x));
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
@@ -31,20 +33,19 @@ export interface FixSummary {
 export class JevFixer {
   private a = 1; //                      weight on Jev's logit (starts: trust Jev as is)
   private b = 0; //                      bias
-  private w = new Array(FEATURES.length).fill(0);
-  private mean = new Array(FEATURES.length).fill(0);
-  private vari = new Array(FEATURES.length).fill(1);
-  private seen = 0;
+  private w = new Array(INPUTS.length).fill(0);
   updates = 0;
 
   constructor(
-    private lr = 0.01,
-    private pull = 0.005, // how hard every weight is pulled back toward "trust Jev"
+    private lr = 0.02,
+    private pull = 0.003, // how hard every weight is pulled back toward "trust Jev"
   ) {}
 
+  // Inputs are already scale-free (ATR units, shares, ±1 time-of-day), so they are used as levels rather than
+  // re-centered: a long uptrend must still read as "up", not as "the new normal".
   private z(x: number[] | undefined) {
-    if (!x || this.seen < 20) return this.w.map(() => 0);
-    return x.map((v, i) => clip((v - this.mean[i]) / Math.sqrt(this.vari[i] + 1e-9), 3));
+    if (!x) return this.w.map(() => 0);
+    return x.map((v) => clip(v, 3));
   }
 
   /** Jev's chance of green, corrected. */
@@ -62,21 +63,12 @@ export class JevFixer {
     this.a -= this.lr * (g * l + this.pull * (this.a - 1));
     this.b -= this.lr * (g + this.pull * this.b);
     for (let i = 0; i < this.w.length; i++) this.w[i] -= this.lr * (g * z[i] + this.pull * this.w[i]);
-    if (x) {
-      this.seen += 1;
-      const k = Math.max(1 / this.seen, 1 / 500);
-      x.forEach((v, i) => {
-        const d = v - this.mean[i];
-        this.mean[i] += k * d;
-        this.vari[i] = (1 - k) * (this.vari[i] + k * d * d);
-      });
-    }
     this.updates += 1;
   }
 
   summary(): FixSummary {
     const situations = this.w
-      .map((weight, i) => ({ name: FEATURES[i].replace(/_/g, " "), weight }))
+      .map((weight, i) => ({ name: INPUTS[i].replace(/_/g, " "), weight }))
       .filter((s) => Math.abs(s.weight) >= 0.05)
       .sort((p, q) => Math.abs(q.weight) - Math.abs(p.weight))
       .slice(0, 3);

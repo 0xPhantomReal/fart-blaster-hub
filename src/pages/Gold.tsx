@@ -457,8 +457,9 @@ export default function Gold() {
             )}
             <p className={`mt-2 text-xs ${MUTED}`}>
               Right % of the 50% arrows. Refined adjusts Jev's % using its own wins and losses (walk-forward: each candle is
-              read before it's learned from). It starts by trusting Jev as is and only moves when the same kind of miss keeps
-              happening. No extra Jev calls.
+              read before it's learned from). It also sees the bigger trend (last 20 and 50 candles, a
+              longer average), so it can learn things like "Jev's red calls lose in an uptrend". It starts by trusting Jev and
+              adapts within tens of candles. No extra Jev calls.
             </p>
           </section>
 

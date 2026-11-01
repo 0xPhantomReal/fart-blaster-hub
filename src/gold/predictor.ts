@@ -30,6 +30,25 @@ export const FEATURES = [
 ] as const;
 const N = FEATURES.length;
 
+/** The bigger picture, scale-free: used by "Jev refined" and shown to Jev (not used by the model itself). */
+export const TREND_FEATURES = ["trend_last_20", "trend_last_50", "distance_from_ema50", "green_share_last_20"] as const;
+
+/** Trend features after the last candle in `cs` (oldest first), or null with too little history. */
+export function trendOf(cs: Candle[], atr: number | null): number[] | null {
+  if (!atr || atr <= 0 || cs.length < 51) return null;
+  const last = cs[cs.length - 1].close;
+  let ema = cs[0].close;
+  const k = 2 / 51;
+  for (const c of cs) ema += k * (c.close - ema);
+  const recent20 = cs.slice(-20);
+  return [
+    clip((last - cs[cs.length - 21].close) / (atr * Math.sqrt(20))),
+    clip((last - cs[cs.length - 51].close) / (atr * Math.sqrt(50))),
+    clip((last - ema) / atr, 6) / 1.5,
+    recent20.filter((c) => c.close > c.open).length / 20 - 0.5,
+  ];
+}
+
 const clip = (x: number, a = 4) => Math.max(-a, Math.min(a, x));
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
 const logit = (p: number) => {
@@ -297,7 +316,8 @@ export class Predictor {
 
     const x = this.features.push(c);
     if (x) {
-      this.xs.set(c.time + this.tfSeconds, x);
+      const tr = trendOf(this.recent, this.features.atr);
+      if (tr) this.xs.set(c.time + this.tfSeconds, [...x, ...tr]);
       if (this.xs.size > 400) this.xs.delete(this.xs.keys().next().value!);
     }
     const pModel = x ? this.model.predict(x) : null;
@@ -369,7 +389,7 @@ export class Predictor {
   }
 
   /** The Jev snapshot saved for the candle opening at `forTime` (latest ~200 candles only). */
-  /** The signals known at the open of the candle at `forTime` (kept for the last ~400 candles). */
+  /** The signals plus trend known at the open of the candle at `forTime` (last ~400 candles). */
   featuresFor(forTime: number): number[] | undefined {
     return this.xs.get(forTime);
   }
@@ -424,6 +444,18 @@ export class Predictor {
         candles_last_12: rc.slice(-12).map(describe),
         candles_4x_longer_last_4: hourly.slice(-4).map(describe),
         signals: Object.fromEntries(FEATURES.slice(0, 13).map((name, i) => [name, r2(x[i])])),
+        ...(() => {
+          const tr = trendOf(rc, atr);
+          return tr
+            ? {
+                bigger_trend: {
+                  how_to_read:
+                    "Moves in ATR units scaled by sqrt(candles): about ±1 is normal noise, beyond ±2 is a strong trend. green_share is the share of the last 20 candles that were green, minus 0.5.",
+                  ...Object.fromEntries(TREND_FEATURES.map((name, i) => [name, r2(tr[i])])),
+                },
+              }
+            : {};
+        })(),
       },
       model: {
         p_green: pModel === null ? null : r2(pModel),
