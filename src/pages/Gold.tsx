@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
+import { minuteChoices } from "@/gold/minuteCall";
 import { MARKETS, TIMEFRAMES, type Market, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
@@ -131,6 +132,7 @@ function save(key: string, v: unknown) {
 }
 const isTf = (v: unknown): v is Timeframe =>
   (TIMEFRAMES as readonly unknown[]).includes(v);
+type ArrowMode = "jev" | "refined" | "minute";
 const isMarket = (v: unknown): v is Market =>
   typeof v === "string" && v in MARKETS;
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
@@ -179,10 +181,10 @@ export default function Gold() {
   // Bitcoin offers 5m and 15m only; a 1m pick from gold falls back to 5m there.
   const tfMin: Timeframe = mk.timeframes.includes(tfPick) ? tfPick : 5;
   useEffect(() => save("gold.market", market), [market]);
-  const [arrows, setArrows] = useState<"jev" | "refined">(() =>
+  const [arrows, setArrows] = useState<ArrowMode>(() =>
     load(
       "gold.arrows",
-      (v): v is "jev" | "refined" => v === "jev" || v === "refined",
+      (v): v is ArrowMode => v === "jev" || v === "refined" || v === "minute",
       "jev",
     ),
   );
@@ -204,13 +206,39 @@ export default function Gold() {
   );
   useEffect(() => save("gold.tf", tfMin), [tfMin]);
   useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
-  const g = useGold(market, tfMin, forecastOn);
+  const [minutePick, setMinutePick] = useState<number>(() =>
+    load("gold.callminute", (v): v is number => typeof v === "number", 3),
+  );
+  useEffect(() => save("gold.callminute", minutePick), [minutePick]);
+  const minuteOpts = minuteChoices(tfMin);
+  const callMinute = minuteOpts.length
+    ? minuteOpts.includes(minutePick)
+      ? minutePick
+      : minuteOpts[minuteOpts.length - 1]
+    : null;
+  const arrowMode: ArrowMode =
+    arrows === "minute" && callMinute === null ? "jev" : arrows;
+  const g = useGold(
+    market,
+    tfMin,
+    forecastOn,
+    arrowMode === "minute" ? callMinute : null,
+  );
+  const mn = g.minute;
+  const cols: [ArrowMode, string][] =
+    arrowMode === "minute"
+      ? [["minute", `Jev at minute ${callMinute}`]]
+      : [
+          ["jev", "Jev"],
+          ["refined", "Refined"],
+        ];
   const fc = g.forecast;
   /** Right / total for arrows at least `conf` sure, from Jev's or the refined %. */
-  const tallyAt = (src: "jev" | "refined", conf: number) =>
+  const tallyAt = (src: ArrowMode, conf: number) =>
     g.bars.reduce(
       (acc, b) => {
-        const pp = src === "refined" ? b.pRef : b.pJev;
+        const pp =
+          src === "refined" ? b.pRef : src === "minute" ? b.pMin : b.pJev;
         const c = b.candle;
         if (
           pp === undefined ||
@@ -226,7 +254,7 @@ export default function Gold() {
       },
       { n: 0, right: 0 },
     );
-  const jevArrows = tallyAt(arrows, minConf);
+  const jevArrows = tallyAt(arrowMode, minConf);
   const p = g.prediction;
   const [, tick] = useState(0);
 
@@ -341,7 +369,7 @@ export default function Gold() {
             forming={g.forming}
             version={g.version}
             forecast={forecastOn ? fc.candles : null}
-            arrows={arrows}
+            arrows={arrowMode}
             minConf={minConf}
             decimals={mk.decimals}
             footprints={g.flow.on ? g.flow.footprints : null}
@@ -420,6 +448,30 @@ export default function Gold() {
                   )}
               </>
             )}
+            {arrowMode === "minute" &&
+              mn.now &&
+              g.forming &&
+              mn.now.time === g.forming.time && (
+                <div className="mt-1 text-sm tabular-nums">
+                  Jev at minute {callMinute}:{" "}
+                  <span
+                    className={
+                      mn.now.pJev > 0.5 ? GREEN : mn.now.pJev < 0.5 ? RED : ""
+                    }
+                  >
+                    {mn.now.pJev > 0.5
+                      ? "green"
+                      : mn.now.pJev < 0.5
+                        ? "red"
+                        : "no call"}{" "}
+                    {pct(Math.max(mn.now.pJev, 1 - mn.now.pJev), 0)}
+                  </span>
+                  <span className={`text-xs ${MUTED}`}>
+                    {" "}
+                    · was {mn.now.move > 0 ? "green" : "red"} then
+                  </span>
+                </div>
+              )}
             <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
               {lv ? (
                 <>
@@ -620,16 +672,105 @@ export default function Gold() {
           <section>
             <Label>Jev refined</Label>
             <div className="mb-2 flex overflow-hidden rounded-md border border-[#262c36] text-xs">
-              {(["jev", "refined"] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setArrows(m)}
-                  className={`flex-1 px-2 py-1 ${arrows === m ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
-                >
-                  Arrows: {m === "jev" ? "Jev" : "Jev refined"}
-                </button>
-              ))}
+              {(["jev", "refined", "minute"] as const)
+                .filter((m) => m !== "minute" || callMinute !== null)
+                .map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setArrows(m)}
+                    className={`flex-1 px-2 py-1 ${arrowMode === m ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
+                  >
+                    {m === "jev"
+                      ? "Jev"
+                      : m === "refined"
+                        ? "Refined"
+                        : `Jev at minute ${callMinute}`}
+                  </button>
+                ))}
             </div>
+            {arrowMode === "minute" && (
+              <div className="mb-3 rounded-md border border-[#262c36] p-2">
+                <div className="mb-2 flex items-center gap-1 text-xs">
+                  <span className={MUTED}>Read the candle at minute</span>
+                  {minuteOpts.map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMinutePick(m)}
+                      className={`rounded px-2 py-0.5 ${m === callMinute ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                {mn.status !== "ok" && (
+                  <p
+                    className={`mb-2 text-xs ${/error|needs|not /.test(mn.status) ? "text-[#d4a72c]" : MUTED}`}
+                  >
+                    {mn.status}
+                  </p>
+                )}
+                {(mn.past || mn.live.holds.n > 0) && (
+                  <table className="w-full text-sm tabular-nums">
+                    <thead>
+                      <tr className={`text-xs ${MUTED}`}>
+                        <th className="pb-1 text-left font-medium">
+                          Right at close
+                        </th>
+                        <th className="pb-1 text-right font-medium">Past</th>
+                        <th className="pb-1 text-right font-medium">Live</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(
+                        [
+                          ["Jev", "jev"],
+                          ["Current color holds", "holds"],
+                          ["Math", "math"],
+                          ["Jev, when it calls a flip", "jevFlips"],
+                        ] as const
+                      ).map(([name, k]) => {
+                        const cell = (
+                          sc: { right: number; n: number } | undefined,
+                        ) =>
+                          sc && sc.n ? (
+                            <>
+                              {pct(sc.right / sc.n, 0)}{" "}
+                              <span className={`text-xs ${MUTED}`}>
+                                ({sc.n})
+                              </span>
+                            </>
+                          ) : (
+                            "—"
+                          );
+                        return (
+                          <tr key={k} className="border-t border-[#262c36]">
+                            <td className="py-1.5 text-left">{name}</td>
+                            <td className="py-1.5 text-right">
+                              {cell(mn.past?.[k])}
+                            </td>
+                            <td className="py-1.5 text-right">
+                              {cell(mn.live[k])}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+                <p className={`mt-2 text-xs ${MUTED}`}>
+                  Jev reads the candle {callMinute} minute
+                  {callMinute === 1 ? "" : "s"} after it opens (moves, high/low,
+                  pullback, time left, last 3 candles) and calls its final
+                  color.
+                  {mn.past &&
+                    mn.past.flipped.n > 0 &&
+                    ` On past candles, ${pct(mn.past.flipped.right / mn.past.flipped.n, 0)} changed color after minute ${callMinute}, so "current color holds" is right ${pct(1 - mn.past.flipped.right / mn.past.flipped.n, 0)} of the time.`}{" "}
+                  Jev only adds something if it beats that row, which shows up
+                  in "when it calls a flip" being well above 50%.
+                  {` ${mn.calls} Jev calls for this.`}
+                </p>
+              </div>
+            )}
             <p className={`mb-1 text-xs ${MUTED}`}>
               Only show arrows this sure (leaves coin-flip candles blank):
             </p>
@@ -637,13 +778,16 @@ export default function Gold() {
               <thead>
                 <tr className={`text-xs ${MUTED}`}>
                   <th className="pb-1 text-left font-medium">Sure at least</th>
-                  <th className="pb-1 text-right font-medium">Jev</th>
-                  <th className="pb-1 text-right font-medium">Refined</th>
+                  {cols.map(([, label]) => (
+                    <th key={label} className="pb-1 text-right font-medium">
+                      {label}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {[0.5, 0.55, 0.58, 0.6, 0.65].map((t) => {
-                  const cell = (src: "jev" | "refined") => {
+                  const cell = (src: ArrowMode) => {
                     const r = tallyAt(src, t);
                     return r.n ? (
                       <span
@@ -668,8 +812,11 @@ export default function Gold() {
                         {t === 0.5 ? "every call" : `${Math.round(t * 100)}%`}
                         {t === minConf ? " ◀" : ""}
                       </td>
-                      <td className="py-1.5 text-right">{cell("jev")}</td>
-                      <td className="py-1.5 text-right">{cell("refined")}</td>
+                      {cols.map(([src]) => (
+                        <td key={src} className="py-1.5 text-right">
+                          {cell(src)}
+                        </td>
+                      ))}
                     </tr>
                   );
                 })}

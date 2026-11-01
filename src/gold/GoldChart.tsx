@@ -38,11 +38,22 @@ const toBar = (c: Candle) => ({
 /** An arrow on each candle a call was made for: colored if right, gray if wrong. */
 function markerFor(
   b: ClosedBar,
-  mode: "jev" | "refined",
+  mode: "jev" | "refined" | "minute",
   minConf: number,
 ): SeriesMarker<Time>[] {
-  const o = mode === "refined" ? b.refined : b.outcome;
-  const p = mode === "refined" ? b.pRef : b.pJev;
+  const p = mode === "refined" ? b.pRef : mode === "minute" ? b.pMin : b.pJev;
+  const c = b.candle;
+  const o =
+    mode === "minute"
+      ? p === undefined
+        ? null
+        : {
+            call: (p > 0.5 ? 1 : p < 0.5 ? -1 : 0) as -1 | 0 | 1,
+            hit: c.close === c.open ? null : p > 0.5 === c.close > c.open,
+          }
+      : mode === "refined"
+        ? b.refined
+        : b.outcome;
   if (p === undefined || Math.max(p, 1 - p) < minConf) return []; // not confident enough to show
   if (!o || o.call === 0) return [];
   const up = o.call === 1;
@@ -74,7 +85,7 @@ export function GoldChart({
   footprintMode?: boolean; //                   draw footprint candles instead of plain ones
   decimals?: number; // price decimals (XRP needs 4)
   minConf?: number; // only draw arrows at least this sure (0.5 = every call)
-  arrows?: "jev" | "refined";
+  arrows?: "jev" | "refined" | "minute";
   bars: ClosedBar[];
   forming: Candle | null;
   version: number;
@@ -85,7 +96,11 @@ export function GoldChart({
   const ghosts = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const fp = useRef<ISeriesApi<"Custom", Time, FootprintBar | WhitespaceData<Time>> | null>(null);
+  const fp = useRef<ISeriesApi<
+    "Custom",
+    Time,
+    FootprintBar | WhitespaceData<Time>
+  > | null>(null);
   const fpMarkers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const fpDrawn = useRef("");
   const drawn = useRef("");
@@ -231,12 +246,10 @@ export function GoldChart({
     // Footprints need room: zoom in on the latest candles when switching on.
     if (footprintMode && chart.current && bars.length) {
       const show = window.innerWidth < 640 ? 3 : 7;
-      chart.current
-        .timeScale()
-        .setVisibleLogicalRange({
-          from: bars.length - show,
-          to: bars.length + 1.5,
-        });
+      chart.current.timeScale().setVisibleLogicalRange({
+        from: bars.length - show,
+        to: bars.length + 1.5,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the mode flips
   }, [footprintMode]);

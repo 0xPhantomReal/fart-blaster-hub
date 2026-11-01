@@ -181,6 +181,7 @@ export function pastSnapshots(
   atrAt: (t: number) => number | null,
   priorAt: (t: number) => number,
   count = 150,
+  fixedMinute: number | null = null, // read every candle at this minute instead of a varying one
 ) {
   const byCandle = new Map<number, Candle[]>();
   for (const m of minutes) {
@@ -200,7 +201,7 @@ export function pastSnapshots(
     if (c.close === c.open) continue;
     const mins = (byCandle.get(c.time) ?? []).sort((a, b) => a.time - b.time);
     if (mins.length < Math.max(3, tfMin - 2)) continue;
-    const minute = lo + ((c.time / tfSeconds) % (hi - lo + 1)); // varies by candle
+    const minute = fixedMinute ?? lo + ((c.time / tfSeconds) % (hi - lo + 1)); // varies by candle unless fixed
     const seen = mins.filter((m) => m.time < c.time + minute * 60);
     if (!seen.length) continue;
     const forming: Candle = {

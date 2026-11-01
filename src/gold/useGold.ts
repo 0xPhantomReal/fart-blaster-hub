@@ -10,6 +10,12 @@ import {
 } from "./predictor";
 import { marketContext } from "./context";
 import {
+  emptyScores,
+  scoreRead,
+  type MinuteRead,
+  type MinuteScores,
+} from "./minuteCall";
+import {
   addTrade,
   coinbaseTrades,
   emptyFootprint,
@@ -68,6 +74,8 @@ export const BACKFILL = 200;
 export const FLIP_BACKFILL = 150;
 /** How often Jev re-reads the forming candle. */
 export const FLIP_SECONDS = 3;
+/** How many past candles "Jev's call at minute X" is replayed on. */
+export const MINUTE_BACKFILL = 200;
 
 /** Jev's read on whether the forming candle will flip, and how the flip check has scored. */
 export interface FlipView {
@@ -99,6 +107,7 @@ export interface ClosedBar {
   refined: Outcome | null; //  "Jev refined" call (arrow)
   pJev?: number; //            Jev's chance of green for this candle
   pRef?: number; //            refined chance of green
+  pMin?: number; //            Jev's chance of green read X minutes into the candle (minute mode)
 }
 
 /** Jev refined: Jev's chance of green after the correction learned from its own record. */
@@ -138,6 +147,15 @@ export interface GoldState {
   blocked: string | null;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
   ticks: TickStatus & { check: TickCheck | null };
+  /** "Jev's call at minute X": Jev reads the candle X minutes in, scored against "current color holds" and the math. */
+  minute: {
+    minute: number | null;
+    status: string;
+    past: MinuteScores | null;
+    live: MinuteScores;
+    now: MinuteRead | null; // read for the forming candle, once taken
+    calls: number;
+  };
   /** Order flow (Coinbase trades) for crypto: footprints per candle and how the feed is doing. */
   flow: {
     on: boolean;
@@ -251,7 +269,14 @@ export function useGold(
   market: Market,
   tfMin: Timeframe,
   forecastOn: boolean,
+  callMinute: number | null = null,
 ): GoldState {
+  const callMinuteRef = useRef(callMinute);
+  const kickMinute = useRef<((m: number | null) => void) | null>(null);
+  useEffect(() => {
+    callMinuteRef.current = callMinute;
+    kickMinute.current?.(callMinute);
+  }, [callMinute]);
   const forecastOnRef = useRef(forecastOn);
   const kickForecast = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -276,6 +301,14 @@ export function useGold(
     ticks: { state: "connecting", detail: "", check: null },
     flip: FLIP_START,
     forecast: FORECAST_START,
+    minute: {
+      minute: null,
+      status: "",
+      past: null,
+      live: emptyScores(),
+      now: null,
+      calls: 0,
+    },
     refine: REFINE_START,
     blocked: null,
     flow: { on: false, status: "", footprints: new Map(), version: 0 },
@@ -305,6 +338,14 @@ export function useGold(
       jev: { on: false, status: "starting…", calls: 0 },
       flip: FLIP_START,
       forecast: FORECAST_START,
+      minute: {
+        minute: null,
+        status: "",
+        past: null,
+        live: emptyScores(),
+        now: null,
+        calls: 0,
+      },
       refine: REFINE_START,
       blocked: null,
       flow: { on: false, status: "", footprints: new Map(), version: 0 },
@@ -314,6 +355,7 @@ export function useGold(
     // Jev's own chance of green for each candle (backfill + live). The chart arrows show Jev's calls:
     // above 50% = up/green, below 50% = down/red.
     const jevByTime = new Map<number, number>();
+    const minuteReads = new Map<number, MinuteRead>(); // Jev's read at the selected minute, per candle
     // "Jev refined": a correction learned walk-forward from Jev's wins and losses.
     const fixer = new JevFixer();
     const refinedByTime = new Map<number, number>();
@@ -342,6 +384,7 @@ export function useGold(
       refined: refinedOutcome(c),
       pJev: jevByTime.get(c.time),
       pRef: refinedByTime.get(c.time),
+      pMin: minuteReads.get(c.time)?.pJev,
     });
     const redrawJevArrows = () => {
       bars = bars.map((b) => barFor(b.candle));
@@ -1037,6 +1080,7 @@ export function useGold(
     /** (Re)train on `history` (walk-forward) and make it the live predictor. */
     const adopt = (history: Candle[]) => {
       const t = train(history);
+      latestPreds = t.preds;
       predictor = t.p;
       current = t.next;
       bars = history.slice(-MAX_BARS).map(barFor);
@@ -1083,6 +1127,8 @@ export function useGold(
       jevReady = await runBackfill(t.preds, history);
       if (jevReady && current) await consult(current);
       if (v.features.includes("jev-flip")) await flipBackfill(t.preds, history);
+      minuteJevReady = true;
+      if (callMinuteRef.current !== null) void runMinute(callMinuteRef.current);
       else
         setFlip({
           status:
@@ -1090,7 +1136,203 @@ export function useGold(
         });
     };
 
+    // ── Jev's call at minute X ──
+    let latestPreds = new Map<number, Prediction>();
+    let minuteSel: number | null = null;
+    let minuteRun = 0;
+    let minuteBars: Candle[] | null = null;
+    let minuteCalls = 0;
+    let minuteAsking = false;
+    let minuteJevReady = false; // hookJev has finished (features known, backfills done)
+    const liveRead = new Set<number>(); // candles read live (not from the replay)
+    let liveMin = emptyScores();
+    const setMinute = (patch: Partial<GoldState["minute"]>) =>
+      !cancelled &&
+      setState((s) => ({ ...s, minute: { ...s.minute, ...patch } }));
+    const minuteCacheKey = (m: number) =>
+      `${tfKey("gold.minutecall.v1", where)}.m${m}`;
+
+    const runMinute = async (m: number | null) => {
+      const run = ++minuteRun;
+      minuteSel = m;
+      minuteReads.clear();
+      liveRead.clear();
+      liveMin = emptyScores();
+      redrawJevArrows();
+      if (m === null)
+        return setMinute({
+          minute: null,
+          status: "",
+          past: null,
+          live: emptyScores(),
+          now: null,
+        });
+      setMinute({
+        minute: m,
+        status: "starting…",
+        past: null,
+        live: emptyScores(),
+        now: null,
+      });
+      if (!minuteJevReady)
+        return setMinute({
+          status: "waiting for Jev's checks to finish loading…",
+        });
+      if (!(feed instanceof LiveFeed) || !features.includes("jev-flip"))
+        return setMinute({
+          status: "needs live data and the deployed backend",
+        });
+      if (TF_SECONDS < 300)
+        return setMinute({ status: "not available on 1-minute candles" });
+      setMinute({ status: "loading 1-minute history…" });
+      minuteBars ??= await feed.minuteHistory(3).catch(() => [] as Candle[]);
+      if (run !== minuteRun || cancelled) return;
+      const hist = poolHistory.length ? poolHistory : bars.map((b) => b.candle);
+      const atrs = atrByTime(hist);
+      const snaps = pastSnapshots(
+        minuteBars,
+        hist,
+        TF_SECONDS,
+        (t) => atrs.get(t - TF_SECONDS) ?? null,
+        (t) => latestPreds.get(t)?.pFinal ?? 0.5,
+        MINUTE_BACKFILL,
+        m,
+      );
+      if (snaps.length < 30)
+        return setMinute({
+          status: "not enough 1-minute history to test this yet",
+        });
+      let cache: Record<string, number> = {};
+      try {
+        cache = JSON.parse(localStorage.getItem(minuteCacheKey(m)) ?? "{}");
+      } catch {
+        cache = {};
+      }
+      let done = 0;
+      const answers = new Map<number, number>();
+      await Promise.all(
+        Array.from({ length: 6 }, (_, k) =>
+          snaps.filter((_, i) => i % 6 === k),
+        ).map(async (list) => {
+          for (const sn of list) {
+            if (cancelled || run !== minuteRun) return;
+            let pf = cache[String(sn.time)];
+            if (pf === undefined) {
+              try {
+                pf = (
+                  await withTimeout(
+                    askFlip(sn.state, `past:m${m}:${sn.time}`, tfMin, market),
+                    30_000,
+                  )
+                ).pFlip;
+                cache[String(sn.time)] = pf;
+                minuteCalls += 1;
+              } catch {
+                continue;
+              }
+            }
+            answers.set(sn.time, pf);
+            if (++done % 10 === 0)
+              setMinute({
+                status: `testing Jev at minute ${m} on past candles: ${done} of ${snaps.length}`,
+                calls: minuteCalls,
+              });
+          }
+        }),
+      );
+      if (run !== minuteRun || cancelled) return;
+      try {
+        const keys = Object.keys(cache).sort();
+        localStorage.setItem(
+          minuteCacheKey(m),
+          JSON.stringify(
+            Object.fromEntries(keys.slice(-600).map((k) => [k, cache[k]])),
+          ),
+        );
+      } catch {
+        // fetched again next visit
+      }
+      const past = emptyScores();
+      for (const sn of snaps) {
+        const pf = answers.get(sn.time);
+        if (pf === undefined) continue;
+        const read: MinuteRead = {
+          time: sn.time,
+          pJev: greenFromFlip(sn.move, pf),
+          pMath: sn.pMath,
+          move: sn.move,
+        };
+        minuteReads.set(sn.time, read);
+        scoreRead(past, read, sn.y);
+      }
+      setMinute({ status: "ok", past, calls: minuteCalls });
+      redrawJevArrows();
+    };
+    kickMinute.current = (m) => void runMinute(m);
+
+    /** Live: read the forming candle once, right at minute X. */
+    const minuteTick = async () => {
+      const m = minuteSel;
+      const c = lastForming;
+      if (
+        m === null ||
+        !c ||
+        cancelled ||
+        minuteAsking ||
+        minuteReads.has(c.time) ||
+        !features.includes("jev-flip")
+      )
+        return;
+      const elapsed = feed.now() - c.time;
+      if (elapsed < m * 60 || elapsed > m * 60 + 45) return; // only at minute X, not later
+      const atr = predictor.atr;
+      const sd = bodySd(bars.map((b) => b.candle));
+      if (!atr || !sd) return;
+      const state = flipState({
+        forming: c,
+        secondsLeft: TF_SECONDS - elapsed,
+        tfSeconds: TF_SECONDS,
+        atr,
+        sd,
+        previous: bars.slice(-3).map((b) => b.candle),
+      });
+      if (!state) return;
+      minuteAsking = true;
+      try {
+        const a = await withTimeout(
+          askFlip(state, `m${m}:${c.time}`, tfMin, market),
+          20_000,
+        );
+        if (minuteSel !== m || cancelled) return;
+        minuteCalls += 1;
+        const move = c.close - c.open;
+        const read: MinuteRead = {
+          time: c.time,
+          pJev: greenFromFlip(move, a.pFlip),
+          pMath: predictor.live(c, feed.now())?.pGreen ?? 0.5,
+          move,
+        };
+        minuteReads.set(c.time, read);
+        liveRead.add(c.time);
+        setMinute({ now: read, calls: minuteCalls });
+      } catch (e) {
+        setMinute({ status: `error: ${(e as Error).message}` });
+      } finally {
+        minuteAsking = false;
+      }
+    };
+
     const onClose = async (c: Candle) => {
+      if (liveRead.has(c.time)) {
+        const r = minuteReads.get(c.time);
+        if (r)
+          scoreRead(
+            liveMin,
+            r,
+            c.close > c.open ? 1 : c.close < c.open ? 0 : null,
+          );
+        setMinute({ live: { ...liveMin }, now: null });
+      } else setMinute({ now: null });
       if (halfwayFlip && halfwayFlip.forTime === c.time && c.close !== c.open) {
         setFlip({
           live: blender.recordLive({
@@ -1104,7 +1346,12 @@ export function useGold(
       lastFlip = null;
       setFlip({ pFlip: null, at: null });
       const { next } = predictor.close(c);
-      if (flowStep && flowReady) saveFootprints(flowKey, flowStep, new Map([...footprints].filter(([t]) => t <= c.time)));
+      if (flowStep && flowReady)
+        saveFootprints(
+          flowKey,
+          flowStep,
+          new Map([...footprints].filter(([t]) => t <= c.time)),
+        );
       if (
         !poolHistory.length ||
         c.time > poolHistory[poolHistory.length - 1].time
@@ -1250,6 +1497,7 @@ export function useGold(
       const live = computeLive(lastForming);
       setState((s) => ({ ...s, live }));
     }, 1000);
+    const minuteClock = window.setInterval(() => void minuteTick(), 1000);
     const flipClock = window.setInterval(
       () => void flipTick(),
       FLIP_SECONDS * 1000,
@@ -1262,6 +1510,8 @@ export function useGold(
       kickForecast.current = null;
       stop?.();
       stopTrades?.();
+      window.clearInterval(minuteClock);
+      kickMinute.current = null;
       window.clearInterval(flowTimer);
     };
   }, [market, tfMin]);
