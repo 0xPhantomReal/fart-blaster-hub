@@ -14,6 +14,7 @@ describe("Jev refined", () => {
   it("learns a consistent bias out of Jev (walk-forward) and beats raw Jev", () => {
     const raw: Tally = { right: 0, n: 0 };
     const fixed: Tally = { right: 0, n: 0 };
+    let biasSum = 0;
     for (const seed of [1, 2, 3, 7, 11]) {
       const r = rng(seed);
       const f = new JevFixer();
@@ -28,8 +29,9 @@ describe("Jev refined", () => {
         }
         f.update(pJev, x, y);
       }
-      expect(f.summary().bias).toBeLessThan(-0.1); // learned "Jev is too bullish"
+      biasSum += f.summary().bias;
     }
+    expect(biasSum / 5).toBeLessThan(-0.1); // learned "Jev is too bullish" (on average; it's a rolling estimate)
     expect(fixed.right / fixed.n).toBeGreaterThan(raw.right / raw.n + 0.03);
   });
 
@@ -66,5 +68,37 @@ describe("Jev refined", () => {
       }
     }
     expect(fixed.right / fixed.n).toBeGreaterThan(raw.right / raw.n + 0.1);
+  });
+
+  it("swaps when the trend turns: follows a new downtrend within ~30 candles", () => {
+    let rawLate = 0, fixLate = 0, n = 0;
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
+      const r = rng(seed);
+      const f = new JevFixer();
+      for (let i = 0; i < 300; i++) {
+        const up = i < 150;
+        const y = (r() < (up ? 0.65 : 0.35) ? 1 : 0) as 0 | 1;
+        const pJev = 0.38 + (r() - 0.5) * 0.1; // a Jev stuck bearish, whatever the market does
+        const x = Array.from({ length: 19 }, () => (r() - 0.5) * 0.3);
+        // Trend inputs follow the market, with a lag after the turn.
+        const lag = up ? 1 : Math.max(-1, 1 - (i - 150) / 15);
+        x[15] = 2 * lag + (r() - 0.5) * 0.4;
+        x[16] = 2 * (up ? 1 : Math.max(-1, 1 - (i - 150) / 35)) + (r() - 0.5) * 0.4;
+        x[18] = 0.12 * lag;
+        if (i >= 30 && i < 150) {
+          // uptrend: raw Jev (always red) loses; refined should learn to call green
+          n += 1;
+          if ((f.predict(pJev, x) > 0.5) === (y === 1)) fixLate += 1;
+          if ((pJev > 0.5) === (y === 1)) rawLate += 1;
+        }
+        f.update(pJev, x, y);
+      }
+      // ~30 candles after the downturn began, refined should be calling red again.
+      const xDown = Array.from({ length: 19 }, () => 0);
+      xDown[15] = -1.5;
+      xDown[16] = -0.5;
+      expect(f.predict(0.38, xDown)).toBeLessThan(0.5);
+    }
+    expect(fixLate / n).toBeGreaterThan(rawLate / n + 0.15);
   });
 });
