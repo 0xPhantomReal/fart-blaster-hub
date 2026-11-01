@@ -20,8 +20,8 @@ const COLORS = { bg: "#0e1116", line: "#262c36", muted: "#8b949e", green: "#26a6
 const toBar = (c: Candle) => ({ time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close });
 
 /** An arrow on each candle a call was made for: colored if right, gray if wrong. */
-function markerFor(b: ClosedBar): SeriesMarker<Time>[] {
-  const o = b.outcome;
+function markerFor(b: ClosedBar, mode: "jev" | "refined"): SeriesMarker<Time>[] {
+  const o = mode === "refined" ? b.refined : b.outcome;
   if (!o || o.call === 0) return [];
   const up = o.call === 1;
   return [
@@ -40,7 +40,9 @@ export function GoldChart({
   forming,
   version,
   forecast,
+  arrows = "jev",
 }: {
+  arrows?: "jev" | "refined";
   bars: ClosedBar[];
   forming: Candle | null;
   version: number;
@@ -51,7 +53,7 @@ export function GoldChart({
   const ghosts = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const drawn = useRef(-1);
+  const drawn = useRef("");
   const zoomed = useRef(false);
 
   useEffect(() => {
@@ -105,22 +107,23 @@ export function GoldChart({
     return () => {
       c.remove();
       chart.current = null;
-      drawn.current = -1;
+      drawn.current = "";
       zoomed.current = false;
     };
   }, []);
 
   useEffect(() => {
-    if (!candles.current || drawn.current === version || !bars.length) return;
-    drawn.current = version;
+    const key = `${version}:${arrows}`;
+    if (!candles.current || drawn.current === key || !bars.length) return;
+    drawn.current = key;
     candles.current.setData(bars.map((b) => toBar(b.candle)));
-    markers.current?.setMarkers(bars.flatMap(markerFor));
+    markers.current?.setMarkers(bars.flatMap((b) => markerFor(b, arrows)));
     if (!zoomed.current && chart.current) {
       zoomed.current = true;
       const show = window.innerWidth < 640 ? 40 : 100;
       chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - show), to: bars.length + 3 });
     }
-  }, [bars, version]);
+  }, [bars, version, arrows]);
 
   useEffect(() => {
     if (!ghosts.current) return;

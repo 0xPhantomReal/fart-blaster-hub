@@ -296,6 +296,10 @@ export class Predictor {
     if (this.recent.length > 100) this.recent.shift();
 
     const x = this.features.push(c);
+    if (x) {
+      this.xs.set(c.time + this.tfSeconds, x);
+      if (this.xs.size > 400) this.xs.delete(this.xs.keys().next().value!);
+    }
     const pModel = x ? this.model.predict(x) : null;
     const modelCall = this.callFor(pModel);
     const forTime = c.time + this.tfSeconds;
@@ -365,6 +369,12 @@ export class Predictor {
   }
 
   /** The Jev snapshot saved for the candle opening at `forTime` (latest ~200 candles only). */
+  /** The signals known at the open of the candle at `forTime` (kept for the last ~400 candles). */
+  featuresFor(forTime: number): number[] | undefined {
+    return this.xs.get(forTime);
+  }
+  private xs = new Map<number, number[]>();
+
   snapshotFor(forTime: number): JevSnapshot | undefined {
     return this.snapshots.get(forTime);
   }

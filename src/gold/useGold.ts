@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import { JevFixer, scoreArrow, type FixSummary, type Tally } from "./jevfix";
 import { AnalogPool, HORIZON, label, scorePath, toCandles, PathTally, type Path, type PathRecord } from "./forecast";
 import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords, type FlipRow } from "./flip";
 import {
@@ -52,7 +53,17 @@ export interface ForecastView {
 
 export interface ClosedBar {
   candle: Candle;
-  outcome: Outcome | null;
+  outcome: Outcome | null; //  Jev's own call (arrow)
+  refined: Outcome | null; //  "Jev refined" call (arrow)
+}
+
+/** Jev refined: Jev's chance of green after the correction learned from its own record. */
+export interface RefineView {
+  pNow: number | null; //   refined chance of green for the candle forming now / next
+  past: { raw: Tally; fixed: Tally } | null; // arrows on the last ~200 candles, walk-forward
+  live: { raw: Tally; fixed: Tally };
+  learned: FixSummary | null;
+  updates: number;
 }
 
 type Trio = { model: TrackRecord; jev: TrackRecord; final: TrackRecord; halfway?: TrackRecord };
@@ -73,6 +84,7 @@ export interface GoldState {
   jev: { on: boolean; status: string; calls: number };
   flip: FlipView;
   forecast: ForecastView;
+  refine: RefineView;
   /** Set when this market can't be shown yet (the page shows this instead of a chart). */
   blocked: string | null;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
@@ -130,6 +142,7 @@ function writeFlipCache(c: Record<string, number>, w: Where) {
   }
 }
 
+const REFINE_START: RefineView = { pNow: null, past: null, live: { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } }, learned: null, updates: 0 };
 const FLIP_START = { status: "starting…", pFlip: null, pMath: null, at: null, backfill: null, live: null, weights: null, calls: 0 };
 const FORECAST_START: ForecastView = { status: "waiting for history…", candles: null, source: null, endsHigherPct: null, pickedPct: null, replay: null, live: null, calls: 0 };
 
@@ -162,6 +175,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     ticks: { state: "connecting", detail: "", check: null },
     flip: FLIP_START,
     forecast: FORECAST_START,
+    refine: REFINE_START,
     blocked: null,
     version: 0,
   });
@@ -187,6 +201,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       jev: { on: false, status: "starting…", calls: 0 },
       flip: FLIP_START,
       forecast: FORECAST_START,
+      refine: REFINE_START,
       blocked: null,
       version: s.version + 1,
     }));
@@ -194,14 +209,23 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     // Jev's own chance of green for each candle (backfill + live). The chart arrows show Jev's calls:
     // above 50% = up/green, below 50% = down/red.
     const jevByTime = new Map<number, number>();
-    const jevOutcome = (c: Candle): Outcome | null => {
-      const p = jevByTime.get(c.time);
+    // "Jev refined": a correction learned walk-forward from Jev's wins and losses.
+    const fixer = new JevFixer();
+    const refinedByTime = new Map<number, number>();
+    const learned = new Set<number>();
+    const liveTally = { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } };
+    const setRefine = (patch: Partial<RefineView>) => !cancelled && setState((s) => ({ ...s, refine: { ...s.refine, ...patch } }));
+    const arrowFrom = (map: Map<number, number>, c: Candle): Outcome | null => {
+      const p = map.get(c.time);
       if (p === undefined) return null;
       const call: -1 | 0 | 1 = p > 0.5 ? 1 : p < 0.5 ? -1 : 0;
       return { call, hit: call === 0 || c.close === c.open ? null : (call === 1) === c.close > c.open };
     };
+    const jevOutcome = (c: Candle) => arrowFrom(jevByTime, c);
+    const refinedOutcome = (c: Candle) => arrowFrom(refinedByTime, c);
+    const barFor = (c: Candle): ClosedBar => ({ candle: c, outcome: jevOutcome(c), refined: refinedOutcome(c) });
     const redrawJevArrows = () => {
-      bars = bars.map((b) => ({ candle: b.candle, outcome: jevOutcome(b.candle) }));
+      bars = bars.map((b) => barFor(b.candle));
       setState((s) => ({ ...s, bars: [...bars], version: s.version + 1 }));
     };
     let queue = Promise.resolve();
@@ -241,6 +265,9 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
         const a = await withTimeout(askCheck(snap, pred.forTime, tfMin, market), 20_000);
         jevCalls += a.support === null ? 1 : 2;
         jevByTime.set(pred.forTime, a.pGreen);
+        const pRef = fixer.predict(a.pGreen, predictor.featuresFor(pred.forTime));
+        refinedByTime.set(pred.forTime, pRef);
+        setRefine({ pNow: pRef });
         const updated = predictor.applyJev({ pGreen: a.pGreen, support: a.support });
         if (updated) set({ prediction: updated, trust: predictor.summary().trust });
         setJev({ status: "ok", calls: jevCalls });
@@ -279,7 +306,25 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const lanes = Array.from({ length: 6 }, (_, k) => targets.filter((_, i) => i % 6 === k));
       await Promise.all(lanes.map(worker));
       writeCache(cache, where);
-      for (const [t, a] of answers) jevByTime.set(t, a.pGreen);
+      // Replay the correction on these candles in time order: each refined read is made before that candle's
+      // result is learned from.
+      const past = { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } };
+      for (const c of targets) {
+        const a = answers.get(c.time);
+        if (!a) continue;
+        jevByTime.set(c.time, a.pGreen);
+        const x = predictor.featuresFor(c.time);
+        const pRef = fixer.predict(a.pGreen, x);
+        refinedByTime.set(c.time, pRef);
+        const y: 0 | 1 | null = c.close > c.open ? 1 : c.close < c.open ? 0 : null;
+        scoreArrow(past.raw, a.pGreen, y);
+        scoreArrow(past.fixed, pRef, y);
+        if (y !== null && !learned.has(c.time)) {
+          fixer.update(a.pGreen, x, y);
+          learned.add(c.time);
+        }
+      }
+      setRefine({ past, learned: fixer.summary(), updates: fixer.updates });
       redrawJevArrows();
       const rows = targets
         .filter((c) => answers.has(c.time) && c.close !== c.open)
@@ -501,7 +546,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const t = train(history);
       predictor = t.p;
       current = t.next;
-      bars = history.slice(-MAX_BARS).map((c) => ({ candle: c, outcome: jevOutcome(c) }));
+      bars = history.slice(-MAX_BARS).map(barFor);
       set({
         status: "ready",
         bars: [...bars],
@@ -547,7 +592,19 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
         scoreForecasts();
         makeForecast();
       }
-      bars.push({ candle: c, outcome: jevOutcome(c) });
+      // Jev refined learns from this candle (win or loss) before the next read.
+      const pJ = jevByTime.get(c.time);
+      const pR = refinedByTime.get(c.time);
+      if (pJ !== undefined && pR !== undefined && !learned.has(c.time)) {
+        const y: 0 | 1 | null = c.close > c.open ? 1 : c.close < c.open ? 0 : null;
+        scoreArrow(liveTally.raw, pJ, y);
+        scoreArrow(liveTally.fixed, pR, y);
+        if (y !== null) fixer.update(pJ, predictor.featuresFor(c.time), y);
+        learned.add(c.time);
+        setRefine({ live: { raw: { ...liveTally.raw }, fixed: { ...liveTally.fixed } }, learned: fixer.summary(), updates: fixer.updates });
+      }
+      setRefine({ pNow: null });
+      bars.push(barFor(c));
       if (bars.length > MAX_BARS) bars.shift();
       current = next;
       lastForming = null;

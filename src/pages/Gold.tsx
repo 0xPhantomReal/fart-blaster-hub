@@ -133,13 +133,17 @@ export default function Gold() {
   // Bitcoin offers 5m and 15m only; a 1m pick from gold falls back to 5m there.
   const tfMin: Timeframe = mk.timeframes.includes(tfPick) ? tfPick : 5;
   useEffect(() => save("gold.market", market), [market]);
+  const [arrows, setArrows] = useState<"jev" | "refined">(() =>
+    load("gold.arrows", (v): v is "jev" | "refined" => v === "jev" || v === "refined", "jev"),
+  );
+  useEffect(() => save("gold.arrows", arrows), [arrows]);
   const [forecastOn, setForecastOn] = useState<boolean>(() => load("gold.forecast", isBool, true));
   useEffect(() => save("gold.tf", tfMin), [tfMin]);
   useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
   const g = useGold(market, tfMin, forecastOn);
   const fc = g.forecast;
   const jevArrows = g.bars.reduce(
-    (acc, b) => (b.outcome && b.outcome.hit !== null ? { n: acc.n + 1, right: acc.right + (b.outcome.hit ? 1 : 0) } : acc),
+    (acc, b) => ((arrows === "refined" ? b.refined : b.outcome)?.hit != null ? { n: acc.n + 1, right: acc.right + ((arrows === "refined" ? b.refined : b.outcome)!.hit ? 1 : 0) } : acc),
     { n: 0, right: 0 },
   );
   const p = g.prediction;
@@ -221,7 +225,7 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart key={`${market}-${tfMin}`} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} />
+          <GoldChart key={`${market}-${tfMin}`} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} arrows={arrows} />
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
               <p className="max-w-md">{g.blocked}</p>
@@ -277,6 +281,7 @@ export default function Gold() {
               ) : null}
               Model {pct(p?.pModel, 0)}
               {p?.jev ? ` · Jev ${pct(p.jev.pGreen, 0)}` : ""}
+              {p?.jev && g.refine.pNow != null ? ` · refined ${pct(g.refine.pNow, 0)}` : ""}
             </div>
             {p?.jev && p.jev.support !== null && modelDir && (
               <div className={`mt-1 text-xs ${p.blockedByCheck ? "text-[#d4a72c]" : MUTED}`}>
@@ -386,6 +391,78 @@ export default function Gold() {
           )}
 
           <section>
+            <Label>Jev refined</Label>
+            <div className="mb-2 flex overflow-hidden rounded-md border border-[#262c36] text-xs">
+              {(["jev", "refined"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setArrows(m)}
+                  className={`flex-1 px-2 py-1 ${arrows === m ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
+                >
+                  Arrows: {m === "jev" ? "Jev" : "Jev refined"}
+                </button>
+              ))}
+            </div>
+            {g.refine.past || g.refine.live.raw.n > 0 ? (
+              <table className="w-full text-sm tabular-nums">
+                <thead>
+                  <tr className={`text-xs ${MUTED}`}>
+                    <th className="pb-1 text-left font-medium"></th>
+                    <th className="pb-1 text-right font-medium">Jev</th>
+                    <th className="pb-1 text-right font-medium">Refined</th>
+                    <th className="pb-1 text-right font-medium">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    ["Past candles", g.refine.past],
+                    ["Live", g.refine.live.raw.n > 0 ? g.refine.live : null],
+                  ].map(([name, r]) =>
+                    r && typeof r === "object" ? (
+                      <tr key={name as string} className="border-t border-[#262c36]">
+                        <td className="py-1.5 text-left">{name as string}</td>
+                        <td className="py-1.5 text-right">{r.raw.n ? pct(r.raw.right / r.raw.n, 1) : "—"}</td>
+                        <td
+                          className={`py-1.5 text-right ${r.fixed.n && r.raw.n ? (r.fixed.right / r.fixed.n > r.raw.right / r.raw.n ? GREEN : r.fixed.right / r.fixed.n < r.raw.right / r.raw.n ? RED : "") : ""}`}
+                        >
+                          {r.fixed.n ? pct(r.fixed.right / r.fixed.n, 1) : "—"}
+                        </td>
+                        <td className="py-1.5 text-right">{r.raw.n}</td>
+                      </tr>
+                    ) : null,
+                  )}
+                </tbody>
+              </table>
+            ) : (
+              <p className={`text-sm ${MUTED}`}>Waiting for Jev's past-candle check…</p>
+            )}
+            {g.refine.learned && (
+              <p className={`mt-2 text-xs ${MUTED}`}>
+                Learned from {g.refine.updates} of Jev's calls:{" "}
+                {Math.abs(g.refine.learned.bias) < 0.05
+                  ? "no overall lean"
+                  : g.refine.learned.bias < 0
+                    ? "Jev leans too bullish (nudged toward red)"
+                    : "Jev leans too bearish (nudged toward green)"}
+                {" · "}
+                {Math.abs(g.refine.learned.confidence - 1) < 0.05
+                  ? "confidence about right"
+                  : g.refine.learned.confidence < 1
+                    ? `Jev overconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`
+                    : `Jev underconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`}
+                {g.refine.learned.situations.length > 0 &&
+                  ` · biggest situation fixes: ${g.refine.learned.situations.map((x) => `${x.name} (${x.weight > 0 ? "→ green" : "→ red"})`).join(", ")}`}
+                .
+              </p>
+            )}
+            <p className={`mt-2 text-xs ${MUTED}`}>
+              Right % of the 50% arrows. Refined adjusts Jev's % using its own wins and losses (walk-forward: each candle is
+              read before it's learned from). It starts by trusting Jev as is and only moves when the same kind of miss keeps
+              happening. No extra Jev calls.
+            </p>
+          </section>
+
+          <section>
             <Label>Jev flip check</Label>
             <p className={`text-sm ${g.flip.status.startsWith("error") || g.flip.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
               {g.flip.status === "ok" ? "Reading the forming candle every 3 seconds (when it has changed)." : g.flip.status}
@@ -448,9 +525,9 @@ export default function Gold() {
 
           {g.error && <p className="text-xs text-[#d4a72c]">{g.error}</p>}
           <p className={`text-xs ${MUTED}`}>
-            Arrows are Jev's own call on each candle (made before it opened): up = above 50% chance green, down = below 50%.
-            Colored = right, gray = wrong.
-            {jevArrows.n > 0 && ` Jev's arrows on screen: ${jevArrows.right} of ${jevArrows.n} right (${pct(jevArrows.right / jevArrows.n, 1)}).`}{" "}
+            Arrows are {arrows === "refined" ? "Jev's refined" : "Jev's own"} call on each candle (made before it opened): up = above
+            50% chance green, down = below 50%. Colored = right, gray = wrong.
+            {jevArrows.n > 0 && ` Arrows on screen: ${jevArrows.right} of ${jevArrows.n} right (${pct(jevArrows.right / jevArrows.n, 1)}).`}{" "}
             Trained on {g.trainedOn.toLocaleString()} candles.
           </p>
         </aside>
