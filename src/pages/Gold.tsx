@@ -138,6 +138,10 @@ export default function Gold() {
   useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
   const g = useGold(market, tfMin, forecastOn);
   const fc = g.forecast;
+  const jevArrows = g.bars.reduce(
+    (acc, b) => (b.outcome && b.outcome.hit !== null ? { n: acc.n + 1, right: acc.right + (b.outcome.hit ? 1 : 0) } : acc),
+    { n: 0, right: 0 },
+  );
   const p = g.prediction;
   const [, tick] = useState(0);
 
@@ -444,7 +448,10 @@ export default function Gold() {
 
           {g.error && <p className="text-xs text-[#d4a72c]">{g.error}</p>}
           <p className={`text-xs ${MUTED}`}>
-            Arrows mark candles a call was made for: colored = right, gray = wrong. Trained on {g.trainedOn.toLocaleString()} candles.
+            Arrows are Jev's own call on each candle (made before it opened): up = above 50% chance green, down = below 50%.
+            Colored = right, gray = wrong.
+            {jevArrows.n > 0 && ` Jev's arrows on screen: ${jevArrows.right} of ${jevArrows.n} right (${pct(jevArrows.right / jevArrows.n, 1)}).`}{" "}
+            Trained on {g.trainedOn.toLocaleString()} candles.
           </p>
         </aside>
       </main>

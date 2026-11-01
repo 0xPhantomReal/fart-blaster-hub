@@ -191,6 +191,19 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       version: s.version + 1,
     }));
     let bars: ClosedBar[] = [];
+    // Jev's own chance of green for each candle (backfill + live). The chart arrows show Jev's calls:
+    // above 50% = up/green, below 50% = down/red.
+    const jevByTime = new Map<number, number>();
+    const jevOutcome = (c: Candle): Outcome | null => {
+      const p = jevByTime.get(c.time);
+      if (p === undefined) return null;
+      const call: -1 | 0 | 1 = p > 0.5 ? 1 : p < 0.5 ? -1 : 0;
+      return { call, hit: call === 0 || c.close === c.open ? null : (call === 1) === c.close > c.open };
+    };
+    const redrawJevArrows = () => {
+      bars = bars.map((b) => ({ candle: b.candle, outcome: jevOutcome(b.candle) }));
+      setState((s) => ({ ...s, bars: [...bars], version: s.version + 1 }));
+    };
     let queue = Promise.resolve();
     let stop: (() => void) | null = null;
     let jevReady = false; // backend supports the check AND the backfill has run
@@ -227,6 +240,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       try {
         const a = await withTimeout(askCheck(snap, pred.forTime, tfMin, market), 20_000);
         jevCalls += a.support === null ? 1 : 2;
+        jevByTime.set(pred.forTime, a.pGreen);
         const updated = predictor.applyJev({ pGreen: a.pGreen, support: a.support });
         if (updated) set({ prediction: updated, trust: predictor.summary().trust });
         setJev({ status: "ok", calls: jevCalls });
@@ -265,6 +279,8 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const lanes = Array.from({ length: 6 }, (_, k) => targets.filter((_, i) => i % 6 === k));
       await Promise.all(lanes.map(worker));
       writeCache(cache, where);
+      for (const [t, a] of answers) jevByTime.set(t, a.pGreen);
+      redrawJevArrows();
       const rows = targets
         .filter((c) => answers.has(c.time) && c.close !== c.open)
         .map((c) => ({ pModel: preds.get(c.time)!.pModel!, jev: answers.get(c.time)!, y: (c.close > c.open ? 1 : 0) as 0 | 1 }));
@@ -485,7 +501,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const t = train(history);
       predictor = t.p;
       current = t.next;
-      bars = history.slice(-MAX_BARS).map((c) => ({ candle: c, outcome: t.outcomes.get(c.time) ?? null }));
+      bars = history.slice(-MAX_BARS).map((c) => ({ candle: c, outcome: jevOutcome(c) }));
       set({
         status: "ready",
         bars: [...bars],
@@ -524,14 +540,14 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       }
       lastFlip = null;
       setFlip({ pFlip: null, at: null });
-      const { outcome, next } = predictor.close(c);
+      const { next } = predictor.close(c);
       if (!poolHistory.length || c.time > poolHistory[poolHistory.length - 1].time) {
         poolHistory.push(c);
         pool = new AnalogPool(poolHistory, TF_SECONDS);
         scoreForecasts();
         makeForecast();
       }
-      bars.push({ candle: c, outcome });
+      bars.push({ candle: c, outcome: jevOutcome(c) });
       if (bars.length > MAX_BARS) bars.shift();
       current = next;
       lastForming = null;
