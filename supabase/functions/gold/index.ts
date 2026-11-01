@@ -2,7 +2,7 @@
 // browser never sees them.
 // Secrets: PYTH_API_KEY, TYPESAFE_API_KEY; for live BRTI: KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY
 // (optional: PYTH_SYMBOL, PYTH_BTC_SYMBOL, PYTH_HERMES_KEY, PYTH_GOLD_FEED_ID, PYTH_BTC_FEED_ID, JEV_MODEL, KALSHI_WS_URL)
-// Every action takes an optional `market`: "gold" (default), "btc", "eth", "sol" or "xrp".
+// Every action takes an optional `market`: "gold" (default) or a crypto key (btc, eth, sol, xrp, bnb, doge, hype, zec).
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
@@ -44,7 +44,7 @@ function cached<T>(map: Map<string, { at: number; body: unknown }>, key: string,
 //       feed (needs Kalshi API secrets); history, and live ticks when the index isn't available, from Pyth.
 //       Volume for Jev's context from Coinbase.
 
-type Market = "gold" | "btc" | "eth" | "sol" | "xrp";
+type Market = "gold" | "btc" | "eth" | "sol" | "xrp" | "bnb" | "doge" | "hype" | "zec";
 interface MarketCfg {
   instrument: string; //   how Jev is told what it's looking at
   symbolEnv: string; //    secret that overrides the Pyth history symbol
@@ -57,6 +57,7 @@ interface MarketCfg {
   knownFeed: string; //    used only if the lookup fails
   cfIndex?: string; //     CF Benchmarks index id on Kalshi's feed
   coinbase?: string; //    Coinbase product for volume
+  slowIndex?: boolean; //  index only on Kalshi's once-per-second channel (not the 5-per-second one)
 }
 const MARKETS: Record<Market, MarketCfg> = {
   gold: {
@@ -121,6 +122,59 @@ const MARKETS: Record<Market, MarketCfg> = {
     knownFeed: "0xec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
     cfIndex: "XRPUSD_RTI",
     coinbase: "XRP-USD",
+  },
+  bnb: {
+    instrument: "BNB (BNB/USD, CF BNB-Dollar Spot Rate)",
+    symbolEnv: "PYTH_BNB_SYMBOL",
+    symbolQuery: "query=BNB&asset_type=crypto",
+    symbolRe: /^Crypto\.BNB\/USD$/i,
+    symbolDefault: "Crypto.BNB/USD",
+    feedEnv: "PYTH_BNB_FEED_ID",
+    feedQueries: ["query=BNB&asset_type=crypto", "query=BNB"],
+    feedRe: /^Crypto\.BNB\/USD$/i,
+    knownFeed: "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
+    cfIndex: "BNBUSD_RTI",
+    slowIndex: true,
+  },
+  doge: {
+    instrument: "Dogecoin (DOGE/USD, CF Dogecoin-Dollar Spot Rate)",
+    symbolEnv: "PYTH_DOGE_SYMBOL",
+    symbolQuery: "query=DOGE&asset_type=crypto",
+    symbolRe: /^Crypto\.DOGE\/USD$/i,
+    symbolDefault: "Crypto.DOGE/USD",
+    feedEnv: "PYTH_DOGE_FEED_ID",
+    feedQueries: ["query=DOGE&asset_type=crypto", "query=DOGE"],
+    feedRe: /^Crypto\.DOGE\/USD$/i,
+    knownFeed: "0xdcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",
+    cfIndex: "DOGEUSD_RTI",
+    coinbase: "DOGE-USD",
+  },
+  hype: {
+    instrument: "Hyperliquid (HYPE/USD, CF Hyperliquid-Dollar Spot Rate)",
+    symbolEnv: "PYTH_HYPE_SYMBOL",
+    symbolQuery: "query=HYPE&asset_type=crypto",
+    symbolRe: /^Crypto\.HYPE\/USD$/i,
+    symbolDefault: "Crypto.HYPE/USD",
+    feedEnv: "PYTH_HYPE_FEED_ID",
+    feedQueries: ["query=HYPE&asset_type=crypto", "query=HYPE"],
+    feedRe: /^Crypto\.HYPE\/USD$/i,
+    knownFeed: "0x4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
+    cfIndex: "HYPEUSD_RTI",
+    slowIndex: true,
+  },
+  zec: {
+    instrument: "Zcash (ZEC/USD, CF Zcash-Dollar Spot Rate)",
+    symbolEnv: "PYTH_ZEC_SYMBOL",
+    symbolQuery: "query=ZEC&asset_type=crypto",
+    symbolRe: /^Crypto\.ZEC\/USD$/i,
+    symbolDefault: "Crypto.ZEC/USD",
+    feedEnv: "PYTH_ZEC_FEED_ID",
+    feedQueries: ["query=ZEC&asset_type=crypto", "query=ZEC"],
+    feedRe: /^Crypto\.ZEC\/USD$/i,
+    knownFeed: "0xbe9b59d178f0d6a97ab4c343bff2aa69caa1eaae3e9048a65788c529b125bb24",
+    cfIndex: "ZECUSD_RTI",
+    coinbase: "ZEC-USD",
+    slowIndex: true,
   },
 };
 /** Market from the request (older pages don't send one: they are on gold). */
@@ -457,7 +511,7 @@ function parseFrame(b: Uint8Array): { fin: boolean; op: number; payload: Uint8Ar
  * Open Kalshi's CF Benchmarks feed for BRTI and resolve once the first value arrives (or reject with the reason).
  * Tries the 5-per-second channel, then the once-per-second one.
  */
-async function openBrti(index: string, onTick: (t: number, p: number) => void, onEnd: () => void = () => {}): Promise<{ close: () => void; channel: string }> {
+async function openBrti(index: string, slow: boolean, onTick: (t: number, p: number) => void, onEnd: () => void = () => {}): Promise<{ close: () => void; channel: string }> {
   if (!kalshiConfigured()) throw new Error("Kalshi API secrets (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY) are not set");
   const url = KALSHI_WS();
   const headers = await kalshiHeaders(new URL(url).pathname);
@@ -466,7 +520,7 @@ async function openBrti(index: string, onTick: (t: number, p: number) => void, o
     // so connect with a small client that can.
     const ws = new HeaderSocket(url, headers);
     let settled = false;
-    let channel = "cfbenchmarks_value_5hz";
+    let channel = slow ? "cfbenchmarks_value" : "cfbenchmarks_value_5hz";
     const fail = (why: string) => {
       if (settled) return;
       settled = true;
@@ -531,7 +585,7 @@ async function tickDiagnostics(m: Market) {
   const index = MARKETS[m].cfIndex;
   if (index) {
     try {
-      const c = await openBrti(index, () => {});
+      const c = await openBrti(index, !!MARKETS[m].slowIndex, () => {});
       c.close();
       brti.ok = true;
     } catch (e) {
@@ -595,7 +649,7 @@ async function tickStream(m: Market): Promise<Response> {
           // already closed
         }
       };
-      const brti = await openBrti(index, push, end);
+      const brti = await openBrti(index, !!MARKETS[m].slowIndex, push, end);
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
           ctl = controller;
@@ -809,8 +863,8 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 14,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4"],
+        version: 15,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });

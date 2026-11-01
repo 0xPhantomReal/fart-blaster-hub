@@ -8,7 +8,17 @@ const r2 = (v: number) => Number(v.toFixed(2));
 const DAY = 86400;
 
 /** Round-number spacing that traders watch, per market. */
-const ROUND: Record<string, number> = { gold: 10, btc: 500, eth: 50, sol: 5, xrp: 0.05 };
+const ROUND: Record<string, number> = {
+  gold: 10,
+  btc: 500,
+  eth: 50,
+  sol: 5,
+  xrp: 0.05,
+  bnb: 10,
+  doge: 0.01,
+  hype: 1,
+  zec: 5,
+};
 
 /** Group candles into longer ones (e.g. 1h or 4h), oldest first. */
 function group(cs: Candle[], sec: number): Candle[] {
@@ -68,7 +78,9 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
   // Day levels (UTC days).
   const dayStart = Math.floor(x.forTime / DAY) * DAY;
   const today = cs.filter((c) => c.time >= dayStart);
-  const yesterday = cs.filter((c) => c.time >= dayStart - DAY && c.time < dayStart);
+  const yesterday = cs.filter(
+    (c) => c.time >= dayStart - DAY && c.time < dayStart,
+  );
   const last24 = cs.filter((c) => c.time >= x.forTime - DAY);
   const hi = (l: Candle[]) => Math.max(...l.map((c) => c.high));
   const lo = (l: Candle[]) => Math.min(...l.map((c) => c.low));
@@ -82,7 +94,9 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
   if (yesterday.length) {
     levels.vs_yesterday_high = a(price - hi(yesterday));
     levels.vs_yesterday_low = a(price - lo(yesterday));
-    levels.vs_yesterday_close = a(price - yesterday[yesterday.length - 1].close);
+    levels.vs_yesterday_close = a(
+      price - yesterday[yesterday.length - 1].close,
+    );
   }
   if (last24.length) {
     levels.below_24h_high = a(hi(last24) - price);
@@ -98,7 +112,8 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
   // Volatility regime: is the market quieter or wilder than usual?
   const ranges = cs.slice(-50).map((c) => c.high - c.low);
   const avgRange = ranges.reduce((s, v) => s + v, 0) / ranges.length;
-  const recentRange = cs.slice(-10).reduce((s, c) => s + (c.high - c.low), 0) / 10;
+  const recentRange =
+    cs.slice(-10).reduce((s, c) => s + (c.high - c.low), 0) / 10;
   const volatility = {
     atr_vs_50_candle_avg_range: r2(atr / avgRange),
     last_10_vs_last_50_range: r2(recentRange / avgRange),
@@ -117,7 +132,9 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
     volatility,
     hourly_last_8: hourly.map((c) => describe(c, atr)),
     four_hour_last_6: fourHour.map((c) => describe(c, atr)),
-    weekday_utc: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()],
+    weekday_utc: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
+      d.getUTCDay()
+    ],
     hour_utc: d.getUTCHours(),
   };
 
@@ -128,16 +145,26 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
       const vs = recent.map((r) => r.v!);
       const avg = vs.reduce((s, v) => s + v, 0) / 20;
       const last12 = recent.slice(-12);
-      const upVol = last12.filter((r) => r.c.close > r.c.open).reduce((s, r) => s + r.v!, 0);
+      const upVol = last12
+        .filter((r) => r.c.close > r.c.open)
+        .reduce((s, r) => s + r.v!, 0);
       const tot = last12.reduce((s, r) => s + r.v!, 0);
       if (avg > 0 && tot > 0) {
         out.volume = {
-          how_to_read: "Coinbase volume. Ratios: 1 = average of the last 20 candles.",
+          how_to_read:
+            "Coinbase volume. Ratios: 1 = average of the last 20 candles.",
           last_candle_vs_avg: r2(vs[19] / avg),
           last_3_vs_avg: r2(vs.slice(-3).reduce((s, v) => s + v, 0) / 3 / avg),
-          last_5_vs_previous_15: r2(vs.slice(-5).reduce((s, v) => s + v, 0) / 5 / (vs.slice(0, 15).reduce((s, v) => s + v, 0) / 15)),
+          last_5_vs_previous_15: r2(
+            vs.slice(-5).reduce((s, v) => s + v, 0) /
+              5 /
+              (vs.slice(0, 15).reduce((s, v) => s + v, 0) / 15),
+          ),
           share_on_green_candles_last_12: r2(upVol / tot),
-          per_candle_last_12: last12.map((r) => ({ c: r.c.close > r.c.open ? "G" : r.c.close < r.c.open ? "R" : "D", v: r2(r.v! / avg) })),
+          per_candle_last_12: last12.map((r) => ({
+            c: r.c.close > r.c.open ? "G" : r.c.close < r.c.open ? "R" : "D",
+            v: r2(r.v! / avg),
+          })),
         };
       }
     }

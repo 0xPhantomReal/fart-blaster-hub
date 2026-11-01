@@ -10,7 +10,8 @@ export type Timeframe = (typeof TIMEFRAMES)[number];
  * The markets the page can show. Crypto streams its CME CF Real Time Index (the index Kalshi's markets settle on)
  * live via Kalshi when available; history comes from Pyth.
  */
-export type Market = "gold" | "btc" | "eth" | "sol" | "xrp";
+export type Market =
+  "gold" | "btc" | "eth" | "sol" | "xrp" | "bnb" | "doge" | "hype" | "zec";
 export interface MarketInfo {
   label: string;
   pair: string;
@@ -65,6 +66,42 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 2.5,
     decimals: 4,
+  },
+  bnb: {
+    label: "BNB",
+    pair: "BNB/USD · BNBUSD_RTI",
+    index: "BNBUSD_RTI",
+    indexName: "CF BNB-Dollar Spot Rate",
+    timeframes: [5, 15],
+    simStart: 600,
+    decimals: 2,
+  },
+  doge: {
+    label: "Dogecoin",
+    pair: "DOGE/USD · DOGEUSD_RTI",
+    index: "DOGEUSD_RTI",
+    indexName: "CF Dogecoin-Dollar Spot Rate",
+    timeframes: [5, 15],
+    simStart: 0.2,
+    decimals: 5,
+  },
+  hype: {
+    label: "Hyperliquid",
+    pair: "HYPE/USD · HYPEUSD_RTI",
+    index: "HYPEUSD_RTI",
+    indexName: "CF Hyperliquid-Dollar Spot Rate",
+    timeframes: [5, 15],
+    simStart: 40,
+    decimals: 3,
+  },
+  zec: {
+    label: "Zcash",
+    pair: "ZEC/USD · ZECUSD_RTI",
+    index: "ZECUSD_RTI",
+    indexName: "CF Zcash-Dollar Spot Rate",
+    timeframes: [5, 15],
+    simStart: 50,
+    decimals: 2,
   },
 };
 export const HISTORY_BARS = 3000;

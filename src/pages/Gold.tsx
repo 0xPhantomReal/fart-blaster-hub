@@ -762,7 +762,7 @@ export default function Gold() {
               >
                 {g.ticks.state === "streaming"
                   ? g.ticks.source && g.ticks.source !== "Pyth"
-                    ? `Streaming the ${mk.indexName ?? g.ticks.source} (${g.ticks.source}) via Kalshi, up to 5 values a second.`
+                    ? `Streaming the ${mk.indexName ?? g.ticks.source} (${g.ticks.source}) via Kalshi${g.ticks.note?.includes("5hz") ? ", up to 5 values a second" : ", once a second"}.`
                     : "Streaming every Pyth price update."
                   : g.ticks.state === "connecting"
                     ? "Connecting to the tick stream…"
