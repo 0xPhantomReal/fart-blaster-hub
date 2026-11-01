@@ -11,8 +11,11 @@ import {
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
+  type WhitespaceData,
 } from "lightweight-charts";
 import type { Candle } from "./indicators";
+import { FootprintSeries, type FootprintBar } from "./footprintSeries";
+import { rows as fpRows, type Footprint } from "./orderflow";
 import type { ClosedBar } from "./useGold";
 
 const COLORS = {
@@ -62,7 +65,13 @@ export function GoldChart({
   arrows = "jev",
   minConf = 0.5,
   decimals = 2,
+  footprints = null,
+  fpVersion = 0,
+  footprintMode = false,
 }: {
+  footprints?: Map<number, Footprint> | null; // order flow per candle (crypto)
+  fpVersion?: number; //                        bumps when footprints change
+  footprintMode?: boolean; //                   draw footprint candles instead of plain ones
   decimals?: number; // price decimals (XRP needs 4)
   minConf?: number; // only draw arrows at least this sure (0.5 = every call)
   arrows?: "jev" | "refined";
@@ -76,6 +85,9 @@ export function GoldChart({
   const ghosts = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const fp = useRef<ISeriesApi<"Custom", Time, FootprintBar | WhitespaceData<Time>> | null>(null);
+  const fpMarkers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const fpDrawn = useRef("");
   const drawn = useRef("");
   const zoomed = useRef(false);
 
@@ -134,11 +146,18 @@ export function GoldChart({
       wickDownColor: COLORS.red,
     });
     markers.current = createSeriesMarkers(candles.current, []);
+    fp.current = c.addCustomSeries(new FootprintSeries(), {
+      visible: false,
+      priceLineVisible: true,
+      lastValueVisible: true,
+    });
+    fpMarkers.current = createSeriesMarkers(fp.current, []);
     chart.current = c;
     return () => {
       c.remove();
       chart.current = null;
       drawn.current = "";
+      fpDrawn.current = "";
       zoomed.current = false;
     };
   }, []);
@@ -148,9 +167,9 @@ export function GoldChart({
     if (!candles.current || drawn.current === key || !bars.length) return;
     drawn.current = key;
     candles.current.setData(bars.map((b) => toBar(b.candle)));
-    markers.current?.setMarkers(
-      bars.flatMap((b) => markerFor(b, arrows, minConf)),
-    );
+    const ms = bars.flatMap((b) => markerFor(b, arrows, minConf));
+    markers.current?.setMarkers(ms);
+    fpMarkers.current?.setMarkers(ms);
     if (!zoomed.current && chart.current) {
       zoomed.current = true;
       const show = window.innerWidth < 640 ? 40 : 100;
@@ -169,6 +188,7 @@ export function GoldChart({
     };
     candles.current?.applyOptions({ priceFormat });
     ghosts.current?.applyOptions({ priceFormat });
+    fp.current?.applyOptions({ priceFormat });
   }, [decimals]);
 
   useEffect(() => {
@@ -191,6 +211,47 @@ export function GoldChart({
     if (forming.time > bars[bars.length - 1].candle.time)
       candles.current.update(toBar(forming));
   }, [forming, bars]);
+
+  // ── Footprint mode ──
+  const toFp = (c: Candle): FootprintBar => {
+    const f = footprints?.get(c.time);
+    return {
+      time: c.time as UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      ...(f && f.buy + f.sell > 0 ? { step: f.step, rows: fpRows(f) } : {}),
+    };
+  };
+
+  useEffect(() => {
+    candles.current?.applyOptions({ visible: !footprintMode });
+    fp.current?.applyOptions({ visible: footprintMode });
+    // Footprints need room: zoom in on the latest candles when switching on.
+    if (footprintMode && chart.current && bars.length) {
+      const show = window.innerWidth < 640 ? 3 : 7;
+      chart.current
+        .timeScale()
+        .setVisibleLogicalRange({
+          from: bars.length - show,
+          to: bars.length + 1.5,
+        });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the mode flips
+  }, [footprintMode]);
+
+  useEffect(() => {
+    if (!fp.current || !footprintMode || !bars.length) return;
+    const key = `${version}:${footprints?.size ?? 0}`;
+    if (fpDrawn.current !== key) {
+      fpDrawn.current = key;
+      fp.current.setData(bars.map((b) => toFp(b.candle)));
+    }
+    if (forming && forming.time > bars[bars.length - 1].candle.time)
+      fp.current.update(toFp(forming));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- toFp reads the same props
+  }, [footprintMode, bars, version, footprints, fpVersion, forming]);
 
   return <div ref={el} className="h-full w-full" />;
 }

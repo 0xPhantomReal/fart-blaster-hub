@@ -195,6 +195,10 @@ export default function Gold() {
     ),
   );
   useEffect(() => save("gold.minconf", minConf), [minConf]);
+  const [footprintOn, setFootprintOn] = useState<boolean>(() =>
+    load("gold.footprint", isBool, false),
+  );
+  useEffect(() => save("gold.footprint", footprintOn), [footprintOn]);
   const [forecastOn, setForecastOn] = useState<boolean>(() =>
     load("gold.forecast", isBool, true),
   );
@@ -300,6 +304,15 @@ export default function Gold() {
         >
           Forecast {forecastOn ? "on" : "off"}
         </button>
+        {mk.coinbase && (
+          <button
+            onClick={() => setFootprintOn((v) => !v)}
+            className={`self-center rounded-md border px-2.5 py-1 text-xs ${footprintOn ? "border-[#d4a72c] text-[#d4a72c]" : "border-[#262c36] text-[#8b949e]"}`}
+            title="Volume footprint candles from Coinbase trades"
+          >
+            Footprint {footprintOn ? "on" : "off"}
+          </button>
+        )}
         <div
           className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}
         >
@@ -331,6 +344,9 @@ export default function Gold() {
             arrows={arrows}
             minConf={minConf}
             decimals={mk.decimals}
+            footprints={g.flow.on ? g.flow.footprints : null}
+            fpVersion={g.flow.version}
+            footprintMode={footprintOn && !!mk.coinbase && g.flow.on}
           />
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
@@ -757,6 +773,16 @@ export default function Gold() {
           {g.source !== "Simulated" && (
             <section>
               <Label>Live ticks</Label>
+              {mk.coinbase && g.flow.status && (
+                <p
+                  className={`mb-1 text-xs ${/couldn|too many|disconnect/.test(g.flow.status) ? "text-[#d4a72c]" : MUTED}`}
+                >
+                  Order flow (Coinbase {mk.coinbase} trades): {g.flow.status}.
+                  Jev sees who was aggressive (buyers vs sellers) in recent
+                  candles; footprints show it per price level. Zoom in to read
+                  the numbers.
+                </p>
+              )}
               <p
                 className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}
               >

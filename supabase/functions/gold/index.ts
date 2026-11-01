@@ -729,6 +729,28 @@ async function volume(product: string, from: number, to: number, granularity: nu
   return body;
 }
 
+// ── Trades (Coinbase public, no key): for order flow / footprints ───
+// Coinbase pages trades by trade id, newest first: `after=X` returns the 1000 trades just older than id X.
+
+const tradesCache = new Map<string, { at: number; body: unknown }>();
+
+async function tradesPage(product: string, after: number | null) {
+  const key = `${product}:${after}`;
+  const hit = after === null ? undefined : cached<unknown>(tradesCache, key, 6 * 3600 * 1000); // old pages never change
+  if (hit) return hit;
+  const q = new URLSearchParams({ limit: "1000" });
+  if (after !== null) q.set("after", String(after));
+  const res = await fetch(`${COINBASE}/${product}/trades?${q}`, { headers: { Accept: "application/json", "User-Agent": "gold-chart/1.0" } });
+  if (!res.ok) throw new Error(`Coinbase ${res.status}: ${(await res.text()).slice(0, 120)}`);
+  const rows: { time: string; trade_id: number; price: string; size: string; side: string }[] = await res.json();
+  // [time (s), price, size, 1 = aggressive buy (maker side "sell"), trade id]
+  const trades = rows.map((r) => [Date.parse(r.time) / 1000, Number(r.price), Number(r.size), r.side === "sell" ? 1 : 0, r.trade_id]);
+  const ids = rows.map((r) => r.trade_id);
+  const body = { trades, minId: ids.length ? Math.min(...ids) : null, maxId: ids.length ? Math.max(...ids) : null };
+  if (after !== null) tradesCache.set(key, { at: Date.now(), body });
+  return body;
+}
+
 // ── Jev: its own call, and a fact-check of the model's call ───────────
 // Two requests in parallel so Jev's own call is made WITHOUT seeing the model (no anchoring); the fact-check
 // sees the same data plus the model's call. Cached per candle, so every viewer and the backfill share one answer.
@@ -863,8 +885,8 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 15,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8"],
+        version: 16,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8", "trades"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });
@@ -879,6 +901,16 @@ Deno.serve(async (req) => {
       }
       if (to <= from || to - from > (granularity as number) * 1500) return json({ error: "bad time range" }, 400);
       return json(await volume(product, Math.floor(from), Math.floor(to), granularity as number));
+    }
+
+    if (body.action === "trades") {
+      const product = MARKETS[marketOf(body)].coinbase;
+      if (!product) return json({ error: "no trade data for this market" }, 400);
+      const after = body.after;
+      if (after !== undefined && after !== null && (typeof after !== "number" || !Number.isInteger(after) || after <= 0)) {
+        return json({ error: "after must be a trade id" }, 400);
+      }
+      return json(await tradesPage(product, (after as number | undefined) ?? null));
     }
 
     if (body.action === "tickcheck") {

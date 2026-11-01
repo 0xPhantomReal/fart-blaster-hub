@@ -39,6 +39,9 @@ const PICK: { name: string; i: number }[] = [
   { name: "share of green candles", i: FEATURES.length + 3 },
   { name: "streak", i: FEATURES.indexOf("streak") },
   { name: "last candle's body", i: FEATURES.indexOf("last_candle_body") },
+  // Order flow (crypto with Coinbase trades; 0 when unknown), appended after the trend inputs.
+  { name: "buyer vs seller aggression last candle", i: FEATURES.length + 4 },
+  { name: "buyer vs seller aggression last 6 candles", i: FEATURES.length + 5 },
 ];
 void INPUTS;
 

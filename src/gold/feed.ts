@@ -20,6 +20,7 @@ export interface MarketInfo {
   timeframes: Timeframe[];
   simStart: number;
   decimals: number; //     price decimals to show
+  coinbase: string | null; // Coinbase product, for order flow / footprints
 }
 export const MARKETS: Record<Market, MarketInfo> = {
   gold: {
@@ -30,6 +31,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [1, 5, 15],
     simStart: 4000,
     decimals: 2,
+    coinbase: null,
   },
   btc: {
     label: "Bitcoin",
@@ -39,6 +41,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 100000,
     decimals: 2,
+    coinbase: "BTC-USD",
   },
   eth: {
     label: "Ether",
@@ -48,6 +51,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 3500,
     decimals: 2,
+    coinbase: "ETH-USD",
   },
   sol: {
     label: "Solana",
@@ -57,6 +61,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 180,
     decimals: 3,
+    coinbase: "SOL-USD",
   },
   xrp: {
     label: "XRP",
@@ -66,6 +71,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 2.5,
     decimals: 4,
+    coinbase: "XRP-USD",
   },
   bnb: {
     label: "BNB",
@@ -75,6 +81,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 600,
     decimals: 2,
+    coinbase: null,
   },
   doge: {
     label: "Dogecoin",
@@ -84,6 +91,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 0.2,
     decimals: 5,
+    coinbase: "DOGE-USD",
   },
   hype: {
     label: "Hyperliquid",
@@ -93,6 +101,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 40,
     decimals: 3,
+    coinbase: null,
   },
   zec: {
     label: "Zcash",
@@ -102,6 +111,7 @@ export const MARKETS: Record<Market, MarketInfo> = {
     timeframes: [5, 15],
     simStart: 50,
     decimals: 2,
+    coinbase: "ZEC-USD",
   },
 };
 export const HISTORY_BARS = 3000;
@@ -535,6 +545,19 @@ export async function fetchVolume(
     granularity: tfMin * 60,
   });
   return new Map(r.volume.map((v) => [v.time, v.volume]));
+}
+
+/** One page of Coinbase trades, newest first: [time s, price, size, 1 = aggressive buy, trade id]. */
+export async function fetchTradesPage(market: Market, after: number | null) {
+  return callFn<{
+    trades: [number, number, number, number, number][];
+    minId: number | null;
+    maxId: number | null;
+  }>({
+    action: "trades",
+    market,
+    after,
+  });
 }
 
 /** Jev picks the most likely of the forecast paths (`options`: id → compact text). One answer per candle, shared. */

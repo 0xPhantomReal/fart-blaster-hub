@@ -1,10 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
-import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import {
+  Predictor,
+  type JevAnswer,
+  type Live,
+  type Outcome,
+  type Prediction,
+  type TrackRecord,
+} from "./predictor";
 import { marketContext } from "./context";
+import {
+  addTrade,
+  coinbaseTrades,
+  emptyFootprint,
+  flowContext,
+  flowInputs,
+  loadFootprints,
+  loadTradeHistory,
+  niceStep,
+  saveFootprints,
+  type Footprint,
+  type Trade,
+} from "./orderflow";
 import { JevFixer, scoreArrow, type FixSummary, type Tally } from "./jevfix";
-import { AnalogPool, HORIZON, label, scorePath, toCandles, PathTally, type Path, type PathRecord } from "./forecast";
-import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords, type FlipRow } from "./flip";
+import {
+  AnalogPool,
+  HORIZON,
+  label,
+  scorePath,
+  toCandles,
+  PathTally,
+  type Path,
+  type PathRecord,
+} from "./forecast";
+import {
+  atrByTime,
+  bodySd,
+  FlipBlender,
+  flipState,
+  greenFromFlip,
+  pastSnapshots,
+  type FlipRecords,
+  type FlipRow,
+} from "./flip";
 import {
   askCheck,
   askFlip,
@@ -18,6 +56,8 @@ import {
   type Feed,
   type Market,
   type Timeframe,
+  MARKETS,
+  fetchTradesPage,
   type TickCheck,
   type TickStatus,
 } from "./feed";
@@ -70,7 +110,12 @@ export interface RefineView {
   updates: number;
 }
 
-type Trio = { model: TrackRecord; jev: TrackRecord; final: TrackRecord; halfway?: TrackRecord };
+type Trio = {
+  model: TrackRecord;
+  jev: TrackRecord;
+  final: TrackRecord;
+  halfway?: TrackRecord;
+};
 
 export interface GoldState {
   status: "loading" | "ready";
@@ -93,6 +138,13 @@ export interface GoldState {
   blocked: string | null;
   /** Live tick stream health, plus the backend's diagnosis when it isn't streaming. */
   ticks: TickStatus & { check: TickCheck | null };
+  /** Order flow (Coinbase trades) for crypto: footprints per candle and how the feed is doing. */
+  flow: {
+    on: boolean;
+    status: string;
+    footprints: Map<number, Footprint>;
+    version: number;
+  };
   version: number; //              bumps when the chart should redraw
 }
 
@@ -100,7 +152,10 @@ const MAX_BARS = 3000;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
-    const id = setTimeout(() => reject(new Error(`no answer after ${ms / 1000}s`)), ms);
+    const id = setTimeout(
+      () => reject(new Error(`no answer after ${ms / 1000}s`)),
+      ms,
+    );
     p.then(
       (v) => (clearTimeout(id), resolve(v)),
       (e) => (clearTimeout(id), reject(e)),
@@ -112,10 +167,17 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 // One store per market and timeframe (gold 15m keeps its original name so its answers carry over).
 type Where = { market: Market; tf: number };
 const tfKey = (base: string, w: Where) =>
-  w.market === "gold" ? (w.tf === 15 ? base : `${base}.${w.tf}m`) : `${base}.${w.market}.${w.tf}m`;
+  w.market === "gold"
+    ? w.tf === 15
+      ? base
+      : `${base}.${w.tf}m`
+    : // markets with order flow re-ask Jev once with it (v3)
+      `${MARKETS[w.market].coinbase ? base.replace(".v2", ".v3") : base}.${w.market}.${w.tf}m`;
 function readCache(w: Where): Record<string, JevAnswer> {
   try {
-    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v2", w)) ?? "{}");
+    return JSON.parse(
+      localStorage.getItem(tfKey("gold.jevcheck.v2", w)) ?? "{}",
+    );
   } catch {
     return {};
   }
@@ -132,7 +194,9 @@ function writeCache(c: Record<string, JevAnswer>, w: Where) {
 
 function readFlipCache(w: Where): Record<string, number> {
   try {
-    return JSON.parse(localStorage.getItem(tfKey("gold.flipcheck.v1", w)) ?? "{}");
+    return JSON.parse(
+      localStorage.getItem(tfKey("gold.flipcheck.v1", w)) ?? "{}",
+    );
   } catch {
     return {};
   }
@@ -140,21 +204,54 @@ function readFlipCache(w: Where): Record<string, number> {
 function writeFlipCache(c: Record<string, number>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
-    localStorage.setItem(tfKey("gold.flipcheck.v1", w), JSON.stringify(Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]]))));
+    localStorage.setItem(
+      tfKey("gold.flipcheck.v1", w),
+      JSON.stringify(
+        Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]])),
+      ),
+    );
   } catch {
     // fine: fetched again next visit
   }
 }
 
-const REFINE_START: RefineView = { pNow: null, past: null, live: { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } }, learned: null, updates: 0 };
-const FLIP_START = { status: "starting…", pFlip: null, pMath: null, at: null, backfill: null, live: null, weights: null, calls: 0 };
-const FORECAST_START: ForecastView = { status: "waiting for history…", candles: null, source: null, endsHigherPct: null, pickedPct: null, replay: null, live: null, calls: 0 };
+const REFINE_START: RefineView = {
+  pNow: null,
+  past: null,
+  live: { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } },
+  learned: null,
+  updates: 0,
+};
+const FLIP_START = {
+  status: "starting…",
+  pFlip: null,
+  pMath: null,
+  at: null,
+  backfill: null,
+  live: null,
+  weights: null,
+  calls: 0,
+};
+const FORECAST_START: ForecastView = {
+  status: "waiting for history…",
+  candles: null,
+  source: null,
+  endsHigherPct: null,
+  pickedPct: null,
+  replay: null,
+  live: null,
+  calls: 0,
+};
 
 /**
  * Everything on the /gold page for one timeframe. Switching timeframe starts over (fresh history, model, Jev
  * checks). `forecastOn` only controls whether Jev is asked to pick the forecast path (the typical path is free).
  */
-export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): GoldState {
+export function useGold(
+  market: Market,
+  tfMin: Timeframe,
+  forecastOn: boolean,
+): GoldState {
   const forecastOnRef = useRef(forecastOn);
   const kickForecast = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -181,6 +278,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     forecast: FORECAST_START,
     refine: REFINE_START,
     blocked: null,
+    flow: { on: false, status: "", footprints: new Map(), version: 0 },
     version: 0,
   });
 
@@ -188,7 +286,9 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     let cancelled = false;
     const TF_SECONDS = tfMin * 60;
     const where: Where = { market, tf: tfMin };
-    let feed: Feed = backendConfigured() ? new LiveFeed(market, tfMin) : new SimFeed(market, tfMin);
+    let feed: Feed = backendConfigured()
+      ? new LiveFeed(market, tfMin)
+      : new SimFeed(market, tfMin);
     let predictor = new Predictor(TF_SECONDS);
     setState((s) => ({
       ...s,
@@ -207,6 +307,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       forecast: FORECAST_START,
       refine: REFINE_START,
       blocked: null,
+      flow: { on: false, status: "", footprints: new Map(), version: 0 },
       version: s.version + 1,
     }));
     let bars: ClosedBar[] = [];
@@ -218,12 +319,20 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     const refinedByTime = new Map<number, number>();
     const learned = new Set<number>();
     const liveTally = { raw: { right: 0, n: 0 }, fixed: { right: 0, n: 0 } };
-    const setRefine = (patch: Partial<RefineView>) => !cancelled && setState((s) => ({ ...s, refine: { ...s.refine, ...patch } }));
+    const setRefine = (patch: Partial<RefineView>) =>
+      !cancelled &&
+      setState((s) => ({ ...s, refine: { ...s.refine, ...patch } }));
     const arrowFrom = (map: Map<number, number>, c: Candle): Outcome | null => {
       const p = map.get(c.time);
       if (p === undefined) return null;
       const call: -1 | 0 | 1 = p > 0.5 ? 1 : p < 0.5 ? -1 : 0;
-      return { call, hit: call === 0 || c.close === c.open ? null : (call === 1) === c.close > c.open };
+      return {
+        call,
+        hit:
+          call === 0 || c.close === c.open
+            ? null
+            : (call === 1) === c.close > c.open,
+      };
     };
     const jevOutcome = (c: Candle) => arrowFrom(jevByTime, c);
     const refinedOutcome = (c: Candle) => arrowFrom(refinedByTime, c);
@@ -242,8 +351,10 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     let stop: (() => void) | null = null;
     let jevReady = false; // backend supports the check AND the backfill has run
     let jevCalls = 0;
-    const set = (patch: Partial<GoldState>) => !cancelled && setState((s) => ({ ...s, ...patch }));
-    const setJev = (patch: Partial<GoldState["jev"]>) => !cancelled && setState((s) => ({ ...s, jev: { ...s.jev, ...patch } }));
+    const set = (patch: Partial<GoldState>) =>
+      !cancelled && setState((s) => ({ ...s, ...patch }));
+    const setJev = (patch: Partial<GoldState["jev"]>) =>
+      !cancelled && setState((s) => ({ ...s, jev: { ...s.jev, ...patch } }));
 
     /** Train a fresh predictor walk-forward over `history`. Returns the predictions it made, by candle time. */
     const train = (history: Candle[]) => {
@@ -271,18 +382,156 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     const loadVolume = async (from: number, to: number) => {
       if (!volumeOn()) return;
       try {
-        const v = await withTimeout(fetchVolume(market, tfMin, from, to), 15_000);
+        const v = await withTimeout(
+          fetchVolume(market, tfMin, from, to),
+          15_000,
+        );
         for (const [t, x] of v) volumes.set(t, x);
       } catch {
         // context goes without volume this time
       }
     };
+    // ── Order flow: Coinbase trades → footprints per candle ──
+    const product = MARKETS[market].coinbase;
+    const flowKey = `gold.flow.v1.${product}.${tfMin}m`;
+    const footprints = new Map<number, Footprint>();
+    let flowStep: number | null = null;
+    let flowReady = false; // history loaded far enough back for Jev to use it
+    let liveSince: number | null = null; // time of the first live trade: history only adds trades before it
+    let stopTrades: (() => void) | null = null;
+    let flowDirty = false;
+    const flowOn = () =>
+      !!product && feed instanceof LiveFeed && features.includes("trades");
+    const setFlow = (patch: Partial<GoldState["flow"]>) =>
+      !cancelled && setState((s) => ({ ...s, flow: { ...s.flow, ...patch } }));
+    const addToFootprint = (t: Trade) => {
+      if (!flowStep) return;
+      const time = Math.floor(t.t / TF_SECONDS) * TF_SECONDS;
+      let fp = footprints.get(time);
+      if (!fp) footprints.set(time, (fp = emptyFootprint(time, flowStep)));
+      addTrade(fp, t.p, t.s, t.buy);
+      flowDirty = true;
+    };
+    /** Live trades, then history back to the backfill window (cached in the browser between visits). */
+    const startFlow = async (history: Candle[]) => {
+      if (!flowOn() || !product) return;
+      const saved = loadFootprints(flowKey);
+      flowStep = saved?.step ?? niceStep(predictor.atr ?? 0);
+      if (saved) for (const [t, f] of saved.fps) footprints.set(t, f);
+      setFlow({
+        on: true,
+        status: "connecting to Coinbase trades…",
+        footprints,
+      });
+      stopTrades = coinbaseTrades(
+        product,
+        (t) => {
+          if (liveSince === null) liveSince = t.t;
+          if (t.t >= liveSince) addToFootprint(t);
+        },
+        (ok, why) => setFlow({ status: ok ? "live" : (why ?? "disconnected") }),
+      );
+      // Wait briefly for the first live trade so history and live don't overlap.
+      for (let i = 0; i < 40 && liveSince === null && !cancelled; i++)
+        await new Promise((r) => setTimeout(r, 250));
+      const until = liveSince ?? Date.now() / 1000;
+      if (liveSince === null) liveSince = until;
+      const want = history[Math.max(0, history.length - BACKFILL - 25)].time;
+      // Only page back to the newest saved candle (saved ones are complete).
+      const savedTimes = [...footprints.keys()]
+        .filter((t) => t < until - TF_SECONDS && t >= want)
+        .sort((a, b) => a - b);
+      let contiguous = want;
+      for (const t of savedTimes)
+        if (t === contiguous) contiguous += TF_SECONDS;
+      const from = contiguous;
+      // Candles we're about to rebuild start empty (drop any partial ones).
+      for (const t of [...footprints.keys()])
+        if (t >= from && t < until) footprints.delete(t);
+      setFlow({ status: "loading trade history…" });
+      try {
+        const ok = await loadTradeHistory(
+          (after) => withTimeout(fetchTradesPage(market, after), 30_000),
+          from,
+          until,
+          addToFootprint,
+          (done, total) =>
+            done % 10 === 0 &&
+            setFlow({
+              status: `loading trade history: ${done} of ~${total} pages`,
+            }),
+        );
+        if (cancelled) return;
+        flowReady = ok;
+        saveFootprints(
+          flowKey,
+          flowStep,
+          new Map(
+            [...footprints].filter(
+              ([t]) =>
+                t < Math.floor(Date.now() / 1000 / TF_SECONDS) * TF_SECONDS,
+            ),
+          ),
+        );
+        setFlow({
+          status: ok
+            ? "live"
+            : "too many trades to load history; footprints build from now on",
+          footprints,
+          version: Date.now(),
+        });
+      } catch (e) {
+        setFlow({
+          status: `couldn't load trade history (${(e as Error).message}); footprints build from now on`,
+        });
+      }
+    };
+    const flowTimer = window.setInterval(() => {
+      if (flowDirty) {
+        flowDirty = false;
+        setFlow({ version: Date.now() });
+      }
+    }, 1000);
+    /** Model signals + trend + order-flow inputs for "Jev refined". */
+    const refineX = (forTime: number) => {
+      const x = predictor.featuresFor(forTime);
+      if (!x) return undefined;
+      return flowReady
+        ? [...x, ...flowInputs(footprints, forTime, TF_SECONDS)]
+        : x;
+    };
+
     /** The snapshot plus market context, using only candles closed before `forTime`. */
     const withContext = (snap: unknown, forTime: number, closed: Candle[]) => {
       const s = snap as { data: Record<string, unknown>; model: unknown };
       const atrs = atrByTime(closed.slice(Math.max(0, closed.length - 700)));
-      const ctx = marketContext({ closed, forTime, tfSeconds: TF_SECONDS, atr: atrs.get(forTime - TF_SECONDS) ?? null, market, volume: volumeOn() ? volumes : undefined });
-      return ctx ? { ...s, data: { ...s.data, ...ctx } } : s;
+      const ctx = marketContext({
+        closed,
+        forTime,
+        tfSeconds: TF_SECONDS,
+        atr: atrs.get(forTime - TF_SECONDS) ?? null,
+        market,
+        volume: volumeOn() ? volumes : undefined,
+      });
+      const flow = flowReady
+        ? flowContext(
+            closed,
+            footprints,
+            forTime,
+            TF_SECONDS,
+            atrs.get(forTime - TF_SECONDS) ?? null,
+          )
+        : null;
+      return ctx || flow
+        ? {
+            ...s,
+            data: {
+              ...s.data,
+              ...(ctx ?? {}),
+              ...(flow ? { order_flow: flow } : {}),
+            },
+          }
+        : s;
     };
 
     /** Ask Jev about the pending candle and fold its answers in. */
@@ -292,15 +541,28 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       if (!snap) return;
       setJev({ status: "checking this candle…" });
       try {
-        if (volumeOn()) await loadVolume(pred.forTime - 30 * TF_SECONDS, pred.forTime);
-        const a = await withTimeout(askCheck(withContext(snap, pred.forTime, poolHistory), pred.forTime, tfMin, market), 20_000);
+        if (volumeOn())
+          await loadVolume(pred.forTime - 30 * TF_SECONDS, pred.forTime);
+        const a = await withTimeout(
+          askCheck(
+            withContext(snap, pred.forTime, poolHistory),
+            pred.forTime,
+            tfMin,
+            market,
+          ),
+          20_000,
+        );
         jevCalls += a.support === null ? 1 : 2;
         jevByTime.set(pred.forTime, a.pGreen);
-        const pRef = fixer.predict(a.pGreen, predictor.featuresFor(pred.forTime));
+        const pRef = fixer.predict(a.pGreen, refineX(pred.forTime));
         refinedByTime.set(pred.forTime, pRef);
         setRefine({ pNow: pRef });
-        const updated = predictor.applyJev({ pGreen: a.pGreen, support: a.support });
-        if (updated) set({ prediction: updated, trust: predictor.summary().trust });
+        const updated = predictor.applyJev({
+          pGreen: a.pGreen,
+          support: a.support,
+        });
+        if (updated)
+          set({ prediction: updated, trust: predictor.summary().trust });
         setJev({ status: "ok", calls: jevCalls });
       } catch (e) {
         setJev({ status: `error: ${(e as Error).message}` });
@@ -308,9 +570,17 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     };
 
     /** Check Jev on the latest ~200 past candles before trusting it live. */
-    const runBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
+    const runBackfill = async (
+      preds: Map<number, Prediction>,
+      history: Candle[],
+    ) => {
       const cache = readCache(where);
-      const targets = history.slice(-BACKFILL).filter((c) => preds.get(c.time)?.pModel != null && predictor.snapshotFor(c.time));
+      const targets = history
+        .slice(-BACKFILL)
+        .filter(
+          (c) =>
+            preds.get(c.time)?.pModel != null && predictor.snapshotFor(c.time),
+        );
       const answers = new Map<number, JevAnswer>();
       let done = 0;
       const worker = async (list: Candle[]) => {
@@ -320,7 +590,15 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
           if (cachedA) answers.set(c.time, cachedA);
           else {
             try {
-              const a = await withTimeout(askCheck(withContext(predictor.snapshotFor(c.time), c.time, history), c.time, tfMin, market), 30_000);
+              const a = await withTimeout(
+                askCheck(
+                  withContext(predictor.snapshotFor(c.time), c.time, history),
+                  c.time,
+                  tfMin,
+                  market,
+                ),
+                30_000,
+              );
               const ans = { pGreen: a.pGreen, support: a.support };
               answers.set(c.time, ans);
               cache[String(c.time)] = ans;
@@ -330,11 +608,17 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
             }
           }
           done += 1;
-          if (done % 10 === 0) setJev({ status: `checking Jev on past candles: ${done} of ${targets.length}`, calls: jevCalls });
+          if (done % 10 === 0)
+            setJev({
+              status: `checking Jev on past candles: ${done} of ${targets.length}`,
+              calls: jevCalls,
+            });
         }
       };
       // 6 at a time
-      const lanes = Array.from({ length: 6 }, (_, k) => targets.filter((_, i) => i % 6 === k));
+      const lanes = Array.from({ length: 6 }, (_, k) =>
+        targets.filter((_, i) => i % 6 === k),
+      );
       await Promise.all(lanes.map(worker));
       writeCache(cache, where);
       // Replay the correction on these candles in time order: each refined read is made before that candle's
@@ -344,10 +628,11 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
         const a = answers.get(c.time);
         if (!a) continue;
         jevByTime.set(c.time, a.pGreen);
-        const x = predictor.featuresFor(c.time);
+        const x = refineX(c.time);
         const pRef = fixer.predict(a.pGreen, x);
         refinedByTime.set(c.time, pRef);
-        const y: 0 | 1 | null = c.close > c.open ? 1 : c.close < c.open ? 0 : null;
+        const y: 0 | 1 | null =
+          c.close > c.open ? 1 : c.close < c.open ? 0 : null;
         scoreArrow(past.raw, a.pGreen, y);
         scoreArrow(past.fixed, pRef, y);
         if (y !== null && !learned.has(c.time)) {
@@ -359,12 +644,23 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       redrawJevArrows();
       const rows = targets
         .filter((c) => answers.has(c.time) && c.close !== c.open)
-        .map((c) => ({ pModel: preds.get(c.time)!.pModel!, jev: answers.get(c.time)!, y: (c.close > c.open ? 1 : 0) as 0 | 1 }));
+        .map((c) => ({
+          pModel: preds.get(c.time)!.pModel!,
+          jev: answers.get(c.time)!,
+          y: (c.close > c.open ? 1 : 0) as 0 | 1,
+        }));
       if (rows.length < 30) {
-        setJev({ status: "couldn't check Jev on enough past candles; using the model alone", calls: jevCalls });
+        setJev({
+          status:
+            "couldn't check Jev on enough past candles; using the model alone",
+          calls: jevCalls,
+        });
         return false;
       }
-      set({ backfill: predictor.backfill(rows), trust: predictor.summary().trust });
+      set({
+        backfill: predictor.backfill(rows),
+        trust: predictor.summary().trust,
+      });
       setJev({ status: "ok", calls: jevCalls });
       return true;
     };
@@ -376,22 +672,46 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     const blender = new FlipBlender();
     let flipReady = false;
     let flipCalls = 0;
-    let lastFlip: { forTime: number; move: number; pFlip: number; at: number } | null = null;
-    let halfwayFlip: { forTime: number; pMath: number; pJev: number; move: number } | null = null;
-    const setFlip = (patch: Partial<FlipView>) => !cancelled && setState((s) => ({ ...s, flip: { ...s.flip, ...patch } }));
+    let lastFlip: {
+      forTime: number;
+      move: number;
+      pFlip: number;
+      at: number;
+    } | null = null;
+    let halfwayFlip: {
+      forTime: number;
+      pMath: number;
+      pJev: number;
+      move: number;
+    } | null = null;
+    const setFlip = (patch: Partial<FlipView>) =>
+      !cancelled && setState((s) => ({ ...s, flip: { ...s.flip, ...patch } }));
 
     /** Live read: the math, blended with Jev's latest flip read when it is fresh (< 45 s old). */
     const computeLive = (c: Candle): Live | null => {
       const math = predictor.live(c, feed.now());
       if (!math) return null;
       const move = c.close - c.open;
-      const fresh = lastFlip && lastFlip.forTime === c.time && Date.now() - lastFlip.at < 10_000 && move !== 0;
+      const fresh =
+        lastFlip &&
+        lastFlip.forTime === c.time &&
+        Date.now() - lastFlip.at < 10_000 &&
+        move !== 0;
       if (!fresh) return { ...math, pMath: math.pGreen };
       const pJev = greenFromFlip(move, lastFlip!.pFlip);
       const pGreen = blender.blend(math.pGreen, pJev);
       // Keep one mid-candle sample per candle for scoring the flip check.
-      if (math.timeLeftFrac <= 0.5 && (!halfwayFlip || halfwayFlip.forTime !== c.time)) halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev, move };
-      return { ...math, pMath: math.pGreen, pGreen, call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0 };
+      if (
+        math.timeLeftFrac <= 0.5 &&
+        (!halfwayFlip || halfwayFlip.forTime !== c.time)
+      )
+        halfwayFlip = { forTime: c.time, pMath: math.pGreen, pJev, move };
+      return {
+        ...math,
+        pMath: math.pGreen,
+        pGreen,
+        call: pGreen >= 0.55 ? 1 : pGreen <= 0.45 ? -1 : 0,
+      };
     };
 
     /** Ask Jev about the forming candle (every FLIP_SECONDS; shared per slot by all viewers). */
@@ -405,13 +725,25 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const atr = predictor.atr;
       const sd = bodySd(bars.map((b) => b.candle));
       const edge = Math.min(30, TF_SECONDS * 0.1); // skip the very start and end of the candle
-      if (secondsLeft < edge || secondsLeft > TF_SECONDS - edge || !atr || !sd) return;
-      const state = flipState({ forming: c, secondsLeft, tfSeconds: TF_SECONDS, atr, sd, previous: bars.slice(-3).map((b) => b.candle) });
+      if (secondsLeft < edge || secondsLeft > TF_SECONDS - edge || !atr || !sd)
+        return;
+      const state = flipState({
+        forming: c,
+        secondsLeft,
+        tfSeconds: TF_SECONDS,
+        atr,
+        sd,
+        previous: bars.slice(-3).map((b) => b.candle),
+      });
       if (!state) return;
       // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
       // again (re-ask at least every 15 s, since the time left still matters).
       const shape = `${c.time}|${state.move_so_far}|${state.high_so_far}|${state.low_so_far}|${state.pulled_back_from_extreme}`;
-      if (lastAsked && lastAsked.key === shape && Date.now() - lastAsked.at < 15_000) {
+      if (
+        lastAsked &&
+        lastAsked.key === shape &&
+        Date.now() - lastAsked.at < 15_000
+      ) {
         if (lastFlip && lastFlip.forTime === c.time) {
           lastFlip.at = Date.now(); // same candle shape, so the last answer is still current
           setFlip({ at: lastFlip.at });
@@ -420,12 +752,32 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       }
       flipBusy = true;
       try {
-        const a = await withTimeout(askFlip(state, `${c.time}:${Math.floor(now / FLIP_SECONDS)}`, tfMin, market), 15_000);
+        const a = await withTimeout(
+          askFlip(
+            state,
+            `${c.time}:${Math.floor(now / FLIP_SECONDS)}`,
+            tfMin,
+            market,
+          ),
+          15_000,
+        );
         lastAsked = { key: shape, at: Date.now() };
         flipCalls += 1;
-        lastFlip = { forTime: c.time, move: c.close - c.open, pFlip: a.pFlip, at: Date.now() };
+        lastFlip = {
+          forTime: c.time,
+          move: c.close - c.open,
+          pFlip: a.pFlip,
+          at: Date.now(),
+        };
         const math = predictor.live(c, feed.now());
-        setFlip({ status: "ok", pFlip: a.pFlip, pMath: math?.pGreen ?? null, at: Date.now(), calls: flipCalls, weights: blender.weights });
+        setFlip({
+          status: "ok",
+          pFlip: a.pFlip,
+          pMath: math?.pGreen ?? null,
+          at: Date.now(),
+          calls: flipCalls,
+          weights: blender.weights,
+        });
         setState((s) => ({ ...s, live: computeLive(c) }));
       } catch (e) {
         setFlip({ status: `error: ${(e as Error).message}` });
@@ -435,24 +787,45 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     };
 
     /** Replay Jev's flip read on ~150 recent candles rebuilt partway through, before trusting it live. */
-    const flipBackfill = async (preds: Map<number, Prediction>, history: Candle[]) => {
-      if (!(feed instanceof LiveFeed)) return setFlip({ status: "needs live data" });
+    const flipBackfill = async (
+      preds: Map<number, Prediction>,
+      history: Candle[],
+    ) => {
+      if (!(feed instanceof LiveFeed))
+        return setFlip({ status: "needs live data" });
       if (tfMin === 1) {
         // A 1-minute candle can't be rebuilt partway through from 1-minute data, so there's nothing to replay:
         // Jev starts at half weight and is scored live only.
-        setFlip({ status: "ok", backfill: null, weights: blender.weights, calls: flipCalls });
+        setFlip({
+          status: "ok",
+          backfill: null,
+          weights: blender.weights,
+          calls: flipCalls,
+        });
         flipReady = true;
         return void flipTick();
       }
       setFlip({ status: "loading 1-minute history…" });
       const minutes = await feed.minuteHistory(3).catch(() => [] as Candle[]);
       const atrs = atrByTime(history);
-      const snaps = pastSnapshots(minutes, history, TF_SECONDS, (t) => atrs.get(t - TF_SECONDS) ?? null, (t) => preds.get(t)?.pFinal ?? 0.5, FLIP_BACKFILL);
-      if (snaps.length < 30) return setFlip({ status: "not enough 1-minute history to test the flip check yet" });
+      const snaps = pastSnapshots(
+        minutes,
+        history,
+        TF_SECONDS,
+        (t) => atrs.get(t - TF_SECONDS) ?? null,
+        (t) => preds.get(t)?.pFinal ?? 0.5,
+        FLIP_BACKFILL,
+      );
+      if (snaps.length < 30)
+        return setFlip({
+          status: "not enough 1-minute history to test the flip check yet",
+        });
       const cache = readFlipCache(where);
       const rows: FlipRow[] = [];
       let done = 0;
-      const lanes = Array.from({ length: 6 }, (_, k) => snaps.filter((_, i) => i % 6 === k));
+      const lanes = Array.from({ length: 6 }, (_, k) =>
+        snaps.filter((_, i) => i % 6 === k),
+      );
       const answers = new Map<number, number>();
       await Promise.all(
         lanes.map(async (list) => {
@@ -461,7 +834,12 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
             let pFlip = cache[String(sn.time)];
             if (pFlip === undefined) {
               try {
-                pFlip = (await withTimeout(askFlip(sn.state, `past:${sn.time}`, tfMin, market), 30_000)).pFlip;
+                pFlip = (
+                  await withTimeout(
+                    askFlip(sn.state, `past:${sn.time}`, tfMin, market),
+                    30_000,
+                  )
+                ).pFlip;
                 cache[String(sn.time)] = pFlip;
                 flipCalls += 1;
               } catch {
@@ -469,17 +847,35 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
               }
             }
             answers.set(sn.time, pFlip);
-            if (++done % 10 === 0) setFlip({ status: `testing Jev's flip read on past candles: ${done} of ${snaps.length}`, calls: flipCalls });
+            if (++done % 10 === 0)
+              setFlip({
+                status: `testing Jev's flip read on past candles: ${done} of ${snaps.length}`,
+                calls: flipCalls,
+              });
           }
         }),
       );
       writeFlipCache(cache, where);
       for (const sn of snaps) {
         const pf = answers.get(sn.time);
-        if (pf !== undefined) rows.push({ pMath: sn.pMath, pJev: greenFromFlip(sn.move, pf), move: sn.move, y: sn.y });
+        if (pf !== undefined)
+          rows.push({
+            pMath: sn.pMath,
+            pJev: greenFromFlip(sn.move, pf),
+            move: sn.move,
+            y: sn.y,
+          });
       }
-      if (rows.length < 30) return setFlip({ status: "couldn't test the flip check on enough past candles" });
-      setFlip({ status: "ok", backfill: blender.backfill(rows), weights: blender.weights, calls: flipCalls });
+      if (rows.length < 30)
+        return setFlip({
+          status: "couldn't test the flip check on enough past candles",
+        });
+      setFlip({
+        status: "ok",
+        backfill: blender.backfill(rows),
+        weights: blender.weights,
+        calls: flipCalls,
+      });
       flipReady = true;
       void flipTick();
     };
@@ -490,14 +886,41 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     let features: string[] = [];
     let forecastCalls = 0;
     const tallies = { jev: new PathTally(), typical: new PathTally() };
-    let pending: { startTime: number; startPrice: number; typical: Path; jev: Path | null }[] = [];
-    let shown: { startTime: number; startPrice: number; atr: number; paths: Path[]; options: Record<string, string> } | null = null;
-    const setForecast = (patch: Partial<ForecastView>) => !cancelled && setState((s) => ({ ...s, forecast: { ...s.forecast, ...patch } }));
+    let pending: {
+      startTime: number;
+      startPrice: number;
+      typical: Path;
+      jev: Path | null;
+    }[] = [];
+    let shown: {
+      startTime: number;
+      startPrice: number;
+      atr: number;
+      paths: Path[];
+      options: Record<string, string>;
+    } | null = null;
+    const setForecast = (patch: Partial<ForecastView>) =>
+      !cancelled &&
+      setState((s) => ({ ...s, forecast: { ...s.forecast, ...patch } }));
     const jevCanPick = () => feed.jev && features.includes("jev-forecast");
 
-    const draw = (p: Path, source: "jev" | "typical", pickedPct: number | null) => {
+    const draw = (
+      p: Path,
+      source: "jev" | "typical",
+      pickedPct: number | null,
+    ) => {
       if (!shown) return;
-      setForecast({ candles: toCandles(p, shown.startTime, shown.startPrice, shown.atr, TF_SECONDS), source, pickedPct });
+      setForecast({
+        candles: toCandles(
+          p,
+          shown.startTime,
+          shown.startPrice,
+          shown.atr,
+          TF_SECONDS,
+        ),
+        source,
+        pickedPct,
+      });
     };
 
     /** Ask Jev once per candle which path is most likely (only while the forecast is switched on). */
@@ -510,7 +933,10 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       if (!snap) return;
       setForecast({ status: "Jev is picking the most likely path…" });
       try {
-        const a = await withTimeout(askForecast(snap.data, f.options, f.startTime, tfMin, market), 30_000);
+        const a = await withTimeout(
+          askForecast(snap.data, f.options, f.startTime, tfMin, market),
+          30_000,
+        );
         forecastCalls += 1;
         const pick = f.paths.find((p) => p.id === a.choice);
         if (!pick) throw new Error("unknown pick");
@@ -518,7 +944,10 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
         if (shown === f) draw(pick, "jev", a.probabilities[a.choice] ?? null);
         setForecast({ status: "ok", calls: forecastCalls });
       } catch (e) {
-        setForecast({ status: `Jev couldn't pick (${(e as Error).message}); showing the most typical path`, calls: forecastCalls });
+        setForecast({
+          status: `Jev couldn't pick (${(e as Error).message}); showing the most typical path`,
+          calls: forecastCalls,
+        });
       }
     };
     kickForecast.current = () => void pickWithJev();
@@ -527,7 +956,8 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     const makeForecast = () => {
       const set = pool?.paths();
       const last = poolHistory[poolHistory.length - 1];
-      if (!set || !last) return setForecast({ status: "not enough history for a forecast yet" });
+      if (!set || !last)
+        return setForecast({ status: "not enough history for a forecast yet" });
       shown = {
         startTime: last.time + TF_SECONDS,
         startPrice: last.close,
@@ -535,12 +965,23 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
         paths: set.paths,
         options: Object.fromEntries(set.paths.map((p) => [p.id, label(p)])),
       };
-      pending.push({ startTime: shown.startTime, startPrice: shown.startPrice, typical: set.typical, jev: null });
+      pending.push({
+        startTime: shown.startTime,
+        startPrice: shown.startPrice,
+        typical: set.typical,
+        jev: null,
+      });
       if (pending.length > 20) pending.shift();
       draw(set.typical, "typical", null);
       setForecast({
         endsHigherPct: set.endsHigherPct,
-        status: jevCanPick() ? (forecastOnRef.current ? "ok" : "Jev picks when the forecast is on") : feed.jev ? "waiting for the new backend" : "ok",
+        status: jevCanPick()
+          ? forecastOnRef.current
+            ? "ok"
+            : "Jev picks when the forecast is on"
+          : feed.jev
+            ? "waiting for the new backend"
+            : "ok",
       });
       void pickWithJev();
     };
@@ -549,12 +990,22 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     const scoreForecasts = () => {
       pending = pending.filter((p) => {
         const after: Candle[] = [];
-        for (let k = poolHistory.length - 1; k >= 0 && poolHistory[k].time >= p.startTime; k--) after.unshift(poolHistory[k]);
+        for (
+          let k = poolHistory.length - 1;
+          k >= 0 && poolHistory[k].time >= p.startTime;
+          k--
+        )
+          after.unshift(poolHistory[k]);
         if (after.length < HORIZON) return true;
         const actual = after.slice(0, HORIZON);
         tallies.typical.add(scorePath(p.typical, actual, p.startPrice));
         if (p.jev) tallies.jev.add(scorePath(p.jev, actual, p.startPrice));
-        setForecast({ live: { jev: tallies.jev.summary(), typical: tallies.typical.summary() } });
+        setForecast({
+          live: {
+            jev: tallies.jev.summary(),
+            typical: tallies.typical.summary(),
+          },
+        });
         return false;
       });
     };
@@ -564,9 +1015,20 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       poolHistory = [...history];
       pool = new AnalogPool(poolHistory, TF_SECONDS);
       const replay = new PathTally();
-      for (let i = Math.max(60, poolHistory.length - 200 - HORIZON); i < poolHistory.length - HORIZON; i++) {
+      for (
+        let i = Math.max(60, poolHistory.length - 200 - HORIZON);
+        i < poolHistory.length - HORIZON;
+        i++
+      ) {
         const set = pool.paths(i);
-        if (set) replay.add(scorePath(set.typical, poolHistory.slice(i + 1, i + 1 + HORIZON), poolHistory[i].close));
+        if (set)
+          replay.add(
+            scorePath(
+              set.typical,
+              poolHistory.slice(i + 1, i + 1 + HORIZON),
+              poolHistory[i].close,
+            ),
+          );
       }
       setForecast({ replay: replay.summary() });
       makeForecast();
@@ -595,33 +1057,58 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
 
     /** Once training is final: check Jev on recent past candles, then use it live. Runs outside the candle queue. */
     const hookJev = async (t: ReturnType<typeof train>, history: Candle[]) => {
-      if (!feed.jev) return setJev({ on: false, status: "off (no TypeSafe key on the backend)" });
+      if (!feed.jev)
+        return setJev({
+          on: false,
+          status: "off (no TypeSafe key on the backend)",
+        });
       setJev({ on: true });
       const v = await backendVersion().catch(() => null);
       features = v?.features ?? [];
       void pickWithJev();
       if (!v || !v.features.includes("jev-check")) {
-        return setJev({ status: "waiting for the new backend: ask Lovable to “Deploy the gold edge function”" });
+        return setJev({
+          status:
+            "waiting for the new backend: ask Lovable to “Deploy the gold edge function”",
+        });
       }
       if (volumeOn() && history.length > BACKFILL + 40) {
         setJev({ status: "loading bitcoin volume…" });
-        await loadVolume(history[history.length - BACKFILL - 40].time, history[history.length - 1].time + TF_SECONDS);
+        await loadVolume(
+          history[history.length - BACKFILL - 40].time,
+          history[history.length - 1].time + TF_SECONDS,
+        );
       }
+      if (flowOn()) await startFlow(history);
       jevReady = await runBackfill(t.preds, history);
       if (jevReady && current) await consult(current);
       if (v.features.includes("jev-flip")) await flipBackfill(t.preds, history);
-      else setFlip({ status: "waiting for the new backend: ask Lovable to “Deploy the gold edge function”" });
+      else
+        setFlip({
+          status:
+            "waiting for the new backend: ask Lovable to “Deploy the gold edge function”",
+        });
     };
 
     const onClose = async (c: Candle) => {
       if (halfwayFlip && halfwayFlip.forTime === c.time && c.close !== c.open) {
-        setFlip({ live: blender.recordLive({ ...halfwayFlip, y: c.close > c.open ? 1 : 0 }), weights: blender.weights });
+        setFlip({
+          live: blender.recordLive({
+            ...halfwayFlip,
+            y: c.close > c.open ? 1 : 0,
+          }),
+          weights: blender.weights,
+        });
         halfwayFlip = null;
       }
       lastFlip = null;
       setFlip({ pFlip: null, at: null });
       const { next } = predictor.close(c);
-      if (!poolHistory.length || c.time > poolHistory[poolHistory.length - 1].time) {
+      if (flowStep && flowReady) saveFootprints(flowKey, flowStep, new Map([...footprints].filter(([t]) => t <= c.time)));
+      if (
+        !poolHistory.length ||
+        c.time > poolHistory[poolHistory.length - 1].time
+      ) {
         poolHistory.push(c);
         pool = new AnalogPool(poolHistory, TF_SECONDS);
         scoreForecasts();
@@ -631,19 +1118,31 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const pJ = jevByTime.get(c.time);
       const pR = refinedByTime.get(c.time);
       if (pJ !== undefined && pR !== undefined && !learned.has(c.time)) {
-        const y: 0 | 1 | null = c.close > c.open ? 1 : c.close < c.open ? 0 : null;
+        const y: 0 | 1 | null =
+          c.close > c.open ? 1 : c.close < c.open ? 0 : null;
         scoreArrow(liveTally.raw, pJ, y);
         scoreArrow(liveTally.fixed, pR, y);
-        if (y !== null) fixer.update(pJ, predictor.featuresFor(c.time), y);
+        if (y !== null) fixer.update(pJ, refineX(c.time), y);
         learned.add(c.time);
-        setRefine({ live: { raw: { ...liveTally.raw }, fixed: { ...liveTally.fixed } }, learned: fixer.summary(), updates: fixer.updates });
+        setRefine({
+          live: { raw: { ...liveTally.raw }, fixed: { ...liveTally.fixed } },
+          learned: fixer.summary(),
+          updates: fixer.updates,
+        });
       }
       setRefine({ pNow: null });
       bars.push(barFor(c));
       if (bars.length > MAX_BARS) bars.shift();
       current = next;
       lastForming = null;
-      setState((s) => ({ ...s, bars: [...bars], forming: null, prediction: next, live: null, liveRecord: liveRecord() }));
+      setState((s) => ({
+        ...s,
+        bars: [...bars],
+        forming: null,
+        prediction: next,
+        live: null,
+        liveRecord: liveRecord(),
+      }));
       setState((s) => ({ ...s, version: s.version + 1 }));
       await consult(next);
     };
@@ -668,7 +1167,9 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       } catch (e) {
         feed = new SimFeed(market, tfMin);
         history = await feed.history();
-        set({ error: `Live data unavailable (${(e as Error).message}). Showing simulated gold.` });
+        set({
+          error: `Live data unavailable (${(e as Error).message}). Showing simulated gold.`,
+        });
       }
       if (cancelled) return;
       set({ source: feed.name });
@@ -683,10 +1184,14 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
           .catch(() => [] as Candle[])
           .then((deep) => {
             if (cancelled) return;
-            if (deep.length <= history.length) return void hookJev(first, history);
+            if (deep.length <= history.length)
+              return void hookJev(first, history);
             queue = queue.then(() => {
               const recent = bars.map((b) => b.candle);
-              const merged = [...deep.filter((c) => c.time < (recent[0]?.time ?? Infinity)), ...recent];
+              const merged = [
+                ...deep.filter((c) => c.time < (recent[0]?.time ?? Infinity)),
+                ...recent,
+              ];
               void hookJev(adopt(merged), merged);
             });
           });
@@ -700,18 +1205,39 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
           else {
             lastForming = c;
             const live = computeLive(c);
-            setState((s) => ({ ...s, forming: c, live, error: s.error?.startsWith("Live data hiccup") ? null : s.error }));
+            setState((s) => ({
+              ...s,
+              forming: c,
+              live,
+              error: s.error?.startsWith("Live data hiccup") ? null : s.error,
+            }));
           }
         },
         (msg) => set({ error: `Live data hiccup: ${msg}` }),
         (st) => {
-          setState((s) => ({ ...s, ticks: { ...st, check: st.state === "streaming" ? null : s.ticks.check } }));
+          setState((s) => ({
+            ...s,
+            ticks: {
+              ...st,
+              check: st.state === "streaming" ? null : s.ticks.check,
+            },
+          }));
           // First time ticks fall back: ask the backend to test the stream and name the exact problem.
-          if (st.state === "fallback" && !diagnosed && feed instanceof LiveFeed) {
+          if (
+            st.state === "fallback" &&
+            !diagnosed &&
+            feed instanceof LiveFeed
+          ) {
             diagnosed = true;
             void backendVersion()
-              .then((v) => (v?.features.includes("tickcheck") ? tickCheck(market) : null))
-              .then((check) => check && setState((s) => ({ ...s, ticks: { ...s.ticks, check } })))
+              .then((v) =>
+                v?.features.includes("tickcheck") ? tickCheck(market) : null,
+              )
+              .then(
+                (check) =>
+                  check &&
+                  setState((s) => ({ ...s, ticks: { ...s.ticks, check } })),
+              )
               .catch(() => {});
           }
         },
@@ -724,7 +1250,10 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       const live = computeLive(lastForming);
       setState((s) => ({ ...s, live }));
     }, 1000);
-    const flipClock = window.setInterval(() => void flipTick(), FLIP_SECONDS * 1000);
+    const flipClock = window.setInterval(
+      () => void flipTick(),
+      FLIP_SECONDS * 1000,
+    );
 
     return () => {
       cancelled = true;
@@ -732,6 +1261,8 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       window.clearInterval(flipClock);
       kickForecast.current = null;
       stop?.();
+      stopTrades?.();
+      window.clearInterval(flowTimer);
     };
   }, [market, tfMin]);
 
