@@ -599,6 +599,35 @@ async function tickStream(m: Market): Promise<Response> {
   return new Response(body, { headers: { ...cors, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" } });
 }
 
+// ── Bitcoin volume (Coinbase BTC-USD public candles; no key needed) ──
+// Pyth and BRTI carry no volume, so Jev's bitcoin context uses Coinbase's (a BRTI constituent exchange).
+
+const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD/candles";
+const volumeCache = new Map<string, { at: number; body: unknown }>();
+
+async function volume(from: number, to: number, granularity: number) {
+  const key = `${from}:${Math.floor(to / 30)}:${granularity}`;
+  const hit = cached<unknown>(volumeCache, key, 30_000);
+  if (hit) return hit;
+  const out: { time: number; volume: number }[] = [];
+  const step = granularity * 300; // Coinbase returns at most 300 candles per request
+  for (let a = from; a < to; a += step) {
+    const b = Math.min(to, a + step);
+    const q = new URLSearchParams({
+      granularity: String(granularity),
+      start: new Date(a * 1000).toISOString(),
+      end: new Date(b * 1000).toISOString(),
+    });
+    const res = await fetch(`${COINBASE}?${q}`, { headers: { Accept: "application/json", "User-Agent": "gold-chart/1.0" } });
+    if (!res.ok) throw new Error(`Coinbase ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    const rows: number[][] = await res.json();
+    for (const r of rows) out.push({ time: r[0], volume: r[5] });
+  }
+  const body = { volume: out.sort((p, q) => p.time - q.time) };
+  volumeCache.set(key, { at: Date.now(), body });
+  return body;
+}
+
 // ── Jev: its own call, and a fact-check of the model's call ───────────
 // Two requests in parallel so Jev's own call is made WITHOUT seeing the model (no anchoring); the fact-check
 // sees the same data plus the model's call. Cached per candle, so every viewer and the backfill share one answer.
@@ -628,7 +657,8 @@ async function check(m: Market, data: Record<string, unknown>, model: Record<str
     {
       type: "choice",
       instructions:
-        `Using only the candles and signals given, will the NEXT ${tf}-minute candle close above or below its open?`,
+        `Using the recent candles, signals, bigger trend, key levels (day/24h highs and lows, round numbers), volatility, ` +
+          `hourly and 4-hour candles and (if given) volume: will the NEXT ${tf}-minute candle close above or below its open?`,
       criteria: {
         green: "It closes above its open",
         red: "It closes below its open",
@@ -732,11 +762,21 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 12,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets"],
+        version: 13,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });
+    }
+
+    if (body.action === "volume") {
+      const { from, to, granularity } = body as { from?: unknown; to?: unknown; granularity?: unknown };
+      if (marketOf(body) !== "btc") return json({ volume: [] });
+      if (typeof from !== "number" || typeof to !== "number" || ![300, 900].includes(granularity as number)) {
+        return json({ error: "from, to and granularity (300 or 900) required" }, 400);
+      }
+      if (to <= from || to - from > (granularity as number) * 1500) return json({ error: "bad time range" }, 400);
+      return json(await volume(Math.floor(from), Math.floor(to), granularity as number));
     }
 
     if (body.action === "tickcheck") {
@@ -755,7 +795,7 @@ Deno.serve(async (req) => {
       if (!snapshot || typeof snapshot.data !== "object" || !snapshot.data || typeof snapshot.model !== "object" || !snapshot.model) {
         return json({ error: "bad snapshot" }, 400);
       }
-      if (JSON.stringify(snapshot).length > 6000) return json({ error: "snapshot too large" }, 400);
+      if (JSON.stringify(snapshot).length > 14000) return json({ error: "snapshot too large" }, 400);
       if (typeof forTime !== "number") return json({ error: "forTime must be a number" }, 400);
 
       const tf = tfOf(body);

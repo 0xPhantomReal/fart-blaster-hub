@@ -344,8 +344,9 @@ export default function Gold() {
             </p>
             {g.jev.on && (
               <p className={`mt-1 text-xs ${MUTED}`}>
-                Each candle, Jev makes its own call from the candles and signals (without seeing the model), and separately
-                fact-checks the model's call. {g.jev.calls} Jev calls this session
+                Each candle, Jev makes its own call (without seeing the model) from the recent candles and signals, the bigger trend,
+                key levels (day and 24h highs/lows, round numbers), volatility, hourly and 4-hour candles and, for bitcoin, Coinbase
+                volume. Separately, it fact-checks the model's call. {g.jev.calls} Jev calls this session
                 {g.trust ? ` · weight in the blend: Jev ${g.trust.jev.toFixed(2)}, model ${g.trust.model.toFixed(2)}` : ""}.
               </p>
             )}

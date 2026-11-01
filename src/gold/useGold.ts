@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import { Predictor, type JevAnswer, type Live, type Outcome, type Prediction, type TrackRecord } from "./predictor";
+import { marketContext } from "./context";
 import { JevFixer, scoreArrow, type FixSummary, type Tally } from "./jevfix";
 import { AnalogPool, HORIZON, label, scorePath, toCandles, PathTally, type Path, type PathRecord } from "./forecast";
 import { atrByTime, bodySd, FlipBlender, flipState, greenFromFlip, pastSnapshots, type FlipRecords, type FlipRow } from "./flip";
@@ -8,6 +9,7 @@ import {
   askCheck,
   askFlip,
   askForecast,
+  fetchVolume,
   backendConfigured,
   backendVersion,
   LiveFeed,
@@ -111,7 +113,7 @@ const tfKey = (base: string, w: Where) =>
   w.market === "gold" ? (w.tf === 15 ? base : `${base}.${w.tf}m`) : `${base}.${w.market}.${w.tf}m`;
 function readCache(w: Where): Record<string, JevAnswer> {
   try {
-    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v1", w)) ?? "{}");
+    return JSON.parse(localStorage.getItem(tfKey("gold.jevcheck.v2", w)) ?? "{}");
   } catch {
     return {};
   }
@@ -120,7 +122,7 @@ function writeCache(c: Record<string, JevAnswer>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
     const trimmed = Object.fromEntries(keys.slice(-600).map((k) => [k, c[k]]));
-    localStorage.setItem(tfKey("gold.jevcheck.v1", w), JSON.stringify(trimmed));
+    localStorage.setItem(tfKey("gold.jevcheck.v2", w), JSON.stringify(trimmed));
   } catch {
     // storage unavailable: answers are just fetched again next visit
   }
@@ -255,6 +257,26 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       return { model: s.model, jev: s.jev, final: s.final, halfway: s.halfway };
     };
 
+    // ── Extra context for Jev: levels, volatility, longer timeframes, bitcoin volume ──
+    const volumes = new Map<number, number>();
+    const volumeOn = () => market === "btc" && features.includes("volume");
+    const loadVolume = async (from: number, to: number) => {
+      if (!volumeOn()) return;
+      try {
+        const v = await withTimeout(fetchVolume(market, tfMin, from, to), 15_000);
+        for (const [t, x] of v) volumes.set(t, x);
+      } catch {
+        // context goes without volume this time
+      }
+    };
+    /** The snapshot plus market context, using only candles closed before `forTime`. */
+    const withContext = (snap: unknown, forTime: number, closed: Candle[]) => {
+      const s = snap as { data: Record<string, unknown>; model: unknown };
+      const atrs = atrByTime(closed.slice(Math.max(0, closed.length - 700)));
+      const ctx = marketContext({ closed, forTime, tfSeconds: TF_SECONDS, atr: atrs.get(forTime - TF_SECONDS) ?? null, market, volume: volumeOn() ? volumes : undefined });
+      return ctx ? { ...s, data: { ...s.data, ...ctx } } : s;
+    };
+
     /** Ask Jev about the pending candle and fold its answers in. */
     const consult = async (pred: Prediction) => {
       if (!jevReady) return;
@@ -262,7 +284,8 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       if (!snap) return;
       setJev({ status: "checking this candle…" });
       try {
-        const a = await withTimeout(askCheck(snap, pred.forTime, tfMin, market), 20_000);
+        if (volumeOn()) await loadVolume(pred.forTime - 30 * TF_SECONDS, pred.forTime);
+        const a = await withTimeout(askCheck(withContext(snap, pred.forTime, poolHistory), pred.forTime, tfMin, market), 20_000);
         jevCalls += a.support === null ? 1 : 2;
         jevByTime.set(pred.forTime, a.pGreen);
         const pRef = fixer.predict(a.pGreen, predictor.featuresFor(pred.forTime));
@@ -289,7 +312,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
           if (cachedA) answers.set(c.time, cachedA);
           else {
             try {
-              const a = await withTimeout(askCheck(predictor.snapshotFor(c.time), c.time, tfMin, market), 30_000);
+              const a = await withTimeout(askCheck(withContext(predictor.snapshotFor(c.time), c.time, history), c.time, tfMin, market), 30_000);
               const ans = { pGreen: a.pGreen, support: a.support };
               answers.set(c.time, ans);
               cache[String(c.time)] = ans;
@@ -571,6 +594,10 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
       void pickWithJev();
       if (!v || !v.features.includes("jev-check")) {
         return setJev({ status: "waiting for the new backend: ask Lovable to “Deploy the gold edge function”" });
+      }
+      if (volumeOn() && history.length > BACKFILL + 40) {
+        setJev({ status: "loading bitcoin volume…" });
+        await loadVolume(history[history.length - BACKFILL - 40].time, history[history.length - 1].time + TF_SECONDS);
       }
       jevReady = await runBackfill(t.preds, history);
       if (jevReady && current) await consult(current);

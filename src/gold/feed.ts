@@ -327,6 +327,12 @@ export async function askCheck(snapshot: unknown, forTime: number, timeframeMin:
   return callFn<CheckResult>({ action: "check", snapshot, forTime, timeframeMin, market });
 }
 
+/** Bitcoin volume per candle (Coinbase BTC-USD), for Jev's context. */
+export async function fetchVolume(market: Market, tfMin: number, from: number, to: number): Promise<Map<number, number>> {
+  const r = await callFn<{ volume: { time: number; volume: number }[] }>({ action: "volume", market, from, to, granularity: tfMin * 60 });
+  return new Map(r.volume.map((v) => [v.time, v.volume]));
+}
+
 /** Jev picks the most likely of the forecast paths (`options`: id → compact text). One answer per candle, shared. */
 export async function askForecast(
   data: unknown,
