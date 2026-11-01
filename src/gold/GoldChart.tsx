@@ -20,8 +20,10 @@ const COLORS = { bg: "#0e1116", line: "#262c36", muted: "#8b949e", green: "#26a6
 const toBar = (c: Candle) => ({ time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close });
 
 /** An arrow on each candle a call was made for: colored if right, gray if wrong. */
-function markerFor(b: ClosedBar, mode: "jev" | "refined"): SeriesMarker<Time>[] {
+function markerFor(b: ClosedBar, mode: "jev" | "refined", minConf: number): SeriesMarker<Time>[] {
   const o = mode === "refined" ? b.refined : b.outcome;
+  const p = mode === "refined" ? b.pRef : b.pJev;
+  if (p === undefined || Math.max(p, 1 - p) < minConf) return []; // not confident enough to show
   if (!o || o.call === 0) return [];
   const up = o.call === 1;
   return [
@@ -41,7 +43,9 @@ export function GoldChart({
   version,
   forecast,
   arrows = "jev",
+  minConf = 0.5,
 }: {
+  minConf?: number; // only draw arrows at least this sure (0.5 = every call)
   arrows?: "jev" | "refined";
   bars: ClosedBar[];
   forming: Candle | null;
@@ -113,17 +117,17 @@ export function GoldChart({
   }, []);
 
   useEffect(() => {
-    const key = `${version}:${arrows}`;
+    const key = `${version}:${arrows}:${minConf}`;
     if (!candles.current || drawn.current === key || !bars.length) return;
     drawn.current = key;
     candles.current.setData(bars.map((b) => toBar(b.candle)));
-    markers.current?.setMarkers(bars.flatMap((b) => markerFor(b, arrows)));
+    markers.current?.setMarkers(bars.flatMap((b) => markerFor(b, arrows, minConf)));
     if (!zoomed.current && chart.current) {
       zoomed.current = true;
       const show = window.innerWidth < 640 ? 40 : 100;
       chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - show), to: bars.length + 3 });
     }
-  }, [bars, version, arrows]);
+  }, [bars, version, arrows, minConf]);
 
   useEffect(() => {
     if (!ghosts.current) return;

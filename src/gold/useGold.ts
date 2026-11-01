@@ -57,6 +57,8 @@ export interface ClosedBar {
   candle: Candle;
   outcome: Outcome | null; //  Jev's own call (arrow)
   refined: Outcome | null; //  "Jev refined" call (arrow)
+  pJev?: number; //            Jev's chance of green for this candle
+  pRef?: number; //            refined chance of green
 }
 
 /** Jev refined: Jev's chance of green after the correction learned from its own record. */
@@ -225,7 +227,13 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
     };
     const jevOutcome = (c: Candle) => arrowFrom(jevByTime, c);
     const refinedOutcome = (c: Candle) => arrowFrom(refinedByTime, c);
-    const barFor = (c: Candle): ClosedBar => ({ candle: c, outcome: jevOutcome(c), refined: refinedOutcome(c) });
+    const barFor = (c: Candle): ClosedBar => ({
+      candle: c,
+      outcome: jevOutcome(c),
+      refined: refinedOutcome(c),
+      pJev: jevByTime.get(c.time),
+      pRef: refinedByTime.get(c.time),
+    });
     const redrawJevArrows = () => {
       bars = bars.map((b) => barFor(b.candle));
       setState((s) => ({ ...s, bars: [...bars], version: s.version + 1 }));

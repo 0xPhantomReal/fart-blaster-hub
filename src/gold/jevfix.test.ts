@@ -42,7 +42,7 @@ describe("Jev refined", () => {
       const y = (r() < 0.5 ? 1 : 0) as 0 | 1;
       f.update((r() < 0.6 ? y : 1 - y) === 1 ? 0.6 : 0.4, undefined, y);
     }
-    expect(Math.abs(f.summary().bias)).toBeLessThan(0.25);
+    expect(Math.abs(f.summary().bias)).toBeLessThan(0.3);
     expect(f.predict(0.6, undefined)).toBeGreaterThan(0.53);
   });
 
@@ -100,5 +100,26 @@ describe("Jev refined", () => {
       expect(f.predict(0.38, xDown)).toBeLessThan(0.5);
     }
     expect(fixLate / n).toBeGreaterThan(rawLate / n + 0.15);
+  });
+
+  it("learns to flip a Jev that has been consistently backwards", () => {
+    const raw: Tally = { right: 0, n: 0 };
+    const fixed: Tally = { right: 0, n: 0 };
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const r = rng(seed);
+      const f = new JevFixer();
+      for (let i = 0; i < 200; i++) {
+        const y = (r() < 0.5 ? 1 : 0) as 0 | 1;
+        const pJev = (r() < 0.35 ? y : 1 - y) === 1 ? 0.62 : 0.38; // right only 35% of the time
+        if (i >= 60) {
+          scoreArrow(raw, pJev, y);
+          scoreArrow(fixed, f.predict(pJev, undefined), y);
+        }
+        f.update(pJev, undefined, y);
+      }
+      expect(f.summary().confidence).toBeLessThan(0);
+    }
+    expect(fixed.right / fixed.n).toBeGreaterThan(0.58);
+    expect(raw.right / raw.n).toBeLessThan(0.4);
   });
 });

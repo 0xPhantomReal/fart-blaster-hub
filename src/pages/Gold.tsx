@@ -6,15 +6,33 @@ import { BACKFILL, useGold } from "@/gold/useGold";
 import type { CatchRecord, FlipRecords } from "@/gold/flip";
 import type { PathRecord } from "@/gold/forecast";
 
-const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
-const time = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const pct = (x: number | null | undefined, d = 1) =>
+  x == null ? "—" : `${(x * 100).toFixed(d)}%`;
+const time = (t: number) =>
+  new Date(t * 1000).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 const GREEN = "text-[#26a69a]";
 const RED = "text-[#ef5350]";
 const MUTED = "text-[#8b949e]";
 
-const SUPPORT_WORDS = ["points the other way", "is mixed or weak", "mostly supports it", "clearly supports it"];
+const SUPPORT_WORDS = [
+  "points the other way",
+  "is mixed or weak",
+  "mostly supports it",
+  "clearly supports it",
+];
 
-function Row({ name, r, note }: { name: string; r: TrackRecord | null | undefined; note?: string }) {
+function Row({
+  name,
+  r,
+  note,
+}: {
+  name: string;
+  r: TrackRecord | null | undefined;
+  note?: string;
+}) {
   if (!r) return null;
   const skill = r.skill;
   return (
@@ -23,10 +41,16 @@ function Row({ name, r, note }: { name: string; r: TrackRecord | null | undefine
         {name}
         {note && <span className={`text-xs ${MUTED}`}> · {note}</span>}
       </td>
-      <td className="py-1.5 text-right">{r.calls >= 20 ? pct(r.hitRate) : "—"}</td>
+      <td className="py-1.5 text-right">
+        {r.calls >= 20 ? pct(r.hitRate) : "—"}
+      </td>
       <td className="py-1.5 text-right">{r.calls.toLocaleString()}</td>
-      <td className={`py-1.5 text-right ${skill == null ? "" : skill > 0.002 ? GREEN : skill < -0.002 ? RED : ""}`}>
-        {skill == null ? "—" : (Math.abs(skill) < 0.0005 ? 0 : skill).toFixed(3)}
+      <td
+        className={`py-1.5 text-right ${skill == null ? "" : skill > 0.002 ? GREEN : skill < -0.002 ? RED : ""}`}
+      >
+        {skill == null
+          ? "—"
+          : (Math.abs(skill) < 0.0005 ? 0 : skill).toFixed(3)}
       </td>
     </tr>
   );
@@ -59,14 +83,17 @@ function FlipTable({ rec, where }: { rec: FlipRecords; where: string }) {
           {r.caught} of {r.flips}
         </td>
         <td className="py-1.5 text-right">{r.alarms}</td>
-        <td className="py-1.5 text-right">{said ? `${pct(r.caught / said, 0)} (${said})` : "—"}</td>
+        <td className="py-1.5 text-right">
+          {said ? `${pct(r.caught / said, 0)} (${said})` : "—"}
+        </td>
       </tr>
     );
   };
   return (
     <>
       <p className={`mb-2 mt-4 text-xs ${MUTED}`}>
-        {where}: {rec.math.flips} of {rec.n} candles flipped after the read ({pct(rec.n ? rec.math.flips / rec.n : null, 0)}).
+        {where}: {rec.math.flips} of {rec.n} candles flipped after the read (
+        {pct(rec.n ? rec.math.flips / rec.n : null, 0)}).
       </p>
       <table className="w-full text-sm tabular-nums">
         <thead>
@@ -102,13 +129,23 @@ function save(key: string, v: unknown) {
     // remembered for this visit only
   }
 }
-const isTf = (v: unknown): v is Timeframe => (TIMEFRAMES as readonly unknown[]).includes(v);
+const isTf = (v: unknown): v is Timeframe =>
+  (TIMEFRAMES as readonly unknown[]).includes(v);
 const isMarket = (v: unknown): v is Market => v === "gold" || v === "btc";
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 
 /** Forecast scores: first bar's color, and direction after 5 bars. */
-function PathRow({ name, r, note }: { name: string; r: PathRecord; note: string }) {
-  const cell = (x: { right: number; n: number }) => (x.n >= 10 ? `${pct(x.right / x.n, 0)}` : "—");
+function PathRow({
+  name,
+  r,
+  note,
+}: {
+  name: string;
+  r: PathRecord;
+  note: string;
+}) {
+  const cell = (x: { right: number; n: number }) =>
+    x.n >= 10 ? `${pct(x.right / x.n, 0)}` : "—";
   return (
     <tr className="border-t border-[#262c36]">
       <td className="py-1.5 text-left">
@@ -123,29 +160,68 @@ function PathRow({ name, r, note }: { name: string; r: PathRecord; note: string 
 }
 
 const Label = ({ children }: { children: React.ReactNode }) => (
-  <h2 className={`mb-2 text-xs font-semibold uppercase tracking-wider ${MUTED}`}>{children}</h2>
+  <h2
+    className={`mb-2 text-xs font-semibold uppercase tracking-wider ${MUTED}`}
+  >
+    {children}
+  </h2>
 );
 
 export default function Gold() {
-  const [market, setMarket] = useState<Market>(() => load("gold.market", isMarket, "gold"));
-  const [tfPick, setTfMin] = useState<Timeframe>(() => load("gold.tf", isTf, 15));
+  const [market, setMarket] = useState<Market>(() =>
+    load("gold.market", isMarket, "gold"),
+  );
+  const [tfPick, setTfMin] = useState<Timeframe>(() =>
+    load("gold.tf", isTf, 15),
+  );
   const mk = MARKETS[market];
   // Bitcoin offers 5m and 15m only; a 1m pick from gold falls back to 5m there.
   const tfMin: Timeframe = mk.timeframes.includes(tfPick) ? tfPick : 5;
   useEffect(() => save("gold.market", market), [market]);
   const [arrows, setArrows] = useState<"jev" | "refined">(() =>
-    load("gold.arrows", (v): v is "jev" | "refined" => v === "jev" || v === "refined", "jev"),
+    load(
+      "gold.arrows",
+      (v): v is "jev" | "refined" => v === "jev" || v === "refined",
+      "jev",
+    ),
   );
   useEffect(() => save("gold.arrows", arrows), [arrows]);
-  const [forecastOn, setForecastOn] = useState<boolean>(() => load("gold.forecast", isBool, true));
+  const [minConf, setMinConf] = useState<number>(() =>
+    load(
+      "gold.minconf",
+      (v): v is number => typeof v === "number" && v >= 0.5 && v < 0.9,
+      0.5,
+    ),
+  );
+  useEffect(() => save("gold.minconf", minConf), [minConf]);
+  const [forecastOn, setForecastOn] = useState<boolean>(() =>
+    load("gold.forecast", isBool, true),
+  );
   useEffect(() => save("gold.tf", tfMin), [tfMin]);
   useEffect(() => save("gold.forecast", forecastOn), [forecastOn]);
   const g = useGold(market, tfMin, forecastOn);
   const fc = g.forecast;
-  const jevArrows = g.bars.reduce(
-    (acc, b) => ((arrows === "refined" ? b.refined : b.outcome)?.hit != null ? { n: acc.n + 1, right: acc.right + ((arrows === "refined" ? b.refined : b.outcome)!.hit ? 1 : 0) } : acc),
-    { n: 0, right: 0 },
-  );
+  /** Right / total for arrows at least `conf` sure, from Jev's or the refined %. */
+  const tallyAt = (src: "jev" | "refined", conf: number) =>
+    g.bars.reduce(
+      (acc, b) => {
+        const pp = src === "refined" ? b.pRef : b.pJev;
+        const c = b.candle;
+        if (
+          pp === undefined ||
+          pp === 0.5 ||
+          c.close === c.open ||
+          Math.max(pp, 1 - pp) < conf
+        )
+          return acc;
+        return {
+          n: acc.n + 1,
+          right: acc.right + (pp > 0.5 === c.close > c.open ? 1 : 0),
+        };
+      },
+      { n: 0, right: 0 },
+    );
+  const jevArrows = tallyAt(arrows, minConf);
   const p = g.prediction;
   const [, tick] = useState(0);
 
@@ -161,20 +237,32 @@ export default function Gold() {
     document.title = `${mk.label} Next Candle`;
   }, [mk.label]);
 
-  const last = g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
+  const last =
+    g.forming ?? (g.bars.length ? g.bars[g.bars.length - 1].candle : null);
   const tf = tfMin * 60;
   const isForming = !!(p && g.forming && g.forming.time === p.forTime);
   const closesAt = p ? p.forTime + tf : null;
-  const secsLeft = closesAt && g.source !== "Simulated" ? Math.max(0, Math.round(closesAt - Date.now() / 1000)) : null;
+  const secsLeft =
+    closesAt && g.source !== "Simulated"
+      ? Math.max(0, Math.round(closesAt - Date.now() / 1000))
+      : null;
 
   const lv = isForming ? g.live : null; // live read while the candle forms
   const openDir = p?.call === 1 ? "green" : p?.call === -1 ? "red" : "none";
-  const callOf = (c: -1 | 0 | 1 | undefined) => (c === 1 ? "green" : c === -1 ? "red" : "none");
+  const callOf = (c: -1 | 0 | 1 | undefined) =>
+    c === 1 ? "green" : c === -1 ? "red" : "none";
   const dir = lv ? callOf(lv.call) : openDir;
-  const big = !p ? "—" : dir === "none" ? (lv ? "TOO CLOSE" : "NO CALL") : dir.toUpperCase();
+  const big = !p
+    ? "—"
+    : dir === "none"
+      ? lv
+        ? "TOO CLOSE"
+        : "NO CALL"
+      : dir.toUpperCase();
   const bigCls = dir === "green" ? GREEN : dir === "red" ? RED : MUTED;
   const prob = lv ? lv.pGreen : (p?.pFinal ?? null);
-  const modelDir = p?.modelCall === 1 ? "green" : p?.modelCall === -1 ? "red" : null;
+  const modelDir =
+    p?.modelCall === 1 ? "green" : p?.modelCall === -1 ? "red" : null;
 
   return (
     <div className="flex h-[100dvh] flex-col bg-[#0e1116] text-[#e6e8eb] [font-family:ui-sans-serif,system-ui,-apple-system,'Segoe_UI',sans-serif] [&_h1]:[font-family:inherit] [&_h2]:[font-family:inherit]">
@@ -211,8 +299,14 @@ export default function Gold() {
         >
           Forecast {forecastOn ? "on" : "off"}
         </button>
-        <div className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}>{last ? last.close.toFixed(2) : "—"}</div>
-        <div className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}>
+        <div
+          className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}
+        >
+          {last ? last.close.toFixed(2) : "—"}
+        </div>
+        <div
+          className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}
+        >
           {g.status === "loading"
             ? "loading…"
             : g.source === "Simulated"
@@ -225,13 +319,27 @@ export default function Gold() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[56vh_auto] md:grid-cols-[1fr_320px] md:grid-rows-1">
         <div className="relative min-h-0">
-          <GoldChart key={`${market}-${tfMin}`} bars={g.bars} forming={g.forming} version={g.version} forecast={forecastOn ? fc.candles : null} arrows={arrows} />
+          <GoldChart
+            key={`${market}-${tfMin}`}
+            bars={g.bars}
+            forming={g.forming}
+            version={g.version}
+            forecast={forecastOn ? fc.candles : null}
+            arrows={arrows}
+            minConf={minConf}
+          />
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
               <p className="max-w-md">{g.blocked}</p>
             </div>
           )}
-          {g.status === "loading" && <div className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}>Loading {mk.label.toLowerCase()} history…</div>}
+          {g.status === "loading" && (
+            <div
+              className={`absolute inset-0 grid place-items-center text-sm ${MUTED}`}
+            >
+              Loading {mk.label.toLowerCase()} history…
+            </div>
+          )}
         </div>
 
         <aside className="flex flex-col gap-6 overflow-auto border-t border-[#262c36] bg-[#161b22] p-4 md:border-l md:border-t-0">
@@ -239,7 +347,9 @@ export default function Gold() {
             <div className={`text-xs uppercase tracking-wider ${MUTED}`}>
               {isForming ? "This candle" : "Next candle"}
               {closesAt ? ` · closes ${time(closesAt)}` : ""}
-              {secsLeft !== null ? ` · ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")} left` : ""}
+              {secsLeft !== null
+                ? ` · ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, "0")} left`
+                : ""}
             </div>
             <div className={`my-1 text-3xl font-bold ${bigCls}`}>{big}</div>
             <div className="text-lg tabular-nums">
@@ -249,44 +359,78 @@ export default function Gold() {
             {lv && (
               <>
                 <div className="mx-auto mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#ef5350]/40">
-                  <div className="h-full bg-[#26a69a] transition-[width] duration-300" style={{ width: `${lv.pGreen * 100}%` }} />
+                  <div
+                    className="h-full bg-[#26a69a] transition-[width] duration-300"
+                    style={{ width: `${lv.pGreen * 100}%` }}
+                  />
                 </div>
                 <div className="mt-2 text-sm tabular-nums">
-                  <span className={lv.move > 0 ? GREEN : lv.move < 0 ? RED : MUTED}>
+                  <span
+                    className={lv.move > 0 ? GREEN : lv.move < 0 ? RED : MUTED}
+                  >
                     {lv.move >= 0 ? "+" : ""}
                     {lv.move.toFixed(2)} so far
                   </span>
                   {lv.move !== 0 && (
-                    <span className={MUTED}> · currently {lv.move > 0 ? "green" : "red"}</span>
+                    <span className={MUTED}>
+                      {" "}
+                      · currently {lv.move > 0 ? "green" : "red"}
+                    </span>
                   )}
                 </div>
-                {g.flip.pFlip !== null && g.flip.at !== null && Date.now() - g.flip.at < 20_000 && lv.move !== 0 && (
-                  <div className="mt-1 text-sm tabular-nums">
-                    Jev: <span className={g.flip.pFlip >= 0.5 ? "text-[#d4a72c]" : ""}>{pct(g.flip.pFlip, 0)} chance it flips</span>
-                    {lv.pMath != null && (
-                      <span className={`text-xs ${MUTED}`}>
-                        {" "}· math alone {pct(lv.move > 0 ? 1 - lv.pMath : lv.pMath, 0)}
+                {g.flip.pFlip !== null &&
+                  g.flip.at !== null &&
+                  Date.now() - g.flip.at < 20_000 &&
+                  lv.move !== 0 && (
+                    <div className="mt-1 text-sm tabular-nums">
+                      Jev:{" "}
+                      <span
+                        className={g.flip.pFlip >= 0.5 ? "text-[#d4a72c]" : ""}
+                      >
+                        {pct(g.flip.pFlip, 0)} chance it flips
                       </span>
-                    )}
-                  </div>
-                )}
+                      {lv.pMath != null && (
+                        <span className={`text-xs ${MUTED}`}>
+                          {" "}
+                          · math alone{" "}
+                          {pct(lv.move > 0 ? 1 - lv.pMath : lv.pMath, 0)}
+                        </span>
+                      )}
+                    </div>
+                  )}
               </>
             )}
             <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
               {lv ? (
                 <>
-                  At the open: <span className={openDir === "green" ? GREEN : openDir === "red" ? RED : ""}>{openDir === "none" ? "no call" : openDir}</span>{" "}
+                  At the open:{" "}
+                  <span
+                    className={
+                      openDir === "green" ? GREEN : openDir === "red" ? RED : ""
+                    }
+                  >
+                    {openDir === "none" ? "no call" : openDir}
+                  </span>{" "}
                   {pct(p?.pFinal, 0)} ·{" "}
                 </>
               ) : null}
               Model {pct(p?.pModel, 0)}
               {p?.jev ? ` · Jev ${pct(p.jev.pGreen, 0)}` : ""}
-              {p?.jev && g.refine.pNow != null ? ` · refined ${pct(g.refine.pNow, 0)}` : ""}
+              {p?.jev && g.refine.pNow != null
+                ? ` · refined ${pct(g.refine.pNow, 0)}`
+                : ""}
             </div>
             {p?.jev && p.jev.support !== null && modelDir && (
-              <div className={`mt-1 text-xs ${p.blockedByCheck ? "text-[#d4a72c]" : MUTED}`}>
+              <div
+                className={`mt-1 text-xs ${p.blockedByCheck ? "text-[#d4a72c]" : MUTED}`}
+              >
                 Jev's fact-check of the model's {modelDir} call: the evidence{" "}
-                {SUPPORT_WORDS[Math.round(Math.min(3, Math.max(0, p.jev.support)))]} ({p.jev.support.toFixed(1)}/3)
+                {
+                  SUPPORT_WORDS[
+                    Math.round(Math.min(3, Math.max(0, p.jev.support)))
+                  ]
+                }{" "}
+                ({p.jev.support.toFixed(1)}/3)
                 {p.blockedByCheck ? " → no call" : ""}
               </div>
             )}
@@ -294,20 +438,40 @@ export default function Gold() {
 
           <section>
             <Label>How accurate is it?</Label>
-            <p className={`mb-2 text-xs ${MUTED}`}>Tested on past candles, each predicted before it happened:</p>
+            <p className={`mb-2 text-xs ${MUTED}`}>
+              Tested on past candles, each predicted before it happened:
+            </p>
             <RecordTable>
-              <Row name="Model" r={g.walkForward} note={`${g.walkForward?.n.toLocaleString() ?? 0} candles`} />
+              <Row
+                name="Model"
+                r={g.walkForward}
+                note={`${g.walkForward?.n.toLocaleString() ?? 0} candles`}
+              />
               {g.backfill && (
                 <>
-                  <Row name="Model" r={g.backfill.model} note={`last ${BACKFILL}`} />
-                  <Row name="Jev" r={g.backfill.jev} note={`last ${BACKFILL}`} />
-                  <Row name="Final" r={g.backfill.final} note={`last ${BACKFILL}`} />
+                  <Row
+                    name="Model"
+                    r={g.backfill.model}
+                    note={`last ${BACKFILL}`}
+                  />
+                  <Row
+                    name="Jev"
+                    r={g.backfill.jev}
+                    note={`last ${BACKFILL}`}
+                  />
+                  <Row
+                    name="Final"
+                    r={g.backfill.final}
+                    note={`last ${BACKFILL}`}
+                  />
                 </>
               )}
             </RecordTable>
             {g.liveRecord && g.liveRecord.model.n > 0 && (
               <>
-                <p className={`mb-2 mt-4 text-xs ${MUTED}`}>Live, since this page opened:</p>
+                <p className={`mb-2 mt-4 text-xs ${MUTED}`}>
+                  Live, since this page opened:
+                </p>
                 <RecordTable>
                   <Row name="Model" r={g.liveRecord.model} />
                   {g.jev.on && <Row name="Jev" r={g.liveRecord.jev} />}
@@ -320,34 +484,53 @@ export default function Gold() {
               <>
                 <h3 className="mt-5 text-sm font-medium">Flips caught</h3>
                 <p className={`mt-1 text-xs ${MUTED}`}>
-                  Read partway through each candle. Counts only candles that changed color after the read. A read "says flip"
-                  when it gives the flip more than 50%.
+                  Read partway through each candle. Counts only candles that
+                  changed color after the read. A read "says flip" when it gives
+                  the flip more than 50%.
                 </p>
-                {g.flip.backfill && <FlipTable rec={g.flip.backfill} where="Past candles" />}
-                {g.flip.live && g.flip.live.n > 0 && <FlipTable rec={g.flip.live} where="Live, one read per candle at halfway" />}
+                {g.flip.backfill && (
+                  <FlipTable rec={g.flip.backfill} where="Past candles" />
+                )}
+                {g.flip.live && g.flip.live.n > 0 && (
+                  <FlipTable
+                    rec={g.flip.live}
+                    where="Live, one read per candle at halfway"
+                  />
+                )}
               </>
             )}
             <p className={`mt-3 text-xs ${MUTED}`}>
-              The open forecast (Model, Jev, Final) is made before the candle starts; the live % also uses what the candle
-              has done so far, so it naturally gets more certain as the candle runs.
-              Right = share of calls that were correct. A call needs at least 55% one way; Final also needs Jev's fact-check to
-              score {SUPPORT_NEEDED}+ of 3. Skill above 0 means the forecasts carry real information beyond the base rate; at or
-              below 0 there's no edge, whatever the hit rate looks like. Expect small numbers: {tfMin}-minute {mk.label.toLowerCase()} is close to a coin
-              flip.
+              The open forecast (Model, Jev, Final) is made before the candle
+              starts; the live % also uses what the candle has done so far, so
+              it naturally gets more certain as the candle runs. Right = share
+              of calls that were correct. A call needs at least 55% one way;
+              Final also needs Jev's fact-check to score {SUPPORT_NEEDED}+ of 3.
+              Skill above 0 means the forecasts carry real information beyond
+              the base rate; at or below 0 there's no edge, whatever the hit
+              rate looks like. Expect small numbers: {tfMin}-minute{" "}
+              {mk.label.toLowerCase()} is close to a coin flip.
             </p>
           </section>
 
           <section>
             <Label>Jev</Label>
-            <p className={`text-sm ${g.jev.status.startsWith("error") || g.jev.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
+            <p
+              className={`text-sm ${g.jev.status.startsWith("error") || g.jev.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}
+            >
               {g.jev.status === "ok" ? "Checking each candle." : g.jev.status}
             </p>
             {g.jev.on && (
               <p className={`mt-1 text-xs ${MUTED}`}>
-                Each candle, Jev makes its own call (without seeing the model) from the recent candles and signals, the bigger trend,
-                key levels (day and 24h highs/lows, round numbers), volatility, hourly and 4-hour candles and, for bitcoin, Coinbase
-                volume. Separately, it fact-checks the model's call. {g.jev.calls} Jev calls this session
-                {g.trust ? ` · weight in the blend: Jev ${g.trust.jev.toFixed(2)}, model ${g.trust.model.toFixed(2)}` : ""}.
+                Each candle, Jev makes its own call (without seeing the model)
+                from the recent candles and signals, the bigger trend, key
+                levels (day and 24h highs/lows, round numbers), volatility,
+                hourly and 4-hour candles and, for bitcoin, Coinbase volume.
+                Separately, it fact-checks the model's call. {g.jev.calls} Jev
+                calls this session
+                {g.trust
+                  ? ` · weight in the blend: Jev ${g.trust.jev.toFixed(2)}, model ${g.trust.model.toFixed(2)}`
+                  : ""}
+                .
               </p>
             )}
           </section>
@@ -362,31 +545,54 @@ export default function Gold() {
                     ? "The most typical of the 50 most similar past moments."
                     : "—"}
                 {fc.endsHigherPct != null && (
-                  <span className={MUTED}> {pct(fc.endsHigherPct, 0)} of those 50 ended higher after 5 candles.</span>
+                  <span className={MUTED}>
+                    {" "}
+                    {pct(fc.endsHigherPct, 0)} of those 50 ended higher after 5
+                    candles.
+                  </span>
                 )}
               </p>
-              {fc.status !== "ok" && <p className={`mt-1 text-xs ${/couldn|waiting/.test(fc.status) ? "text-[#d4a72c]" : MUTED}`}>{fc.status}</p>}
+              {fc.status !== "ok" && (
+                <p
+                  className={`mt-1 text-xs ${/couldn|waiting/.test(fc.status) ? "text-[#d4a72c]" : MUTED}`}
+                >
+                  {fc.status}
+                </p>
+              )}
               {(fc.replay || fc.live) && (
                 <table className="mt-3 w-full text-sm tabular-nums">
                   <thead>
                     <tr className={`text-xs ${MUTED}`}>
                       <th className="pb-1 text-left font-medium"></th>
-                      <th className="pb-1 text-right font-medium">1st bar color</th>
-                      <th className="pb-1 text-right font-medium">Direction at 5</th>
+                      <th className="pb-1 text-right font-medium">
+                        1st bar color
+                      </th>
+                      <th className="pb-1 text-right font-medium">
+                        Direction at 5
+                      </th>
                       <th className="pb-1 text-right font-medium">n</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {fc.replay && <PathRow name="Typical" r={fc.replay} note="past 200" />}
-                    {fc.live && fc.live.typical.end.n > 0 && <PathRow name="Typical" r={fc.live.typical} note="live" />}
-                    {fc.live && fc.live.jev.end.n > 0 && <PathRow name="Jev's pick" r={fc.live.jev} note="live" />}
+                    {fc.replay && (
+                      <PathRow name="Typical" r={fc.replay} note="past 200" />
+                    )}
+                    {fc.live && fc.live.typical.end.n > 0 && (
+                      <PathRow name="Typical" r={fc.live.typical} note="live" />
+                    )}
+                    {fc.live && fc.live.jev.end.n > 0 && (
+                      <PathRow name="Jev's pick" r={fc.live.jev} note="live" />
+                    )}
                   </tbody>
                 </table>
               )}
               <p className={`mt-2 text-xs ${MUTED}`}>
-                Faded bars on the chart. Each is something {mk.label.toLowerCase()} really did after a moment like this one, rescaled to today's
-                volatility and redrawn at every close. Right % above 50 is an edge; around 50 the bars are only a picture of
-                typical behaviour, not a prediction. {fc.calls} Jev picks this session.
+                Faded bars on the chart. Each is something{" "}
+                {mk.label.toLowerCase()} really did after a moment like this
+                one, rescaled to today's volatility and redrawn at every close.
+                Right % above 50 is an edge; around 50 the bars are only a
+                picture of typical behaviour, not a prediction. {fc.calls} Jev
+                picks this session.
               </p>
             </section>
           )}
@@ -404,6 +610,51 @@ export default function Gold() {
                 </button>
               ))}
             </div>
+            <p className={`mb-1 text-xs ${MUTED}`}>
+              Only show arrows this sure (leaves coin-flip candles blank):
+            </p>
+            <table className="mb-3 w-full text-sm tabular-nums">
+              <thead>
+                <tr className={`text-xs ${MUTED}`}>
+                  <th className="pb-1 text-left font-medium">Sure at least</th>
+                  <th className="pb-1 text-right font-medium">Jev</th>
+                  <th className="pb-1 text-right font-medium">Refined</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[0.5, 0.55, 0.58, 0.6, 0.65].map((t) => {
+                  const cell = (src: "jev" | "refined") => {
+                    const r = tallyAt(src, t);
+                    return r.n ? (
+                      <span
+                        className={
+                          r.n >= 20 && r.right / r.n >= 0.6 ? GREEN : ""
+                        }
+                      >
+                        {pct(r.right / r.n, 0)}{" "}
+                        <span className={`text-xs ${MUTED}`}>({r.n})</span>
+                      </span>
+                    ) : (
+                      "—"
+                    );
+                  };
+                  return (
+                    <tr
+                      key={t}
+                      onClick={() => setMinConf(t)}
+                      className={`cursor-pointer border-t border-[#262c36] ${t === minConf ? "bg-[#1f252e]" : "hover:bg-[#1f252e]"}`}
+                    >
+                      <td className="py-1.5 text-left">
+                        {t === 0.5 ? "every call" : `${Math.round(t * 100)}%`}
+                        {t === minConf ? " ◀" : ""}
+                      </td>
+                      <td className="py-1.5 text-right">{cell("jev")}</td>
+                      <td className="py-1.5 text-right">{cell("refined")}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
             {g.refine.past || g.refine.live.raw.n > 0 ? (
               <table className="w-full text-sm tabular-nums">
                 <thead>
@@ -420,9 +671,14 @@ export default function Gold() {
                     ["Live", g.refine.live.raw.n > 0 ? g.refine.live : null],
                   ].map(([name, r]) =>
                     r && typeof r === "object" ? (
-                      <tr key={name as string} className="border-t border-[#262c36]">
+                      <tr
+                        key={name as string}
+                        className="border-t border-[#262c36]"
+                      >
                         <td className="py-1.5 text-left">{name as string}</td>
-                        <td className="py-1.5 text-right">{r.raw.n ? pct(r.raw.right / r.raw.n, 1) : "—"}</td>
+                        <td className="py-1.5 text-right">
+                          {r.raw.n ? pct(r.raw.right / r.raw.n, 1) : "—"}
+                        </td>
                         <td
                           className={`py-1.5 text-right ${r.fixed.n && r.raw.n ? (r.fixed.right / r.fixed.n > r.raw.right / r.raw.n ? GREEN : r.fixed.right / r.fixed.n < r.raw.right / r.raw.n ? RED : "") : ""}`}
                         >
@@ -435,7 +691,9 @@ export default function Gold() {
                 </tbody>
               </table>
             ) : (
-              <p className={`text-sm ${MUTED}`}>Waiting for Jev's past-candle check…</p>
+              <p className={`text-sm ${MUTED}`}>
+                Waiting for Jev's past-candle check…
+              </p>
             )}
             {g.refine.learned && (
               <p className={`mt-2 text-xs ${MUTED}`}>
@@ -448,40 +706,56 @@ export default function Gold() {
                 {" · "}
                 {Math.abs(g.refine.learned.confidence - 1) < 0.05
                   ? "confidence about right"
-                  : g.refine.learned.confidence < 1
-                    ? `Jev overconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`
-                    : `Jev underconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`}
+                  : g.refine.learned.confidence < 0
+                    ? "Jev has been backwards lately, so its calls are flipped"
+                    : g.refine.learned.confidence < 1
+                      ? `Jev overconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`
+                      : `Jev underconfident (its edge × ${g.refine.learned.confidence.toFixed(2)})`}
                 {g.refine.learned.situations.length > 0 &&
                   ` · biggest situation fixes: ${g.refine.learned.situations.map((x) => `${x.name} (${x.weight > 0 ? "→ green" : "→ red"})`).join(", ")}`}
                 .
               </p>
             )}
             <p className={`mt-2 text-xs ${MUTED}`}>
-              Right % of the 50% arrows. Refined adjusts Jev's % using its own wins and losses (walk-forward: each candle is
-              read before it's learned from). It also sees the bigger trend (last 20 and 50 candles, a
-              longer average), so it can learn things like "Jev's red calls lose in an uptrend". It starts by trusting Jev and
-              adapts within tens of candles. No extra Jev calls.
+              Right % of the 50% arrows. Refined adjusts Jev's % using its own
+              wins and losses (walk-forward: each candle is read before it's
+              learned from). It also sees the bigger trend (last 20 and 50
+              candles, a longer average), so it can learn things like "Jev's red
+              calls lose in an uptrend". It starts by trusting Jev and adapts
+              within tens of candles. No extra Jev calls.
             </p>
           </section>
 
           <section>
             <Label>Jev flip check</Label>
-            <p className={`text-sm ${g.flip.status.startsWith("error") || g.flip.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}>
-              {g.flip.status === "ok" ? "Reading the forming candle every 3 seconds (when it has changed)." : g.flip.status}
+            <p
+              className={`text-sm ${g.flip.status.startsWith("error") || g.flip.status.startsWith("waiting") ? "text-[#d4a72c]" : MUTED}`}
+            >
+              {g.flip.status === "ok"
+                ? "Reading the forming candle every 3 seconds (when it has changed)."
+                : g.flip.status}
             </p>
             <p className={`mt-1 text-xs ${MUTED}`}>
-              While a candle forms, Jev sees how far it has moved, its high/low, how much it has pulled back, the time left and
-              the last 3 candles (sizes only, no prices) and answers one question: does it hold its color or flip? The live % blends
-              that with the math, weighted by how each scored on past candles rebuilt partway through from 1-minute data.
+              While a candle forms, Jev sees how far it has moved, its high/low,
+              how much it has pulled back, the time left and the last 3 candles
+              (sizes only, no prices) and answers one question: does it hold its
+              color or flip? The live % blends that with the math, weighted by
+              how each scored on past candles rebuilt partway through from
+              1-minute data.
               {` ${g.flip.calls} flip calls this session`}
-              {g.flip.weights ? ` · weight: Jev ${g.flip.weights.jev.toFixed(2)}, math ${g.flip.weights.math.toFixed(2)}` : ""}.
+              {g.flip.weights
+                ? ` · weight: Jev ${g.flip.weights.jev.toFixed(2)}, math ${g.flip.weights.math.toFixed(2)}`
+                : ""}
+              .
             </p>
           </section>
 
           {g.source !== "Simulated" && (
             <section>
               <Label>Live ticks</Label>
-              <p className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}>
+              <p
+                className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}
+              >
                 {g.ticks.state === "streaming"
                   ? g.ticks.source === "BRTI"
                     ? "Streaming the CME CF Bitcoin Real Time Index (BRTI) via Kalshi, up to 5 values a second."
@@ -490,32 +764,42 @@ export default function Gold() {
                     ? "Connecting to the tick stream…"
                     : `Not streaming (${g.ticks.detail}). The candle updates from 1-minute data every few seconds instead.`}
               </p>
-              {market === "btc" && g.ticks.source !== "BRTI" && g.ticks.note && (
-                <p className="mt-1 text-xs text-[#d4a72c]">
-                  {g.ticks.note}.{" "}
-                  {/not set/.test(g.ticks.note)
-                    ? "To use BRTI, create a Kalshi API key and add its ID and private key as the backend secrets KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY."
-                    : ""}
-                </p>
-              )}
+              {market === "btc" &&
+                g.ticks.source !== "BRTI" &&
+                g.ticks.note && (
+                  <p className="mt-1 text-xs text-[#d4a72c]">
+                    {g.ticks.note}.{" "}
+                    {/not set/.test(g.ticks.note)
+                      ? "To use BRTI, create a Kalshi API key and add its ID and private key as the backend secrets KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY."
+                      : ""}
+                  </p>
+                )}
               {market === "btc" && (
                 <p className={`mt-1 text-xs ${MUTED}`}>
-                  Past candles (and the model's training) come from Pyth BTC/USD, which tracks BRTI closely; candles streamed
-                  live from BRTI are kept as BRTI.
+                  Past candles (and the model's training) come from Pyth
+                  BTC/USD, which tracks BRTI closely; candles streamed live from
+                  BRTI are kept as BRTI.
                 </p>
               )}
               {g.ticks.state === "fallback" && g.ticks.check && (
                 <div className={`mt-1 text-xs ${MUTED}`}>
                   {g.ticks.check.ok ? (
                     <>
-                      Backend test: the stream works ({g.ticks.check.host}, first price {g.ticks.check.firstPrice?.toFixed(2)}), so the
-                      problem is between the backend and this page. Reload; if it persists, tell Claude.
+                      Backend test: the stream works ({g.ticks.check.host},
+                      first price {g.ticks.check.firstPrice?.toFixed(2)}), so
+                      the problem is between the backend and this page. Reload;
+                      if it persists, tell Claude.
                     </>
                   ) : (
                     <>
                       Backend test: {g.ticks.check.problems.join(" · ")}
-                      {g.ticks.check.feedSource === "fallback" ? ` (couldn't look up the ${mk.label.toLowerCase()} feed; tried the standard feed id)` : ""}.
-                      {g.ticks.check.problems.some((x) => /401|403|unauthor|forbidden/i.test(x))
+                      {g.ticks.check.feedSource === "fallback"
+                        ? ` (couldn't look up the ${mk.label.toLowerCase()} feed; tried the standard feed id)`
+                        : ""}
+                      .
+                      {g.ticks.check.problems.some((x) =>
+                        /401|403|unauthor|forbidden/i.test(x),
+                      )
                         ? " Your Pyth key isn't accepted for live ticks: add a Pyth Core/Hermes key as the secret PYTH_HERMES_KEY."
                         : ""}
                     </>
@@ -527,9 +811,11 @@ export default function Gold() {
 
           {g.error && <p className="text-xs text-[#d4a72c]">{g.error}</p>}
           <p className={`text-xs ${MUTED}`}>
-            Arrows are {arrows === "refined" ? "Jev's refined" : "Jev's own"} call on each candle (made before it opened): up = above
-            50% chance green, down = below 50%. Colored = right, gray = wrong.
-            {jevArrows.n > 0 && ` Arrows on screen: ${jevArrows.right} of ${jevArrows.n} right (${pct(jevArrows.right / jevArrows.n, 1)}).`}{" "}
+            Arrows are {arrows === "refined" ? "Jev's refined" : "Jev's own"}{" "}
+            call on each candle (made before it opened): up = above 50% chance
+            green, down = below 50%. Colored = right, gray = wrong.
+            {jevArrows.n > 0 &&
+              ` Arrows on screen: ${jevArrows.right} of ${jevArrows.n} right (${pct(jevArrows.right / jevArrows.n, 1)}).`}{" "}
             Trained on {g.trainedOn.toLocaleString()} candles.
           </p>
         </aside>

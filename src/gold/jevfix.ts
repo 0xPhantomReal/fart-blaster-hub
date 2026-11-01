@@ -25,7 +25,7 @@ export interface Tally {
 
 /** What the correction has learned, in words the page can show. */
 export interface FixSummary {
-  confidence: number; //  1 = Jev's confidence kept; <1 = Jev was overconfident; >1 = underconfident
+  confidence: number; //  1 = Jev kept as is; 0–1 = overconfident; >1 = underconfident; <0 = Jev has been backwards
   bias: number; //        >0 = Jev was too bearish (nudged toward green); <0 = too bullish
   situations: { name: string; weight: number }[]; // strongest situation-specific corrections
 }
@@ -62,7 +62,7 @@ export class JevFixer {
   constructor(
     private window = 150,
     private halfLife = 40,
-    private pullJev = 1.5, //  strength of the pull toward trusting Jev's own number (pseudo-candles)
+    private pullJev = 1, //  strength of the pull toward trusting Jev's own number (pseudo-candles)
     private pullRest = 6, //   strength of the pull keeping situation weights at 0
   ) {
     this.prior = [1, 0, ...PICK.map(() => 0)];
@@ -116,7 +116,7 @@ export class JevFixer {
       th = th.map((t, k) => t - step[k]);
       if (Math.max(...step.map(Math.abs)) < 1e-6) break;
     }
-    if (th.every(Number.isFinite)) this.theta = th.map((t, k) => (k === 0 ? Math.max(0, Math.min(3, t)) : clip(t, 5)));
+    if (th.every(Number.isFinite)) this.theta = th.map((t, k) => (k === 0 ? Math.max(-3, Math.min(3, t)) : clip(t, 5)));
   }
 
   summary(): FixSummary {
