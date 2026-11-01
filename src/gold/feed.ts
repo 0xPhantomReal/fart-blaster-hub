@@ -6,18 +6,78 @@ import type { Candle } from "./indicators";
 export const TIMEFRAMES = [1, 5, 15] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
 
-/** The markets the page can show. Bitcoin uses the CME CF Bitcoin Real Time Index (BRTI) live when available. */
-export type Market = "gold" | "btc";
-export const MARKETS: Record<Market, { label: string; pair: string; timeframes: Timeframe[]; simStart: number }> = {
-  gold: { label: "Gold", pair: "XAU/USD", timeframes: [1, 5, 15], simStart: 4000 },
-  btc: { label: "Bitcoin", pair: "BTC/USD · BRTI", timeframes: [5, 15], simStart: 100000 },
+/**
+ * The markets the page can show. Crypto streams its CME CF Real Time Index (the index Kalshi's markets settle on)
+ * live via Kalshi when available; history comes from Pyth.
+ */
+export type Market = "gold" | "btc" | "eth" | "sol" | "xrp";
+export interface MarketInfo {
+  label: string;
+  pair: string;
+  index: string | null; // CF Benchmarks index id, for crypto
+  indexName: string | null;
+  timeframes: Timeframe[];
+  simStart: number;
+  decimals: number; //     price decimals to show
+}
+export const MARKETS: Record<Market, MarketInfo> = {
+  gold: {
+    label: "Gold",
+    pair: "XAU/USD",
+    index: null,
+    indexName: null,
+    timeframes: [1, 5, 15],
+    simStart: 4000,
+    decimals: 2,
+  },
+  btc: {
+    label: "Bitcoin",
+    pair: "BTC/USD · BRTI",
+    index: "BRTI",
+    indexName: "CME CF Bitcoin Real Time Index",
+    timeframes: [5, 15],
+    simStart: 100000,
+    decimals: 2,
+  },
+  eth: {
+    label: "Ether",
+    pair: "ETH/USD · ETHUSD_RTI",
+    index: "ETHUSD_RTI",
+    indexName: "CME CF Ether-Dollar Real Time Index",
+    timeframes: [5, 15],
+    simStart: 3500,
+    decimals: 2,
+  },
+  sol: {
+    label: "Solana",
+    pair: "SOL/USD · SOLUSD_RTI",
+    index: "SOLUSD_RTI",
+    indexName: "CME CF Solana-Dollar Real Time Index",
+    timeframes: [5, 15],
+    simStart: 180,
+    decimals: 3,
+  },
+  xrp: {
+    label: "XRP",
+    pair: "XRP/USD · XRPUSD_RTI",
+    index: "XRPUSD_RTI",
+    indexName: "CME CF XRP-Dollar Real Time Index",
+    timeframes: [5, 15],
+    simStart: 2.5,
+    decimals: 4,
+  },
 };
 export const HISTORY_BARS = 3000;
 /** Bars per request when fetching long history (Pyth answers ~6k bars comfortably). */
 const CHUNK_BARS = 5760;
 
-const FN_URL = import.meta.env.VITE_SUPABASE_URL ? `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/gold` : "";
-const ANON_KEY: string = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
+const FN_URL = import.meta.env.VITE_SUPABASE_URL
+  ? `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/gold`
+  : "";
+const ANON_KEY: string =
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ??
+  import.meta.env.VITE_SUPABASE_ANON_KEY ??
+  "";
 
 export const backendConfigured = () => FN_URL.length > 0;
 
@@ -28,12 +88,17 @@ async function callFn<T>(body: Record<string, unknown>): Promise<T> {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+      ...(ANON_KEY
+        ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
+        : {}),
     },
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((json as { error?: string }).error ?? `backend ${res.status}`);
+  if (!res.ok)
+    throw new Error(
+      (json as { error?: string }).error ?? `backend ${res.status}`,
+    );
   return json as T;
 }
 
@@ -55,7 +120,11 @@ export interface Feed {
   now(): number;
   history(): Promise<Candle[]>;
   /** onBar(candle, closed). Returns a stop function. */
-  start(onBar: (c: Candle, closed: boolean) => void, onError: (msg: string) => void, onTicks?: (s: TickStatus) => void): () => void;
+  start(
+    onBar: (c: Candle, closed: boolean) => void,
+    onError: (msg: string) => void,
+    onTicks?: (s: TickStatus) => void,
+  ): () => void;
 }
 
 // ── Live: Pyth via edge function ───────────────────────────────────────
@@ -82,8 +151,18 @@ export class LiveFeed implements Feed {
   private ticksRule = false;
   private tickCandles = new Map<number, { c: Candle; firstTickAt: number }>();
 
-  private async fetchRange(from: number, to: number, resolution: number = this.tfMin): Promise<Candle[]> {
-    const r = await callFn<HistoryResponse>({ action: "history", from, to, resolution, market: this.market });
+  private async fetchRange(
+    from: number,
+    to: number,
+    resolution: number = this.tfMin,
+  ): Promise<Candle[]> {
+    const r = await callFn<HistoryResponse>({
+      action: "history",
+      from,
+      to,
+      resolution,
+      market: this.market,
+    });
     this.jev = r.jev;
     return r.candles;
   }
@@ -91,8 +170,13 @@ export class LiveFeed implements Feed {
   async history(): Promise<Candle[]> {
     const to = nowSec();
     // Gold trades ~23h × 5 days, so ask for ~1.7× the wall-clock span.
-    const all = await this.fetchRange(to - Math.round(HISTORY_BARS * this.tf * 1.7), to);
-    const closed = all.filter((c) => c.time < this.bucket(to)).slice(-HISTORY_BARS);
+    const all = await this.fetchRange(
+      to - Math.round(HISTORY_BARS * this.tf * 1.7),
+      to,
+    );
+    const closed = all
+      .filter((c) => c.time < this.bucket(to))
+      .slice(-HISTORY_BARS);
     this.lastClosed = closed.length ? closed[closed.length - 1].time : 0;
     return closed;
   }
@@ -114,7 +198,9 @@ export class LiveFeed implements Feed {
       }
     }
     const seen = new Set<number>();
-    return out.filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
+    return out
+      .filter((c) => c.time < end && !seen.has(c.time) && seen.add(c.time))
+      .sort((a, b) => a.time - b.time);
   }
 
   /** 1-minute candles for the last `days` days (2-day chunks). Used to replay Jev's flip read on past candles. */
@@ -122,10 +208,14 @@ export class LiveFeed implements Feed {
     const end = Math.floor(nowSec() / 60) * 60;
     const out: Candle[] = [];
     for (let from = end - days * 86400; from < end; from += 2 * 86400) {
-      out.push(...(await this.fetchRange(from, Math.min(end, from + 2 * 86400), 1)));
+      out.push(
+        ...(await this.fetchRange(from, Math.min(end, from + 2 * 86400), 1)),
+      );
     }
     const seen = new Set<number>();
-    return out.filter((m) => !seen.has(m.time) && seen.add(m.time)).sort((a, b) => a.time - b.time);
+    return out
+      .filter((m) => !seen.has(m.time) && seen.add(m.time))
+      .sort((a, b) => a.time - b.time);
   }
 
   start(
@@ -145,14 +235,20 @@ export class LiveFeed implements Feed {
       busy = true;
       try {
         const now = nowSec();
-        const recent = await this.fetchRange(Math.max(this.lastClosed, now - 10 * this.tf), now);
+        const recent = await this.fetchRange(
+          Math.max(this.lastClosed, now - 10 * this.tf),
+          now,
+        );
         const current = this.bucket(now);
         for (const c of recent) {
           if (c.time <= this.lastClosed) continue;
           if (c.time < current) {
             // Live BRTI candles that were streamed from their open are kept as streamed (history is Pyth's).
             const tc = this.tickCandles.get(c.time);
-            onBar(this.ticksRule && tc && tc.firstTickAt - c.time <= 5 ? tc.c : c, true);
+            onBar(
+              this.ticksRule && tc && tc.firstTickAt - c.time <= 5 ? tc.c : c,
+              true,
+            );
             this.tickCandles.delete(c.time);
             this.lastClosed = c.time;
           } else if (!forming || forming.time !== c.time) {
@@ -160,7 +256,12 @@ export class LiveFeed implements Feed {
             emitForming();
           } else if (!this.ticksRule) {
             // Keep the API's open; widen high/low with anything the ticks saw.
-            forming = { ...forming, open: c.open, high: Math.max(forming.high, c.high), low: Math.min(forming.low, c.low) };
+            forming = {
+              ...forming,
+              open: c.open,
+              high: Math.max(forming.high, c.high),
+              low: Math.min(forming.low, c.low),
+            };
             emitForming();
           }
         }
@@ -176,7 +277,10 @@ export class LiveFeed implements Feed {
 
     // Every Pyth price tick updates the forming candle.
     let reported: TickStatus["state"] | null = null;
-    let tickSource: { source: string; note: string | null } = { source: "Pyth", note: null };
+    let tickSource: { source: string; note: string | null } = {
+      source: "Pyth",
+      note: null,
+    };
     const report = (st: TickStatus) => {
       if (st.state === reported && st.state === "streaming") return;
       reported = st.state;
@@ -184,13 +288,26 @@ export class LiveFeed implements Feed {
     };
     const onTick = (t: number, p: number) => {
       lastTickAt = Date.now();
-      report({ state: "streaming", detail: tickSource.source === "BRTI" ? "every BRTI value (CF Benchmarks via Kalshi)" : "every Pyth price update" });
+      report({
+        state: "streaming",
+        detail:
+          tickSource.source !== "Pyth"
+            ? `every ${tickSource.source} value (CF Benchmarks via Kalshi)`
+            : "every Pyth price update",
+      });
       const b = this.bucket(t);
       if (b <= this.lastClosed) return;
       if (!forming || b > forming.time) {
-        forming = { time: b, open: forming ? forming.close : p, high: p, low: p, close: p };
+        forming = {
+          time: b,
+          open: forming ? forming.close : p,
+          high: p,
+          low: p,
+          close: p,
+        };
         this.tickCandles.set(b, { c: { ...forming }, firstTickAt: t });
-        if (this.tickCandles.size > 50) this.tickCandles.delete(this.tickCandles.keys().next().value!);
+        if (this.tickCandles.size > 50)
+          this.tickCandles.delete(this.tickCandles.keys().next().value!);
         void poll(); // a candle just closed: fetch its final OHLC now
       } else if (b < forming.time) {
         return; // late tick from the previous candle
@@ -215,18 +332,24 @@ export class LiveFeed implements Feed {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+              ...(ANON_KEY
+                ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
+                : {}),
             },
             body: JSON.stringify({ action: "stream", market: this.market }),
             signal: abort.signal,
           });
           if (!res.ok || !res.body) {
             const j = await res.json().catch(() => ({}));
-            throw new Error((j as { error?: string }).error ?? `tick stream ${res.status}`);
+            throw new Error(
+              (j as { error?: string }).error ?? `tick stream ${res.status}`,
+            );
           }
           backoff = 1000;
           streamDown = false;
-          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          const reader = res.body
+            .pipeThrough(new TextDecoderStream())
+            .getReader();
           let buf = "";
           while (!stopped) {
             const { value, done } = await reader.read();
@@ -237,15 +360,21 @@ export class LiveFeed implements Feed {
               const line = buf.slice(0, nl);
               buf = buf.slice(nl + 1);
               if (!line) continue;
-              const m = JSON.parse(line) as { t?: number; p?: number; source?: string; note?: string | null };
+              const m = JSON.parse(line) as {
+                t?: number;
+                p?: number;
+                source?: string;
+                note?: string | null;
+              };
               if (m.source) {
                 // First line of each stream: where the ticks come from.
-                this.ticksRule = m.source === "BRTI";
+                this.ticksRule = m.source !== "Pyth";
                 tickSource = { source: m.source, note: m.note ?? null };
                 reported = null;
                 continue;
               }
-              if (typeof m.t === "number" && typeof m.p === "number") onTick(m.t, m.p);
+              if (typeof m.t === "number" && typeof m.p === "number")
+                onTick(m.t, m.p);
             }
           }
         } catch (e) {
@@ -261,7 +390,9 @@ export class LiveFeed implements Feed {
                 : msg,
             });
           }
-          await new Promise((r) => setTimeout(r, /unknown action/i.test(msg) ? 60_000 : backoff));
+          await new Promise((r) =>
+            setTimeout(r, /unknown action/i.test(msg) ? 60_000 : backoff),
+          );
           backoff = Math.min(backoff * 2, 30_000);
         }
       }
@@ -275,15 +406,24 @@ export class LiveFeed implements Feed {
       try {
         const now = nowSec();
         const current = this.bucket(now);
-        const mins = (await this.fetchRange(current, now + 60, 1)).filter((m) => m.time >= current);
+        const mins = (await this.fetchRange(current, now + 60, 1)).filter(
+          (m) => m.time >= current,
+        );
         if (!mins.length || current <= this.lastClosed) return;
         if (forming && current > forming.time) void poll(); // previous candle just closed
-        const open = forming && forming.time === current ? forming.open : mins[0].open;
+        const open =
+          forming && forming.time === current ? forming.open : mins[0].open;
         forming = {
           time: current,
           open,
-          high: Math.max(...mins.map((m) => m.high), forming && forming.time === current ? forming.high : -Infinity),
-          low: Math.min(...mins.map((m) => m.low), forming && forming.time === current ? forming.low : Infinity),
+          high: Math.max(
+            ...mins.map((m) => m.high),
+            forming && forming.time === current ? forming.high : -Infinity,
+          ),
+          low: Math.min(
+            ...mins.map((m) => m.low),
+            forming && forming.time === current ? forming.low : Infinity,
+          ),
           close: mins[mins.length - 1].close,
         };
         emitForming();
@@ -298,7 +438,12 @@ export class LiveFeed implements Feed {
     const watchdog = window.setInterval(() => {
       if (stopped) return;
       if (Date.now() - lastTickAt > 20_000 && reported !== "fallback")
-        report({ state: "fallback", detail: lastTickAt ? "ticks stopped arriving" : "no ticks have arrived" });
+        report({
+          state: "fallback",
+          detail: lastTickAt
+            ? "ticks stopped arriving"
+            : "no ticks have arrived",
+        });
     }, 5000);
 
     void poll();
@@ -323,13 +468,35 @@ export interface CheckResult {
 }
 
 /** Ask Jev about the candle opening at `forTime`. Cached per candle on the backend, so viewers share one answer. */
-export async function askCheck(snapshot: unknown, forTime: number, timeframeMin: number, market: Market): Promise<CheckResult> {
-  return callFn<CheckResult>({ action: "check", snapshot, forTime, timeframeMin, market });
+export async function askCheck(
+  snapshot: unknown,
+  forTime: number,
+  timeframeMin: number,
+  market: Market,
+): Promise<CheckResult> {
+  return callFn<CheckResult>({
+    action: "check",
+    snapshot,
+    forTime,
+    timeframeMin,
+    market,
+  });
 }
 
 /** Bitcoin volume per candle (Coinbase BTC-USD), for Jev's context. */
-export async function fetchVolume(market: Market, tfMin: number, from: number, to: number): Promise<Map<number, number>> {
-  const r = await callFn<{ volume: { time: number; volume: number }[] }>({ action: "volume", market, from, to, granularity: tfMin * 60 });
+export async function fetchVolume(
+  market: Market,
+  tfMin: number,
+  from: number,
+  to: number,
+): Promise<Map<number, number>> {
+  const r = await callFn<{ volume: { time: number; volume: number }[] }>({
+    action: "volume",
+    market,
+    from,
+    to,
+    granularity: tfMin * 60,
+  });
   return new Map(r.volume.map((v) => [v.time, v.volume]));
 }
 
@@ -341,7 +508,14 @@ export async function askForecast(
   timeframeMin: number,
   market: Market,
 ): Promise<{ choice: string; probabilities: Record<string, number> }> {
-  return callFn({ action: "forecast", data, options, forTime, timeframeMin, market });
+  return callFn({
+    action: "forecast",
+    data,
+    options,
+    forTime,
+    timeframeMin,
+    market,
+  });
 }
 
 export interface TickCheck {
@@ -366,13 +540,24 @@ export async function askFlip(
   timeframeMin: number,
   market: Market,
 ): Promise<{ pFlip: number }> {
-  return callFn<{ pFlip: number }>({ action: "flip", state, slotKey, timeframeMin, market });
+  return callFn<{ pFlip: number }>({
+    action: "flip",
+    state,
+    slotKey,
+    timeframeMin,
+    market,
+  });
 }
 
 /** Which backend is deployed (older versions answer "unknown action"). */
-export async function backendVersion(): Promise<{ version: number; features: string[] } | null> {
+export async function backendVersion(): Promise<{
+  version: number;
+  features: string[];
+} | null> {
   try {
-    return await callFn<{ version: number; features: string[] }>({ action: "version" });
+    return await callFn<{ version: number; features: string[] }>({
+      action: "version",
+    });
   } catch (e) {
     if (/unknown action/i.test((e as Error).message)) return null;
     throw e;
@@ -418,7 +603,9 @@ export class SimFeed implements Feed {
     const out: Candle[] = [];
     for (let i = HISTORY_BARS; i > 0; i--) {
       const open = Number(this.price.toFixed(2));
-      let high = open, low = open, close = open;
+      let high = open,
+        low = open,
+        close = open;
       for (let k = 0; k < 30; k++) {
         close = this.step();
         high = Math.max(high, close);

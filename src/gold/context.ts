@@ -8,7 +8,7 @@ const r2 = (v: number) => Number(v.toFixed(2));
 const DAY = 86400;
 
 /** Round-number spacing that traders watch, per market. */
-const ROUND: Record<string, number> = { btc: 500, gold: 10 };
+const ROUND: Record<string, number> = { gold: 10, btc: 500, eth: 50, sol: 5, xrp: 0.05 };
 
 /** Group candles into longer ones (e.g. 1h or 4h), oldest first. */
 function group(cs: Candle[], sec: number): Candle[] {
@@ -132,7 +132,7 @@ export function marketContext(x: ContextInput): Record<string, unknown> | null {
       const tot = last12.reduce((s, r) => s + r.v!, 0);
       if (avg > 0 && tot > 0) {
         out.volume = {
-          how_to_read: "Coinbase BTC-USD volume. Ratios: 1 = average of the last 20 candles.",
+          how_to_read: "Coinbase volume. Ratios: 1 = average of the last 20 candles.",
           last_candle_vs_avg: r2(vs[19] / avg),
           last_3_vs_avg: r2(vs.slice(-3).reduce((s, v) => s + v, 0) / 3 / avg),
           last_5_vs_previous_15: r2(vs.slice(-5).reduce((s, v) => s + v, 0) / 5 / (vs.slice(0, 15).reduce((s, v) => s + v, 0) / 15)),

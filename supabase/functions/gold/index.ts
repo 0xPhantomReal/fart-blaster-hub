@@ -2,7 +2,7 @@
 // browser never sees them.
 // Secrets: PYTH_API_KEY, TYPESAFE_API_KEY; for live BRTI: KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY
 // (optional: PYTH_SYMBOL, PYTH_BTC_SYMBOL, PYTH_HERMES_KEY, PYTH_GOLD_FEED_ID, PYTH_BTC_FEED_ID, JEV_MODEL, KALSHI_WS_URL)
-// Every action takes an optional `market`: "gold" (default) or "btc".
+// Every action takes an optional `market`: "gold" (default), "btc", "eth", "sol" or "xrp".
 //
 // POST { action: "history", from, to, resolution } → { candles, jev }
 // POST { action: "stream" }                        → NDJSON lines { t, p } on every Pyth price tick
@@ -40,10 +40,11 @@ function cached<T>(map: Map<string, { at: number; body: unknown }>, key: string,
 
 // ── Markets ────────────────────────────────────────────────────────────
 // gold: Pyth XAU/USD for history and live ticks.
-// btc:  live ticks from the CME CF Bitcoin Real Time Index (BRTI) via Kalshi's CF Benchmarks feed (needs Kalshi API
-//       secrets); history, and live ticks when BRTI isn't available, from Pyth BTC/USD.
+// btc, eth, sol, xrp: live ticks from the CME CF Real Time Index (BRTI, ETHUSD_RTI, …) via Kalshi's CF Benchmarks
+//       feed (needs Kalshi API secrets); history, and live ticks when the index isn't available, from Pyth.
+//       Volume for Jev's context from Coinbase.
 
-type Market = "gold" | "btc";
+type Market = "gold" | "btc" | "eth" | "sol" | "xrp";
 interface MarketCfg {
   instrument: string; //   how Jev is told what it's looking at
   symbolEnv: string; //    secret that overrides the Pyth history symbol
@@ -54,6 +55,8 @@ interface MarketCfg {
   feedQueries: string[];
   feedRe: RegExp;
   knownFeed: string; //    used only if the lookup fails
+  cfIndex?: string; //     CF Benchmarks index id on Kalshi's feed
+  coinbase?: string; //    Coinbase product for volume
 }
 const MARKETS: Record<Market, MarketCfg> = {
   gold: {
@@ -77,10 +80,52 @@ const MARKETS: Record<Market, MarketCfg> = {
     feedQueries: ["query=BTC&asset_type=crypto", "query=BTC"],
     feedRe: /^Crypto\.BTC\/USD$/i,
     knownFeed: "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    cfIndex: "BRTI",
+    coinbase: "BTC-USD",
+  },
+  eth: {
+    instrument: "Ether (ETH/USD, CME CF Ether-Dollar Real Time Index)",
+    symbolEnv: "PYTH_ETH_SYMBOL",
+    symbolQuery: "query=ETH&asset_type=crypto",
+    symbolRe: /^Crypto\.ETH\/USD$/i,
+    symbolDefault: "Crypto.ETH/USD",
+    feedEnv: "PYTH_ETH_FEED_ID",
+    feedQueries: ["query=ETH&asset_type=crypto", "query=ETH"],
+    feedRe: /^Crypto\.ETH\/USD$/i,
+    knownFeed: "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    cfIndex: "ETHUSD_RTI",
+    coinbase: "ETH-USD",
+  },
+  sol: {
+    instrument: "Solana (SOL/USD, CME CF Solana-Dollar Real Time Index)",
+    symbolEnv: "PYTH_SOL_SYMBOL",
+    symbolQuery: "query=SOL&asset_type=crypto",
+    symbolRe: /^Crypto\.SOL\/USD$/i,
+    symbolDefault: "Crypto.SOL/USD",
+    feedEnv: "PYTH_SOL_FEED_ID",
+    feedQueries: ["query=SOL&asset_type=crypto", "query=SOL"],
+    feedRe: /^Crypto\.SOL\/USD$/i,
+    knownFeed: "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    cfIndex: "SOLUSD_RTI",
+    coinbase: "SOL-USD",
+  },
+  xrp: {
+    instrument: "XRP (XRP/USD, CME CF XRP-Dollar Real Time Index)",
+    symbolEnv: "PYTH_XRP_SYMBOL",
+    symbolQuery: "query=XRP&asset_type=crypto",
+    symbolRe: /^Crypto\.XRP\/USD$/i,
+    symbolDefault: "Crypto.XRP/USD",
+    feedEnv: "PYTH_XRP_FEED_ID",
+    feedQueries: ["query=XRP&asset_type=crypto", "query=XRP"],
+    feedRe: /^Crypto\.XRP\/USD$/i,
+    knownFeed: "0xec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
+    cfIndex: "XRPUSD_RTI",
+    coinbase: "XRP-USD",
   },
 };
 /** Market from the request (older pages don't send one: they are on gold). */
-const marketOf = (b: Record<string, unknown>): Market => (b.market === "btc" ? "btc" : "gold");
+const marketOf = (b: Record<string, unknown>): Market =>
+  typeof b.market === "string" && b.market in MARKETS ? (b.market as Market) : "gold";
 
 // ── Pyth ───────────────────────────────────────────────────────────────
 
@@ -412,7 +457,7 @@ function parseFrame(b: Uint8Array): { fin: boolean; op: number; payload: Uint8Ar
  * Open Kalshi's CF Benchmarks feed for BRTI and resolve once the first value arrives (or reject with the reason).
  * Tries the 5-per-second channel, then the once-per-second one.
  */
-async function openBrti(onTick: (t: number, p: number) => void, onEnd: () => void = () => {}): Promise<{ close: () => void; channel: string }> {
+async function openBrti(index: string, onTick: (t: number, p: number) => void, onEnd: () => void = () => {}): Promise<{ close: () => void; channel: string }> {
   if (!kalshiConfigured()) throw new Error("Kalshi API secrets (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY) are not set");
   const url = KALSHI_WS();
   const headers = await kalshiHeaders(new URL(url).pathname);
@@ -433,9 +478,9 @@ async function openBrti(onTick: (t: number, p: number) => void, onEnd: () => voi
       }
       reject(new Error(why));
     };
-    const timer = setTimeout(() => fail("no BRTI value from Kalshi within 8s"), 8000);
+    const timer = setTimeout(() => fail(`no ${index} value from Kalshi within 8s`), 8000);
     const subscribe = (ch: string, id: number) =>
-      ws.send(JSON.stringify({ id, cmd: "subscribe", params: { channels: [ch], index_ids: ["BRTI"] } }));
+      ws.send(JSON.stringify({ id, cmd: "subscribe", params: { channels: [ch], index_ids: [index] } }));
     ws.onopen = () => subscribe(channel, 1);
     ws.onerror = (e) => fail(`Kalshi websocket error: ${(e as ErrorEvent).message ?? "connection failed"}`);
     ws.onclose = (e) => fail(`Kalshi closed the connection (${e.code}${e.reason ? `: ${e.reason}` : ""})`);
@@ -455,10 +500,10 @@ async function openBrti(onTick: (t: number, p: number) => void, onEnd: () => voi
       }
       let t: number | null = null;
       let p: number | null = null;
-      if (m.type === "cfbenchmarks_value_5hz" && m.msg?.index_id === "BRTI") {
+      if (m.type === "cfbenchmarks_value_5hz" && m.msg?.index_id === index) {
         p = Number(m.msg.value_usd);
         t = Number(m.msg.source_ts_ms) / 1000;
-      } else if (m.type === "cfbenchmarks_value" && m.msg?.index_id === "BRTI") {
+      } else if (m.type === "cfbenchmarks_value" && m.msg?.index_id === index) {
         try {
           const raw = JSON.parse(String(m.msg.data));
           p = Number(raw.value);
@@ -483,9 +528,10 @@ async function openBrti(onTick: (t: number, p: number) => void, onEnd: () => voi
 /** One-shot check of the tick stream: which source/host/feed works, and the first price received. */
 async function tickDiagnostics(m: Market) {
   const brti: { ok: boolean; problem: string | null } = { ok: false, problem: null };
-  if (m === "btc") {
+  const index = MARKETS[m].cfIndex;
+  if (index) {
     try {
-      const c = await openBrti(() => {});
+      const c = await openBrti(index, () => {});
       c.close();
       brti.ok = true;
     } catch (e) {
@@ -510,7 +556,7 @@ async function tickDiagnostics(m: Market) {
       feedId: feed.id,
       feedSource: feed.source,
       firstPrice,
-      brti: m === "btc" ? brti : undefined,
+      brti: index ? brti : undefined,
       problems: firstPrice === null ? [...errors, "connected but no price arrived within 8s (wrong feed id, or market closed?)"] : errors,
     };
   } catch (e) {
@@ -530,7 +576,8 @@ async function tickStream(m: Market): Promise<Response> {
   const line = (o: unknown) => enc.encode(JSON.stringify(o) + "\n");
   let note: string | null = null;
 
-  if (m === "btc") {
+  const index = MARKETS[m].cfIndex;
+  if (index) {
     const early: Uint8Array[] = [];
     let ctl: ReadableStreamDefaultController<Uint8Array> | null = null;
     const push = (t: number, p: number) => {
@@ -548,11 +595,11 @@ async function tickStream(m: Market): Promise<Response> {
           // already closed
         }
       };
-      const brti = await openBrti(push, end);
+      const brti = await openBrti(index, push, end);
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
           ctl = controller;
-          controller.enqueue(line({ source: "BRTI", note: `CF Benchmarks via Kalshi (${brti.channel})` }));
+          controller.enqueue(line({ source: index, note: `CF Benchmarks via Kalshi (${brti.channel})` }));
           for (const l of early) controller.enqueue(l);
           timer = setTimeout(() => {
             brti.close();
@@ -570,7 +617,7 @@ async function tickStream(m: Market): Promise<Response> {
       });
       return new Response(body, { headers: { ...cors, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" } });
     } catch (e) {
-      note = `BRTI unavailable (${(e as Error).message}); using Pyth BTC/USD`;
+      note = `${index} unavailable (${(e as Error).message}); using Pyth ${MARKETS[m].symbolDefault.replace("Crypto.", "")}`;
     }
   }
 
@@ -602,11 +649,11 @@ async function tickStream(m: Market): Promise<Response> {
 // ── Bitcoin volume (Coinbase BTC-USD public candles; no key needed) ──
 // Pyth and BRTI carry no volume, so Jev's bitcoin context uses Coinbase's (a BRTI constituent exchange).
 
-const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD/candles";
+const COINBASE = "https://api.exchange.coinbase.com/products";
 const volumeCache = new Map<string, { at: number; body: unknown }>();
 
-async function volume(from: number, to: number, granularity: number) {
-  const key = `${from}:${Math.floor(to / 30)}:${granularity}`;
+async function volume(product: string, from: number, to: number, granularity: number) {
+  const key = `${product}:${from}:${Math.floor(to / 30)}:${granularity}`;
   const hit = cached<unknown>(volumeCache, key, 30_000);
   if (hit) return hit;
   const out: { time: number; volume: number }[] = [];
@@ -618,7 +665,7 @@ async function volume(from: number, to: number, granularity: number) {
       start: new Date(a * 1000).toISOString(),
       end: new Date(b * 1000).toISOString(),
     });
-    const res = await fetch(`${COINBASE}?${q}`, { headers: { Accept: "application/json", "User-Agent": "gold-chart/1.0" } });
+    const res = await fetch(`${COINBASE}/${product}/candles?${q}`, { headers: { Accept: "application/json", "User-Agent": "gold-chart/1.0" } });
     if (!res.ok) throw new Error(`Coinbase ${res.status}: ${(await res.text()).slice(0, 120)}`);
     const rows: number[][] = await res.json();
     for (const r of rows) out.push({ time: r[0], volume: r[5] });
@@ -762,8 +809,8 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 13,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume"],
+        version: 14,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });
@@ -771,12 +818,13 @@ Deno.serve(async (req) => {
 
     if (body.action === "volume") {
       const { from, to, granularity } = body as { from?: unknown; to?: unknown; granularity?: unknown };
-      if (marketOf(body) !== "btc") return json({ volume: [] });
+      const product = MARKETS[marketOf(body)].coinbase;
+      if (!product) return json({ volume: [] });
       if (typeof from !== "number" || typeof to !== "number" || ![300, 900].includes(granularity as number)) {
         return json({ error: "from, to and granularity (300 or 900) required" }, 400);
       }
       if (to <= from || to - from > (granularity as number) * 1500) return json({ error: "bad time range" }, 400);
-      return json(await volume(Math.floor(from), Math.floor(to), granularity as number));
+      return json(await volume(product, Math.floor(from), Math.floor(to), granularity as number));
     }
 
     if (body.action === "tickcheck") {
@@ -800,7 +848,7 @@ Deno.serve(async (req) => {
 
       const tf = tfOf(body);
       const m = marketOf(body);
-      const key = `check:${m === "gold" ? "" : "btc:"}${tf}:${forTime}`;
+      const key = `check:${m === "gold" ? "" : `${m}:`}${tf}:${forTime}`;
       const hit = cached<unknown>(jevCache, key, 60 * 60 * 1000);
       if (hit) return json(hit);
       let run = inflight.get(key);
@@ -823,7 +871,7 @@ Deno.serve(async (req) => {
       // Shared per 30-second slot (live) or per past candle (replay), so viewers and reloads reuse one answer.
       const tf = tfOf(body);
       const m = marketOf(body);
-      const key = `flip:${m === "gold" ? "" : "btc:"}${tf}:${slotKey}`;
+      const key = `flip:${m === "gold" ? "" : `${m}:`}${tf}:${slotKey}`;
       const hit = cached<unknown>(jevCache, key, slotKey.startsWith("past:") ? 6 * 3600 * 1000 : 60_000);
       if (hit) return json(hit);
       let run = inflight.get(key);

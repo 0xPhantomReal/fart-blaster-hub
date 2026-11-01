@@ -267,7 +267,7 @@ export function useGold(market: Market, tfMin: Timeframe, forecastOn: boolean): 
 
     // ── Extra context for Jev: levels, volatility, longer timeframes, bitcoin volume ──
     const volumes = new Map<number, number>();
-    const volumeOn = () => market === "btc" && features.includes("volume");
+    const volumeOn = () => market !== "gold" && features.includes("volume");
     const loadVolume = async (from: number, to: number) => {
       if (!volumeOn()) return;
       try {

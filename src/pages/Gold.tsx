@@ -131,7 +131,8 @@ function save(key: string, v: unknown) {
 }
 const isTf = (v: unknown): v is Timeframe =>
   (TIMEFRAMES as readonly unknown[]).includes(v);
-const isMarket = (v: unknown): v is Market => v === "gold" || v === "btc";
+const isMarket = (v: unknown): v is Market =>
+  typeof v === "string" && v in MARKETS;
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 
 /** Forecast scores: first bar's color, and direction after 5 bars. */
@@ -302,7 +303,7 @@ export default function Gold() {
         <div
           className={`text-lg font-semibold tabular-nums ${last && last.close < last.open ? RED : GREEN}`}
         >
-          {last ? last.close.toFixed(2) : "—"}
+          {last ? last.close.toFixed(mk.decimals) : "—"}
         </div>
         <div
           className={`ml-auto text-xs ${g.source === "Simulated" ? "text-[#d4a72c]" : MUTED}`}
@@ -311,8 +312,10 @@ export default function Gold() {
             ? "loading…"
             : g.source === "Simulated"
               ? "SIMULATED DATA"
-              : g.ticks.state === "streaming" && g.ticks.source === "BRTI"
-                ? "BRTI live"
+              : g.ticks.state === "streaming" &&
+                  g.ticks.source &&
+                  g.ticks.source !== "Pyth"
+                ? `${g.ticks.source} live`
                 : "Pyth live"}
         </div>
       </header>
@@ -327,6 +330,7 @@ export default function Gold() {
             forecast={forecastOn ? fc.candles : null}
             arrows={arrows}
             minConf={minConf}
+            decimals={mk.decimals}
           />
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
@@ -369,7 +373,7 @@ export default function Gold() {
                     className={lv.move > 0 ? GREEN : lv.move < 0 ? RED : MUTED}
                   >
                     {lv.move >= 0 ? "+" : ""}
-                    {lv.move.toFixed(2)} so far
+                    {lv.move.toFixed(mk.decimals)} so far
                   </span>
                   {lv.move !== 0 && (
                     <span className={MUTED}>
@@ -757,28 +761,26 @@ export default function Gold() {
                 className={`text-sm ${g.ticks.state === "fallback" ? "text-[#d4a72c]" : MUTED}`}
               >
                 {g.ticks.state === "streaming"
-                  ? g.ticks.source === "BRTI"
-                    ? "Streaming the CME CF Bitcoin Real Time Index (BRTI) via Kalshi, up to 5 values a second."
+                  ? g.ticks.source && g.ticks.source !== "Pyth"
+                    ? `Streaming the ${mk.indexName ?? g.ticks.source} (${g.ticks.source}) via Kalshi, up to 5 values a second.`
                     : "Streaming every Pyth price update."
                   : g.ticks.state === "connecting"
                     ? "Connecting to the tick stream…"
                     : `Not streaming (${g.ticks.detail}). The candle updates from 1-minute data every few seconds instead.`}
               </p>
-              {market === "btc" &&
-                g.ticks.source !== "BRTI" &&
-                g.ticks.note && (
-                  <p className="mt-1 text-xs text-[#d4a72c]">
-                    {g.ticks.note}.{" "}
-                    {/not set/.test(g.ticks.note)
-                      ? "To use BRTI, create a Kalshi API key and add its ID and private key as the backend secrets KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY."
-                      : ""}
-                  </p>
-                )}
-              {market === "btc" && (
+              {mk.index && g.ticks.source !== mk.index && g.ticks.note && (
+                <p className="mt-1 text-xs text-[#d4a72c]">
+                  {g.ticks.note}.{" "}
+                  {/not set/.test(g.ticks.note)
+                    ? `To use ${mk.index}, create a Kalshi API key and add its ID and private key as the backend secrets KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY.`
+                    : ""}
+                </p>
+              )}
+              {mk.index && (
                 <p className={`mt-1 text-xs ${MUTED}`}>
-                  Past candles (and the model's training) come from Pyth
-                  BTC/USD, which tracks BRTI closely; candles streamed live from
-                  BRTI are kept as BRTI.
+                  Past candles (and the model's training) come from Pyth{" "}
+                  {mk.pair.split(" ")[0]}, which tracks {mk.index} closely;
+                  candles streamed live from {mk.index} are kept as {mk.index}.
                 </p>
               )}
               {g.ticks.state === "fallback" && g.ticks.check && (

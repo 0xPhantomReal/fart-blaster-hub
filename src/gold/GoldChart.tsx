@@ -15,12 +15,29 @@ import {
 import type { Candle } from "./indicators";
 import type { ClosedBar } from "./useGold";
 
-const COLORS = { bg: "#0e1116", line: "#262c36", muted: "#8b949e", green: "#26a69a", red: "#ef5350", miss: "#6b7280" };
+const COLORS = {
+  bg: "#0e1116",
+  line: "#262c36",
+  muted: "#8b949e",
+  green: "#26a69a",
+  red: "#ef5350",
+  miss: "#6b7280",
+};
 
-const toBar = (c: Candle) => ({ time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close });
+const toBar = (c: Candle) => ({
+  time: c.time as UTCTimestamp,
+  open: c.open,
+  high: c.high,
+  low: c.low,
+  close: c.close,
+});
 
 /** An arrow on each candle a call was made for: colored if right, gray if wrong. */
-function markerFor(b: ClosedBar, mode: "jev" | "refined", minConf: number): SeriesMarker<Time>[] {
+function markerFor(
+  b: ClosedBar,
+  mode: "jev" | "refined",
+  minConf: number,
+): SeriesMarker<Time>[] {
   const o = mode === "refined" ? b.refined : b.outcome;
   const p = mode === "refined" ? b.pRef : b.pJev;
   if (p === undefined || Math.max(p, 1 - p) < minConf) return []; // not confident enough to show
@@ -44,7 +61,9 @@ export function GoldChart({
   forecast,
   arrows = "jev",
   minConf = 0.5,
+  decimals = 2,
 }: {
+  decimals?: number; // price decimals (XRP needs 4)
   minConf?: number; // only draw arrows at least this sure (0.5 = every call)
   arrows?: "jev" | "refined";
   bars: ClosedBar[];
@@ -65,11 +84,19 @@ export function GoldChart({
     const c = createChart(el.current, {
       autoSize: true,
       layout: { background: { color: COLORS.bg }, textColor: COLORS.muted },
-      grid: { vertLines: { color: COLORS.line }, horzLines: { color: COLORS.line } },
+      grid: {
+        vertLines: { color: COLORS.line },
+        horzLines: { color: COLORS.line },
+      },
       // Times in the viewer's own time zone (the library defaults to UTC).
       localization: {
         timeFormatter: (t: number) =>
-          new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
+          new Date(t * 1000).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          }),
       },
       timeScale: {
         timeVisible: true,
@@ -121,13 +148,28 @@ export function GoldChart({
     if (!candles.current || drawn.current === key || !bars.length) return;
     drawn.current = key;
     candles.current.setData(bars.map((b) => toBar(b.candle)));
-    markers.current?.setMarkers(bars.flatMap((b) => markerFor(b, arrows, minConf)));
+    markers.current?.setMarkers(
+      bars.flatMap((b) => markerFor(b, arrows, minConf)),
+    );
     if (!zoomed.current && chart.current) {
       zoomed.current = true;
       const show = window.innerWidth < 640 ? 40 : 100;
-      chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - show), to: bars.length + 3 });
+      chart.current.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, bars.length - show),
+        to: bars.length + 3,
+      });
     }
   }, [bars, version, arrows, minConf]);
+
+  useEffect(() => {
+    const priceFormat = {
+      type: "price" as const,
+      precision: decimals,
+      minMove: 1 / 10 ** decimals,
+    };
+    candles.current?.applyOptions({ priceFormat });
+    ghosts.current?.applyOptions({ priceFormat });
+  }, [decimals]);
 
   useEffect(() => {
     if (!ghosts.current) return;
@@ -136,13 +178,18 @@ export function GoldChart({
     if (forecast && chart.current) {
       const r = chart.current.timeScale().getVisibleLogicalRange();
       // Only when looking at the latest candles (don't yank the view if scrolled back in history).
-      if (r && r.to >= bars.length - 2 && r.to < bars.length + forecast.length) chart.current.timeScale().setVisibleLogicalRange({ from: r.from, to: bars.length + forecast.length + 1 });
+      if (r && r.to >= bars.length - 2 && r.to < bars.length + forecast.length)
+        chart.current.timeScale().setVisibleLogicalRange({
+          from: r.from,
+          to: bars.length + forecast.length + 1,
+        });
     }
   }, [forecast, bars.length]);
 
   useEffect(() => {
     if (!candles.current || !forming || !bars.length) return;
-    if (forming.time > bars[bars.length - 1].candle.time) candles.current.update(toBar(forming));
+    if (forming.time > bars[bars.length - 1].candle.time)
+      candles.current.update(toBar(forming));
   }, [forming, bars]);
 
   return <div ref={el} className="h-full w-full" />;
