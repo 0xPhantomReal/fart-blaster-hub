@@ -108,6 +108,7 @@ export interface ClosedBar {
   pJev?: number; //            Jev's chance of green for this candle
   pRef?: number; //            refined chance of green
   pMin?: number; //            Jev's chance of green read X minutes into the candle (minute mode)
+  minMove?: number; //         the candle's move at that minute (its sign = "current color holds")
 }
 
 /** Jev refined: Jev's chance of green after the correction learned from its own record. */
@@ -385,6 +386,7 @@ export function useGold(
       pJev: jevByTime.get(c.time),
       pRef: refinedByTime.get(c.time),
       pMin: minuteReads.get(c.time)?.pJev,
+      minMove: minuteReads.get(c.time)?.move,
     });
     const redrawJevArrows = () => {
       bars = bars.map((b) => barFor(b.candle));

@@ -225,6 +225,43 @@ export default function Gold() {
     arrowMode === "minute" ? callMinute : null,
   );
   const mn = g.minute;
+  /** Jev's minute-X reads on the chart's candles, bucketed by how sure it was, vs "holds" on the same candles. */
+  const byConf = [
+    [0.5, 0.6],
+    [0.6, 0.7],
+    [0.7, 0.8],
+    [0.8, 0.9],
+    [0.9, 1.01],
+  ].map(([lo, hi]) => {
+    let n = 0;
+    let jev = 0;
+    let holds = 0;
+    for (const b of g.bars) {
+      const p = b.pMin;
+      const mv = b.minMove;
+      const c = b.candle;
+      if (
+        p === undefined ||
+        mv === undefined ||
+        mv === 0 ||
+        p === 0.5 ||
+        c.close === c.open
+      )
+        continue;
+      const sure = Math.max(p, 1 - p);
+      if (sure < lo || sure >= hi) continue;
+      const green = c.close > c.open;
+      n += 1;
+      if (p > 0.5 === green) jev += 1;
+      if (mv > 0 === green) holds += 1;
+    }
+    return {
+      label: `${Math.round(lo * 100)}–${Math.min(100, Math.round(hi * 100))}%`,
+      n,
+      jev: n ? jev / n : 0,
+      holds: n ? holds / n : 0,
+    };
+  });
   const cols: [ArrowMode, string][] =
     arrowMode === "minute"
       ? [["minute", `Jev at minute ${callMinute}`]]
@@ -788,6 +825,61 @@ export default function Gold() {
                     </tbody>
                   </table>
                 )}
+                {byConf.some((r) => r.n > 0) && (
+                  <>
+                    <p className={`mb-1 mt-3 text-xs ${MUTED}`}>
+                      Right at close, by how sure Jev was at minute {callMinute}{" "}
+                      (same candles: what "current color holds" scored):
+                    </p>
+                    <table className="w-full text-sm tabular-nums">
+                      <thead>
+                        <tr className={`text-xs ${MUTED}`}>
+                          <th className="pb-1 text-left font-medium">
+                            Jev said
+                          </th>
+                          <th className="pb-1 text-right font-medium">
+                            Jev right
+                          </th>
+                          <th className="pb-1 text-right font-medium">
+                            Holds right
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {byConf.map((r) => (
+                          <tr
+                            key={r.label}
+                            className="border-t border-[#262c36]"
+                          >
+                            <td className="py-1.5 text-left">{r.label}</td>
+                            <td
+                              className={`py-1.5 text-right ${r.n >= 15 ? (r.jev > r.holds + 0.03 ? GREEN : r.jev < r.holds - 0.03 ? RED : "") : ""}`}
+                            >
+                              {r.n ? (
+                                <>
+                                  {pct(r.jev, 0)}{" "}
+                                  <span className={`text-xs ${MUTED}`}>
+                                    ({r.n})
+                                  </span>
+                                </>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="py-1.5 text-right">
+                              {r.n ? pct(r.holds, 0) : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className={`mt-1 text-xs ${MUTED}`}>
+                      Green = Jev beat "holds" in that band (15+ candles), red =
+                      it did worse. A band where Jev is right about as often as
+                      it says (e.g. ~85% in 80–90%) is well calibrated.
+                    </p>
+                  </>
+                )}
                 <p className={`mt-2 text-xs ${MUTED}`}>
                   Jev reads the candle {callMinute} minute
                   {callMinute === 1 ? "" : "s"} after it opens (moves, high/low,
@@ -817,7 +909,10 @@ export default function Gold() {
                 </tr>
               </thead>
               <tbody>
-                {[0.5, 0.55, 0.58, 0.6, 0.65].map((t) => {
+                {(arrowMode === "minute"
+                  ? [0.5, 0.6, 0.7, 0.8, 0.9]
+                  : [0.5, 0.55, 0.58, 0.6, 0.65]
+                ).map((t) => {
                   const cell = (src: ArrowMode) => {
                     const r = tallyAt(src, t);
                     return r.n ? (
