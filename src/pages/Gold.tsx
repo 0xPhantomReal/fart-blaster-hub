@@ -449,29 +449,60 @@ export default function Gold() {
               </>
             )}
             {arrowMode === "minute" &&
-              mn.now &&
               g.forming &&
-              mn.now.time === g.forming.time && (
-                <div className="mt-1 text-sm tabular-nums">
-                  Jev at minute {callMinute}:{" "}
-                  <span
-                    className={
-                      mn.now.pJev > 0.5 ? GREEN : mn.now.pJev < 0.5 ? RED : ""
-                    }
-                  >
-                    {mn.now.pJev > 0.5
-                      ? "green"
-                      : mn.now.pJev < 0.5
-                        ? "red"
-                        : "no call"}{" "}
-                    {pct(Math.max(mn.now.pJev, 1 - mn.now.pJev), 0)}
-                  </span>
-                  <span className={`text-xs ${MUTED}`}>
-                    {" "}
-                    · was {mn.now.move > 0 ? "green" : "red"} then
-                  </span>
-                </div>
-              )}
+              callMinute !== null &&
+              (() => {
+                const f = g.forming!;
+                const read = mn.now && mn.now.time === f.time ? mn.now : null;
+                const elapsed = Date.now() / 1000 - f.time;
+                const due = callMinute * 60 - elapsed;
+                const clock = (sec: number) =>
+                  `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+                return (
+                  <div className="mt-3 rounded-lg border border-[#d4a72c]/50 px-3 py-2">
+                    <div
+                      className={`text-xs uppercase tracking-wider ${MUTED}`}
+                    >
+                      Jev at minute {callMinute}
+                    </div>
+                    {read ? (
+                      <>
+                        <div
+                          className={`text-xl font-bold ${read.pJev > 0.5 ? GREEN : read.pJev < 0.5 ? RED : MUTED}`}
+                        >
+                          {read.pJev > 0.5
+                            ? "GREEN"
+                            : read.pJev < 0.5
+                              ? "RED"
+                              : "NO CALL"}{" "}
+                          <span className="text-base font-semibold">
+                            {pct(Math.max(read.pJev, 1 - read.pJev), 0)}
+                          </span>
+                        </div>
+                        <div className={`text-xs ${MUTED}`}>
+                          It was {read.move > 0 ? "green" : "red"} at minute{" "}
+                          {callMinute}
+                          {read.pJev > 0.5 !== read.move > 0
+                            ? " · Jev is calling a flip"
+                            : " · Jev says it holds"}
+                        </div>
+                      </>
+                    ) : due > 0 ? (
+                      <div className="text-sm">
+                        Reads this candle in {clock(due)}
+                      </div>
+                    ) : due > -45 ? (
+                      <div className="text-sm">Reading now…</div>
+                    ) : (
+                      <div className={`text-xs ${MUTED}`}>
+                        {/error/.test(mn.status)
+                          ? mn.status
+                          : `No read for this candle (the page wasn't open at minute ${callMinute}, or the backend isn't deployed). Next read: minute ${callMinute} of the next candle.`}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             <div className={`mt-2 text-xs tabular-nums ${MUTED}`}>
               {lv ? (
                 <>
