@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
+import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import { minuteChoices, readLabel, readShort } from "@/gold/minuteCall";
 import { MARKETS, TIMEFRAMES, type Market, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
@@ -1049,6 +1050,13 @@ export default function Gold() {
               .
             </p>
           </section>
+
+          {market === "btc" && tfMin === 5 && g.source !== "Simulated" && (
+            <section>
+              <Label>Polymarket bot</Label>
+              <FadeBotPanel />
+            </section>
+          )}
 
           {g.source !== "Simulated" && (
             <section>

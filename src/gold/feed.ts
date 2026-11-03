@@ -702,3 +702,57 @@ export class SimFeed implements Feed {
     return () => window.clearInterval(id);
   }
 }
+
+// ── Fade bot (Polymarket US), run on a schedule by the `fadebot` edge function ──
+
+export interface FadeBotBet {
+  window_start: string | number;
+  mode: string;
+  status: string; // open | settled | skipped | void
+  reason: string | null;
+  jev_sure: number | null;
+  side: string | null;
+  stake: number | null;
+  price: number | null;
+  shares: number | null;
+  limit_price: number | null;
+  limit_shares: number | null;
+  limit_filled: number | null;
+  result: string | null;
+  pnl: number | null;
+}
+export interface FadeBotStatus {
+  settings: {
+    mode: string;
+    baseBet: number;
+    maxFibStep: number | null;
+    limitPrice: number;
+    limitShares: number;
+  };
+  state: {
+    step: number;
+    total_pnl: number;
+    worst_drawdown: number;
+    trades: number;
+    wins: number;
+  };
+  nextStake: number;
+  bets: FadeBotBet[];
+}
+
+/** The bot's settings, totals and recent bets, or null if the bot isn't deployed. */
+export async function fadeBotStatus(): Promise<FadeBotStatus | null> {
+  if (!FN_URL) return null;
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY
+        ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
+        : {}),
+    },
+    body: JSON.stringify({ action: "status" }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json()) as FadeBotStatus;
+}
