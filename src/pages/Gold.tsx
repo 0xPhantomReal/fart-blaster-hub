@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
-import { minuteChoices } from "@/gold/minuteCall";
+import { minuteChoices, readLabel, readShort } from "@/gold/minuteCall";
 import { MARKETS, TIMEFRAMES, type Market, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
@@ -264,7 +264,7 @@ export default function Gold() {
   });
   const cols: [ArrowMode, string][] =
     arrowMode === "minute"
-      ? [["minute", `Jev at minute ${callMinute}`]]
+      ? [["minute", `Jev at ${readLabel(callMinute!)}`]]
       : [
           ["jev", "Jev"],
           ["refined", "Refined"],
@@ -500,7 +500,7 @@ export default function Gold() {
                     <div
                       className={`text-xs uppercase tracking-wider ${MUTED}`}
                     >
-                      Jev at minute {callMinute}
+                      Jev at {readLabel(callMinute)}
                     </div>
                     {read ? (
                       <>
@@ -517,8 +517,8 @@ export default function Gold() {
                           </span>
                         </div>
                         <div className={`text-xs ${MUTED}`}>
-                          It was {read.move > 0 ? "green" : "red"} at minute{" "}
-                          {callMinute}
+                          It was {read.move > 0 ? "green" : "red"} at{" "}
+                          {readLabel(callMinute)}
                           {read.pJev > 0.5 !== read.move > 0
                             ? " · Jev is calling a flip"
                             : " · Jev says it holds"}
@@ -534,7 +534,7 @@ export default function Gold() {
                       <div className={`text-xs ${MUTED}`}>
                         {/error/.test(mn.status)
                           ? mn.status
-                          : `No read for this candle (the page wasn't open at minute ${callMinute}, or the backend isn't deployed). Next read: minute ${callMinute} of the next candle.`}
+                          : `No read for this candle (the page wasn't open at ${readLabel(callMinute)}, or the backend isn't deployed). Next read: ${readLabel(callMinute)} into the next candle.`}
                       </div>
                     )}
                   </div>
@@ -752,21 +752,21 @@ export default function Gold() {
                       ? "Jev"
                       : m === "refined"
                         ? "Refined"
-                        : `Jev at minute ${callMinute}`}
+                        : `Jev at ${readShort(callMinute!)}`}
                   </button>
                 ))}
             </div>
             {arrowMode === "minute" && (
               <div className="mb-3 rounded-md border border-[#262c36] p-2">
                 <div className="mb-2 flex items-center gap-1 text-xs">
-                  <span className={MUTED}>Read the candle at minute</span>
+                  <span className={MUTED}>Read the candle at</span>
                   {minuteOpts.map((m) => (
                     <button
                       key={m}
                       onClick={() => setMinutePick(m)}
                       className={`rounded px-2 py-0.5 ${m === callMinute ? "bg-[#d4a72c] font-semibold text-[#0e1116]" : "text-[#8b949e] hover:bg-[#1f252e]"}`}
                     >
-                      {m}
+                      {readShort(m)}
                     </button>
                   ))}
                 </div>
@@ -828,8 +828,9 @@ export default function Gold() {
                 {byConf.some((r) => r.n > 0) && (
                   <>
                     <p className={`mb-1 mt-3 text-xs ${MUTED}`}>
-                      Right at close, by how sure Jev was at minute {callMinute}{" "}
-                      (same candles: what "current color holds" scored):
+                      Right at close, by how sure Jev was at{" "}
+                      {readLabel(callMinute!)} (same candles: what "current
+                      color holds" scored):
                     </p>
                     <table className="w-full text-sm tabular-nums">
                       <thead>
@@ -881,13 +882,15 @@ export default function Gold() {
                   </>
                 )}
                 <p className={`mt-2 text-xs ${MUTED}`}>
-                  Jev reads the candle {callMinute} minute
-                  {callMinute === 1 ? "" : "s"} after it opens (moves, high/low,
-                  pullback, time left, last 3 candles) and calls its final
-                  color.
+                  Jev reads the candle{" "}
+                  {callMinute! < 1
+                    ? `${Math.round(callMinute! * 60)} seconds`
+                    : `${callMinute} minute${callMinute === 1 ? "" : "s"}`}{" "}
+                  after it opens (moves, high/low, pullback, time left, last 3
+                  candles) and calls its final color.
                   {mn.past &&
                     mn.past.flipped.n > 0 &&
-                    ` On past candles, ${pct(mn.past.flipped.right / mn.past.flipped.n, 0)} changed color after minute ${callMinute}, so "current color holds" is right ${pct(1 - mn.past.flipped.right / mn.past.flipped.n, 0)} of the time.`}{" "}
+                    ` On past candles, ${pct(mn.past.flipped.right / mn.past.flipped.n, 0)} changed color after ${readLabel(callMinute!)}, so "current color holds" is right ${pct(1 - mn.past.flipped.right / mn.past.flipped.n, 0)} of the time.`}{" "}
                   Jev only adds something if it beats that row, which shows up
                   in "when it calls a flip" being well above 50%.
                   {` ${mn.calls} Jev calls for this.`}

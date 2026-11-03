@@ -1186,6 +1186,12 @@ export function useGold(
         });
       if (TF_SECONDS < 300)
         return setMinute({ status: "not available on 1-minute candles" });
+      if (m < 1) {
+        // Past candles are rebuilt from 1-minute bars, which can't show where a candle was 30 seconds in.
+        return setMinute({
+          status: `Live only: scored on candles from now on (past candles can't be rebuilt at ${Math.round(m * 60)} seconds from 1-minute data).`,
+        });
+      }
       setMinute({ status: "loading 1-minute history…" });
       minuteBars ??= await feed.minuteHistory(3).catch(() => [] as Candle[]);
       if (run !== minuteRun || cancelled) return;
@@ -1286,7 +1292,7 @@ export function useGold(
       )
         return;
       const elapsed = feed.now() - c.time;
-      if (elapsed < m * 60 || elapsed > m * 60 + 45) return; // only at minute X, not later
+      if (elapsed < m * 60 || elapsed > m * 60 + (m < 1 ? 15 : 45)) return; // only at minute X, not later
       const atr = predictor.atr;
       const sd = bodySd(bars.map((b) => b.candle));
       if (!atr || !sd) return;
