@@ -828,7 +828,9 @@ async function flip(m: Market, state: Record<string, unknown>, tf: number) {
       instructions:
         `This ${tf}-minute candle is still forming (see candle_so_far, current_color). Will it HOLD its current color ` +
         "until it closes, or FLIP to the other color? Compare move_so_far with typical_move_in_time_left, and weigh " +
-        "how far it has already pulled back from its extreme and the last few candles.",
+        "how far it has already pulled back from its extreme and the last 15 candles. When given, also use market_context " +
+        "(trend, key levels, volatility, hourly/4-hour candles, volume), order_flow_recent_candles and " +
+        "order_flow_this_candle_so_far (who has been aggressive since this candle opened).",
       criteria: {
         holds: "It closes the same color it is now",
         flips: "It reverses and closes the opposite color",
@@ -885,8 +887,8 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 16,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8", "trades"],
+        version: 17,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8", "trades", "flip-context"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });
@@ -952,7 +954,7 @@ Deno.serve(async (req) => {
     if (body.action === "flip") {
       if (!env("TYPESAFE_API_KEY")) return json({ error: "TYPESAFE_API_KEY secret is not set" }, 503);
       const { state, slotKey } = body as { state?: unknown; slotKey?: unknown };
-      if (!state || typeof state !== "object" || JSON.stringify(state).length > 2000) return json({ error: "bad state" }, 400);
+      if (!state || typeof state !== "object" || JSON.stringify(state).length > 14000) return json({ error: "bad state" }, 400);
       if (typeof slotKey !== "string" || slotKey.length > 64) return json({ error: "bad slotKey" }, 400);
       // Shared per 30-second slot (live) or per past candle (replay), so viewers and reloads reuse one answer.
       const tf = tfOf(body);

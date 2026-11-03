@@ -16,14 +16,29 @@ export interface Footprint {
   levels: Record<string, [number, number]>; // level price (as string) → [buy, sell]
   buy: number;
   sell: number;
+  /** Aggressive [buy, sell] per 30-second slice of the candle ("0" = first 30 s), to rebuild it partway through. */
+  slices?: Record<string, [number, number]>;
 }
+
+export const SLICE_SECONDS = 30;
 
 export function emptyFootprint(time: number, step: number): Footprint {
   return { time, step, levels: {}, buy: 0, sell: 0 };
 }
 
 /** Add one trade. `aggressiveBuy` = the taker was buying. */
-export function addTrade(fp: Footprint, price: number, size: number, aggressiveBuy: boolean) {
+export function addTrade(
+  fp: Footprint,
+  price: number,
+  size: number,
+  aggressiveBuy: boolean,
+  t?: number,
+) {
+  if (t !== undefined) {
+    const k = String(Math.max(0, Math.floor((t - fp.time) / SLICE_SECONDS)));
+    const sl = ((fp.slices ??= {})[k] ??= [0, 0]);
+    sl[aggressiveBuy ? 0 : 1] += size;
+  }
   const lv = Math.floor(price / fp.step) * fp.step;
   const key = lv.toFixed(8);
   const cell = (fp.levels[key] ??= [0, 0]);
@@ -46,7 +61,9 @@ export function niceStep(atr: number): number {
 }
 
 /** Levels sorted high → low, as numbers. */
-export function rows(fp: Footprint): { price: number; buy: number; sell: number }[] {
+export function rows(
+  fp: Footprint,
+): { price: number; buy: number; sell: number }[] {
   return Object.entries(fp.levels)
     .map(([k, [buy, sell]]) => ({ price: Number(k), buy, sell }))
     .sort((a, b) => b.price - a.price);
@@ -72,7 +89,11 @@ export function summarize(fp: Footprint, c: Candle, atr: number) {
   const range = c.high - c.low;
   const top = c.low + range * 0.75;
   const bottom = c.low + range * 0.25;
-  let topB = 0, topS = 0, botB = 0, botS = 0, stacked = 0;
+  let topB = 0,
+    topS = 0,
+    botB = 0,
+    botS = 0,
+    stacked = 0;
   for (const r of rows(fp)) {
     const mid = r.price + fp.step / 2;
     if (mid >= top) {
@@ -83,9 +104,14 @@ export function summarize(fp: Footprint, c: Candle, atr: number) {
       botB += r.buy;
       botS += r.sell;
     }
-    if (r.buy + r.sell > 0 && Math.max(r.buy, r.sell) >= 3 * Math.max(Math.min(r.buy, r.sell), 1e-12)) stacked += r.buy > r.sell ? 1 : -1;
+    if (
+      r.buy + r.sell > 0 &&
+      Math.max(r.buy, r.sell) >= 3 * Math.max(Math.min(r.buy, r.sell), 1e-12)
+    )
+      stacked += r.buy > r.sell ? 1 : -1;
   }
-  const share = (b: number, s: number) => (b + s > 0 ? r2((b - s) / (b + s)) : 0);
+  const share = (b: number, s: number) =>
+    b + s > 0 ? r2((b - s) / (b + s)) : 0;
   const p = poc(fp);
   return {
     delta_share: r2((fp.buy - fp.sell) / total), //                 +1 all aggressive buying, −1 all selling
@@ -119,7 +145,9 @@ export function flowContext(
     order_flow_how_to_read:
       "From Coinbase trades. delta_share = (aggressive buy − aggressive sell) / total, −1…+1. poc = price with the most volume. Lists oldest first.",
     last_candle: summarize(lastFp, last, atr),
-    delta_share_last_6: last6.map((f) => r2((f!.buy - f!.sell) / (f!.buy + f!.sell))),
+    delta_share_last_6: last6.map((f) =>
+      r2((f!.buy - f!.sell) / (f!.buy + f!.sell)),
+    ),
     volume_last_6_vs_their_avg: vols.map((v) => r2(v / avg)),
   };
   if (fps.every((f) => f && f.buy + f.sell > 0) && recent.length === 20) {
@@ -129,17 +157,24 @@ export function flowContext(
     const move = (last.close - recent[0].open) / atr;
     out.cumulative_delta_share_last_20 = r2(cvd);
     out.price_move_last_20_atr = r2(move);
-    out.divergence = Math.sign(cvd) !== 0 && Math.sign(move) !== 0 && Math.sign(cvd) !== Math.sign(move)
-      ? cvd > 0
-        ? "price fell while buyers were more aggressive"
-        : "price rose while sellers were more aggressive"
-      : "none";
+    out.divergence =
+      Math.sign(cvd) !== 0 &&
+      Math.sign(move) !== 0 &&
+      Math.sign(cvd) !== Math.sign(move)
+        ? cvd > 0
+          ? "price fell while buyers were more aggressive"
+          : "price rose while sellers were more aggressive"
+        : "none";
   }
   return out;
 }
 
 /** Two inputs for "Jev refined": last candle's delta share and the last-6 average (0 when unknown). */
-export function flowInputs(footprints: Map<number, Footprint>, forTime: number, tfSeconds: number): [number, number] {
+export function flowInputs(
+  footprints: Map<number, Footprint>,
+  forTime: number,
+  tfSeconds: number,
+): [number, number] {
   const ds: number[] = [];
   for (let k = 1; k <= 6; k++) {
     const f = footprints.get(forTime - k * tfSeconds);
@@ -160,23 +195,40 @@ export interface Trade {
 }
 
 /** Stream Coinbase matches for `product`. Returns a stop function. Reconnects on its own. */
-export function coinbaseTrades(product: string, onTrade: (t: Trade) => void, onStatus: (ok: boolean, why?: string) => void): () => void {
+export function coinbaseTrades(
+  product: string,
+  onTrade: (t: Trade) => void,
+  onStatus: (ok: boolean, why?: string) => void,
+): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
   let retry = 1000;
   const open = () => {
     if (stopped) return;
-    ws = new WebSocket(import.meta.env.VITE_COINBASE_WS || "wss://ws-feed.exchange.coinbase.com");
+    ws = new WebSocket(
+      import.meta.env.VITE_COINBASE_WS || "wss://ws-feed.exchange.coinbase.com",
+    );
     ws.onopen = () => {
       retry = 1000;
-      ws!.send(JSON.stringify({ type: "subscribe", product_ids: [product], channels: ["matches"] }));
+      ws!.send(
+        JSON.stringify({
+          type: "subscribe",
+          product_ids: [product],
+          channels: ["matches"],
+        }),
+      );
       onStatus(true);
     };
     ws.onmessage = (e) => {
       try {
         const m = JSON.parse(String(e.data));
         if (m.type === "match" || m.type === "last_match") {
-          onTrade({ t: Date.parse(m.time) / 1000, p: Number(m.price), s: Number(m.size), buy: m.side === "sell" });
+          onTrade({
+            t: Date.parse(m.time) / 1000,
+            p: Number(m.price),
+            s: Number(m.size),
+            buy: m.side === "sell",
+          });
         }
       } catch {
         // ignore
@@ -199,17 +251,27 @@ export function coinbaseTrades(product: string, onTrade: (t: Trade) => void, onS
 
 // ── Saved footprints (closed candles never change) ────────────────────
 
-export function loadFootprints(key: string): { step: number; fps: Map<number, Footprint> } | null {
+export function loadFootprints(
+  key: string,
+): { step: number; fps: Map<number, Footprint> } | null {
   try {
     const raw = JSON.parse(localStorage.getItem(key) ?? "null");
     if (!raw || typeof raw.step !== "number") return null;
-    return { step: raw.step, fps: new Map((raw.fps as Footprint[]).map((f) => [f.time, f])) };
+    return {
+      step: raw.step,
+      fps: new Map((raw.fps as Footprint[]).map((f) => [f.time, f])),
+    };
   } catch {
     return null;
   }
 }
 
-export function saveFootprints(key: string, step: number, fps: Map<number, Footprint>, keep = 300) {
+export function saveFootprints(
+  key: string,
+  step: number,
+  fps: Map<number, Footprint>,
+  keep = 300,
+) {
   try {
     const list = [...fps.values()].sort((a, b) => a.time - b.time).slice(-keep);
     localStorage.setItem(key, JSON.stringify({ step, fps: list }));
@@ -220,7 +282,11 @@ export function saveFootprints(key: string, step: number, fps: Map<number, Footp
 
 // ── Trade history: page Coinbase back to `fromTime` in parallel lanes ──
 
-type Page = { trades: [number, number, number, number, number][]; minId: number | null; maxId: number | null };
+type Page = {
+  trades: [number, number, number, number, number][];
+  minId: number | null;
+  maxId: number | null;
+};
 
 /**
  * Fetch every trade from `fromTime` up to `beforeTime` (exclusive) and hand each to `onTrade`. Coinbase only pages
@@ -238,11 +304,13 @@ export async function loadTradeHistory(
 ): Promise<boolean> {
   const take = (pg: Page, lo: number, hi: number) => {
     for (const [t, p, s, b, id] of pg.trades) {
-      if (id > lo && id <= hi && t >= fromTime && t < beforeTime) onTrade({ t, p, s, buy: b === 1 });
+      if (id > lo && id <= hi && t >= fromTime && t < beforeTime)
+        onTrade({ t, p, s, buy: b === 1 });
     }
   };
   const first = await fetchPage(null);
-  if (!first.trades.length || first.maxId === null || first.minId === null) return true;
+  if (!first.trades.length || first.maxId === null || first.minId === null)
+    return true;
   const maxId = first.maxId;
   const oldestT = Math.min(...first.trades.map((x) => x[0]));
   const newestT = Math.max(...first.trades.map((x) => x[0]));
@@ -251,20 +319,32 @@ export async function loadTradeHistory(
     return true;
   }
   // Estimate the trade id at fromTime, then make sure the page there really starts before fromTime.
-  const rate = Math.max(1e-3, (maxId - first.minId) / Math.max(1, newestT - oldestT));
-  let startId = Math.max(1, Math.floor(maxId - rate * (newestT - fromTime) * 1.1));
+  const rate = Math.max(
+    1e-3,
+    (maxId - first.minId) / Math.max(1, newestT - oldestT),
+  );
+  let startId = Math.max(
+    1,
+    Math.floor(maxId - rate * (newestT - fromTime) * 1.1),
+  );
   for (let i = 0; i < 8; i++) {
     const pg = await fetchPage(startId);
     if (!pg.trades.length) break;
     const t = Math.max(...pg.trades.map((x) => x[0]));
     if (t <= fromTime) break;
-    startId = Math.max(1, Math.floor(startId - rate * (t - fromTime) * 1.5) - 1000);
+    startId = Math.max(
+      1,
+      Math.floor(startId - rate * (t - fromTime) * 1.5) - 1000,
+    );
   }
   const span = maxId - startId;
   const totalPages = Math.ceil(span / 1000);
   if (totalPages > maxPages) return false;
   let done = 0;
-  const bounds = Array.from({ length: lanes }, (_, k) => [startId + Math.floor((span * k) / lanes), startId + Math.floor((span * (k + 1)) / lanes)]);
+  const bounds = Array.from({ length: lanes }, (_, k) => [
+    startId + Math.floor((span * k) / lanes),
+    startId + Math.floor((span * (k + 1)) / lanes),
+  ]);
   await Promise.all(
     bounds.map(async ([lo, hi]) => {
       let after = hi + 1;
@@ -278,4 +358,41 @@ export async function loadTradeHistory(
     }),
   );
   return true;
+}
+
+/**
+ * Order flow of a candle in its first `elapsed` seconds (whole 30-second slices only), compared with the average
+ * full-candle volume of `recent` footprints. Null when the candle has no slice data.
+ */
+export function flowSoFar(
+  fp: Footprint | undefined,
+  elapsed: number,
+  recent: (Footprint | undefined)[],
+) {
+  if (!fp?.slices) return null;
+  const upTo = Math.floor(elapsed / SLICE_SECONDS);
+  let b = 0;
+  let s = 0;
+  const per: number[] = [];
+  for (let i = 0; i < upTo; i++) {
+    const x = fp.slices[String(i)] ?? [0, 0];
+    b += x[0];
+    s += x[1];
+    per.push(
+      x[0] + x[1] > 0 ? Number(((x[0] - x[1]) / (x[0] + x[1])).toFixed(2)) : 0,
+    );
+  }
+  if (b + s <= 0) return null;
+  const vols = recent
+    .filter((f): f is Footprint => !!f && f.buy + f.sell > 0)
+    .map((f) => f.buy + f.sell);
+  const avg = vols.length ? vols.reduce((a, v) => a + v, 0) / vols.length : 0;
+  return {
+    how_to_read:
+      "Coinbase trades since this candle opened. delta_share = (aggressive buy − aggressive sell) / total, −1…+1. volume_vs_typical_candle: volume so far ÷ an average whole candle's volume.",
+    delta_share: Number(((b - s) / (b + s)).toFixed(2)),
+    delta_share_per_30s: per,
+    volume_vs_typical_candle:
+      avg > 0 ? Number(((b + s) / avg).toFixed(2)) : null,
+  };
 }

@@ -20,6 +20,7 @@ import {
   coinbaseTrades,
   emptyFootprint,
   flowContext,
+  flowSoFar,
   flowInputs,
   loadFootprints,
   loadTradeHistory,
@@ -214,7 +215,7 @@ function writeCache(c: Record<string, JevAnswer>, w: Where) {
 function readFlipCache(w: Where): Record<string, number> {
   try {
     return JSON.parse(
-      localStorage.getItem(tfKey("gold.flipcheck.v1", w)) ?? "{}",
+      localStorage.getItem(tfKey("gold.flipcheck.v2", w)) ?? "{}",
     );
   } catch {
     return {};
@@ -224,7 +225,7 @@ function writeFlipCache(c: Record<string, number>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
     localStorage.setItem(
-      tfKey("gold.flipcheck.v1", w),
+      tfKey("gold.flipcheck.v2", w),
       JSON.stringify(
         Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]])),
       ),
@@ -438,7 +439,7 @@ export function useGold(
     };
     // ── Order flow: Coinbase trades → footprints per candle ──
     const product = MARKETS[market].coinbase;
-    const flowKey = `gold.flow.v1.${product}.${tfMin}m`;
+    const flowKey = `gold.flow.v2.${product}.${tfMin}m`; // v2: with 30-second slices
     const footprints = new Map<number, Footprint>();
     let flowStep: number | null = null;
     let flowReady = false; // history loaded far enough back for Jev to use it
@@ -454,7 +455,7 @@ export function useGold(
       const time = Math.floor(t.t / TF_SECONDS) * TF_SECONDS;
       let fp = footprints.get(time);
       if (!fp) footprints.set(time, (fp = emptyFootprint(time, flowStep)));
-      addTrade(fp, t.p, t.s, t.buy);
+      addTrade(fp, t.p, t.s, t.buy, t.t);
       flowDirty = true;
     };
     /** Live trades, then history back to the backfill window (cached in the browser between visits). */
@@ -544,6 +545,46 @@ export function useGold(
       return flowReady
         ? [...x, ...flowInputs(footprints, forTime, TF_SECONDS)]
         : x;
+    };
+
+    /**
+     * Extra context for Jev's flip / minute reads of the candle opening at `t`, read `elapsed` seconds in: the same
+     * market context as the next-candle call, recent order flow, and this candle's own order flow so far.
+     */
+    const flipExtra = (
+      t: number,
+      elapsed: number,
+      closed: Candle[],
+      atrMap?: Map<number, number>,
+    ) => {
+      if (!features.includes("flip-context")) return {};
+      const atr =
+        (
+          atrMap ?? atrByTime(closed.slice(Math.max(0, closed.length - 700)))
+        ).get(t - TF_SECONDS) ?? null;
+      const ctx = marketContext({
+        closed,
+        forTime: t,
+        tfSeconds: TF_SECONDS,
+        atr,
+        market,
+        volume: volumeOn() ? volumes : undefined,
+      });
+      const recent = flowReady
+        ? flowContext(closed, footprints, t, TF_SECONDS, atr)
+        : null;
+      const now = flowReady
+        ? flowSoFar(
+            footprints.get(t),
+            elapsed,
+            [1, 2, 3, 4, 5, 6].map((k) => footprints.get(t - k * TF_SECONDS)),
+          )
+        : null;
+      return {
+        ...(ctx ? { market_context: ctx } : {}),
+        ...(recent ? { order_flow_recent_candles: recent } : {}),
+        ...(now ? { order_flow_this_candle_so_far: now } : {}),
+      };
     };
 
     /** The snapshot plus market context, using only candles closed before `forTime`. */
@@ -778,9 +819,13 @@ export function useGold(
         tfSeconds: TF_SECONDS,
         atr,
         sd,
-        previous: bars.slice(-3).map((b) => b.candle),
+        previous: bars.slice(-15).map((b) => b.candle),
       });
       if (!state) return;
+      const fullState = {
+        ...state,
+        ...flipExtra(c.time, now - c.time, poolHistory),
+      };
       // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
       // again (re-ask at least every 15 s, since the time left still matters).
       const shape = `${c.time}|${state.move_so_far}|${state.high_so_far}|${state.low_so_far}|${state.pulled_back_from_extreme}`;
@@ -799,7 +844,7 @@ export function useGold(
       try {
         const a = await withTimeout(
           askFlip(
-            state,
+            fullState,
             `${c.time}:${Math.floor(now / FLIP_SECONDS)}`,
             tfMin,
             market,
@@ -881,7 +926,15 @@ export function useGold(
               try {
                 pFlip = (
                   await withTimeout(
-                    askFlip(sn.state, `past:${sn.time}`, tfMin, market),
+                    askFlip(
+                      {
+                        ...sn.state,
+                        ...flipExtra(sn.time, sn.seconds, history, atrs),
+                      },
+                      `past:v2:${sn.time}`,
+                      tfMin,
+                      market,
+                    ),
                     30_000,
                   )
                 ).pFlip;
@@ -1152,7 +1205,7 @@ export function useGold(
       !cancelled &&
       setState((s) => ({ ...s, minute: { ...s.minute, ...patch } }));
     const minuteCacheKey = (m: number) =>
-      `${tfKey("gold.minutecall.v1", where)}.m${m}`;
+      `${tfKey("gold.minutecall.v2", where)}.m${m}`;
 
     const runMinute = async (m: number | null) => {
       const run = ++minuteRun;
@@ -1229,7 +1282,15 @@ export function useGold(
               try {
                 pf = (
                   await withTimeout(
-                    askFlip(sn.state, `past:m${m}:${sn.time}`, tfMin, market),
+                    askFlip(
+                      {
+                        ...sn.state,
+                        ...flipExtra(sn.time, sn.seconds, hist, atrs),
+                      },
+                      `past:v2:m${m}:${sn.time}`,
+                      tfMin,
+                      market,
+                    ),
                     30_000,
                   )
                 ).pFlip;
@@ -1302,13 +1363,18 @@ export function useGold(
         tfSeconds: TF_SECONDS,
         atr,
         sd,
-        previous: bars.slice(-3).map((b) => b.candle),
+        previous: bars.slice(-15).map((b) => b.candle),
       });
       if (!state) return;
       minuteAsking = true;
       try {
         const a = await withTimeout(
-          askFlip(state, `m${m}:${c.time}`, tfMin, market),
+          askFlip(
+            { ...state, ...flipExtra(c.time, elapsed, poolHistory) },
+            `v2:m${m}:${c.time}`,
+            tfMin,
+            market,
+          ),
           20_000,
         );
         if (minuteSel !== m || cancelled) return;

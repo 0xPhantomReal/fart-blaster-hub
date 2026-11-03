@@ -19,7 +19,12 @@ const logit = (p: number) => {
 const clamp = (p: number) => Math.min(0.99, Math.max(0.01, p));
 
 /** Chance the candle closes green from price action alone (plus the open forecast's lean). */
-export function liveMath(prior: number, move: number, sd: number, frac: number): number {
+export function liveMath(
+  prior: number,
+  move: number,
+  sd: number,
+  frac: number,
+): number {
   const f = Math.min(1, Math.max(0.005, frac));
   const drift = sd * (logit(prior) / 1.702) * f;
   return clamp(normCdf((move + drift) / (sd * Math.sqrt(f))));
@@ -32,7 +37,10 @@ export function atrByTime(candles: Candle[]): Map<number, number> {
   const seed: number[] = [];
   candles.forEach((c, i) => {
     const pc = i ? candles[i - 1].close : null;
-    const tr = pc === null ? c.high - c.low : Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc));
+    const tr =
+      pc === null
+        ? c.high - c.low
+        : Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc));
     if (atr === null) {
       seed.push(tr);
       if (seed.length === 14) atr = seed.reduce((a, v) => a + v, 0) / 14;
@@ -47,7 +55,9 @@ export function bodySd(candles: Candle[]): number | null {
   const b = candles.slice(-100).map((c) => c.close - c.open);
   if (b.length < 30) return null;
   const m = b.reduce((a, v) => a + v, 0) / b.length;
-  const sd = Math.sqrt(b.reduce((a, v) => a + (v - m) ** 2, 0) / (b.length - 1));
+  const sd = Math.sqrt(
+    b.reduce((a, v) => a + (v - m) ** 2, 0) / (b.length - 1),
+  );
   return sd > 0 ? sd : null;
 }
 
@@ -57,7 +67,7 @@ export interface FlipInput {
   tfSeconds: number;
   atr: number; //        recent average true range, dollars
   sd: number; //         typical candle body spread, dollars
-  previous: Candle[]; // a few closed candles before it, oldest first
+  previous: Candle[]; // closed candles before it, oldest first (the last 15 are used)
 }
 
 /** What Jev sees: only the candle so far and its immediate context, in ATR units. No prices, no dates, no math. */
@@ -68,15 +78,18 @@ export function flipState(x: FlipInput): Record<string, unknown> | null {
   const color = move > 0 ? "green" : "red";
   const frac = Math.max(0.005, x.secondsLeft / x.tfSeconds);
   return {
-    how_to_read: "Sizes are in ATR units (average candle range), measured from this candle's open.",
+    how_to_read:
+      "Sizes are in ATR units (average candle range), measured from this candle's open.",
     current_color: color,
     move_so_far: r2(move / x.atr),
     high_so_far: r2((f.high - f.open) / x.atr),
     low_so_far: r2((f.low - f.open) / x.atr),
-    pulled_back_from_extreme: r2((move > 0 ? f.high - f.close : f.close - f.low) / x.atr),
+    pulled_back_from_extreme: r2(
+      (move > 0 ? f.high - f.close : f.close - f.low) / x.atr,
+    ),
     seconds_left: Math.round(x.secondsLeft),
     typical_move_in_time_left: r2((x.sd * Math.sqrt(frac)) / x.atr),
-    last_3_candles: x.previous.slice(-3).map((c) => ({
+    last_15_candles: x.previous.slice(-15).map((c) => ({
       c: c.close > c.open ? "G" : c.close < c.open ? "R" : "D",
       body: r2((c.close - c.open) / x.atr),
       range: r2((c.high - c.low) / x.atr),
@@ -128,16 +141,28 @@ export class FlipBlender {
     this.stacker.wJev = 0.5; // Jev starts at half weight until its record says otherwise
   }
   private static fresh() {
-    return { n: 0, math: new CatchTracker(), jev: new CatchTracker(), blend: new CatchTracker() };
+    return {
+      n: 0,
+      math: new CatchTracker(),
+      jev: new CatchTracker(),
+      blend: new CatchTracker(),
+    };
   }
   blend(pMath: number, pJevGreen: number | null): number {
-    return pJevGreen === null ? pMath : clamp(this.stacker.predict(pMath, pJevGreen));
+    return pJevGreen === null
+      ? pMath
+      : clamp(this.stacker.predict(pMath, pJevGreen));
   }
   get weights() {
     return { math: this.stacker.wModel, jev: this.stacker.wJev };
   }
   private static out(t: ReturnType<typeof FlipBlender.fresh>): FlipRecords {
-    return { n: t.n, math: t.math.summary(), jev: t.jev.summary(), blend: t.blend.summary() };
+    return {
+      n: t.n,
+      math: t.math.summary(),
+      jev: t.jev.summary(),
+      blend: t.blend.summary(),
+    };
   }
   /** Score one read against the candle's final color and learn from it. */
   private score(t: ReturnType<typeof FlipBlender.fresh>, r: FlipRow) {
@@ -190,7 +215,14 @@ export function pastSnapshots(
     list.push(m);
     byCandle.set(t, list);
   }
-  const out: { time: number; state: Record<string, unknown>; pMath: number; move: number; y: 0 | 1 }[] = [];
+  const out: {
+    time: number;
+    seconds: number;
+    state: Record<string, unknown>;
+    pMath: number;
+    move: number;
+    y: 0 | 1;
+  }[] = [];
   const tfMin = Math.round(tfSeconds / 60);
   if (tfMin < 2) return out;
   const lo = Math.max(1, Math.round(tfMin * 0.13));
@@ -217,12 +249,25 @@ export function pastSnapshots(
     const sd = bodySd(before);
     if (!atr || !sd) continue;
     const secondsLeft = tfSeconds - minute * 60;
-    const state = flipState({ forming, secondsLeft, tfSeconds, atr, sd, previous: before });
+    const state = flipState({
+      forming,
+      secondsLeft,
+      tfSeconds,
+      atr,
+      sd,
+      previous: before,
+    });
     if (!state) continue;
     out.push({
       time: c.time,
+      seconds: minute * 60,
       state,
-      pMath: liveMath(priorAt(c.time), forming.close - forming.open, sd, secondsLeft / tfSeconds),
+      pMath: liveMath(
+        priorAt(c.time),
+        forming.close - forming.open,
+        sd,
+        secondsLeft / tfSeconds,
+      ),
       move: forming.close - forming.open,
       y: c.close > c.open ? 1 : 0,
     });
