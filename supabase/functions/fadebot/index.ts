@@ -183,6 +183,8 @@ interface WindowMarket {
 /** What the last market search saw, for the "no market found" message. */
 let lastSearch = "";
 let lastListError = "";
+let lastMarket: unknown = null; // the market record last looked at, for the "Check Polymarket market" button
+let lastHow = ""; //               how the YES side was worked out
 
 type Ev = {
   slug: string;
@@ -192,13 +194,42 @@ type Ev = {
   markets?: { slug: string; outcome?: string; title?: string; description?: string }[];
 };
 
-/** Which outcome the YES (long) contract pays on, from the market's outcome/title. */
-function longSide(m: { outcome?: string; title?: string }): Side | null {
-  for (const t of [m.outcome ?? "", m.title ?? ""]) {
-    const up = /\bup\b/i.test(t);
-    const down = /\bdown\b/i.test(t);
-    if (up && !down) return "up";
-    if (down && !up) return "down";
+const sideOf = (t: unknown): Side | null => {
+  const s = String(t ?? "");
+  const up = /\b(up|higher|above)\b/i.test(s);
+  const down = /\b(down|lower|below)\b/i.test(s);
+  return up && !down ? "up" : down && !up ? "down" : null;
+};
+
+/** Which outcome the YES (long) contract pays on. Tries, in order: a per-side list with a long flag, the outcomes
+ * list (the first one is YES), and the market's own outcome/title. */
+// deno-lint-ignore no-explicit-any
+function longSide(m: any): { side: Side; how: string } | null {
+  for (const key of ["marketSides", "sides", "outcomeSides"]) {
+    const list = m?.[key];
+    if (!Array.isArray(list)) continue;
+    for (const x of list) {
+      const sd = sideOf(x?.description ?? x?.identifier ?? x?.name ?? x?.outcome ?? x?.title);
+      if (!sd) continue;
+      if (x?.long === true || x?.isLong === true) return { side: sd, how: `${key}: long = ${sd}` };
+      if (x?.long === false || x?.isLong === false) return { side: sd === "up" ? "down" : "up", how: `${key}: short = ${sd}` };
+    }
+  }
+  let outs = m?.outcomes;
+  if (typeof outs === "string") {
+    try {
+      outs = JSON.parse(outs);
+    } catch {
+      outs = outs.split(",");
+    }
+  }
+  if (Array.isArray(outs) && outs.length === 2) {
+    const first = sideOf(typeof outs[0] === "object" ? outs[0]?.name ?? outs[0]?.title : outs[0]);
+    if (first) return { side: first, how: `outcomes[0] = ${first}` };
+  }
+  for (const t of [m?.outcome, m?.title, m?.groupItemTitle]) {
+    const sd = sideOf(t);
+    if (sd) return { side: sd, how: `outcome/title = ${sd}` };
   }
   return null;
 }
@@ -278,10 +309,24 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     if (w === null || Math.abs(w - start) >= 5) continue;
     const markets = await marketsOf(e);
     for (const m of markets) {
-      const longIs = longSide(m);
-      if (longIs) return { slug: m.slug, longIs };
+      let ls = longSide(m);
+      if (!ls) {
+        // The list view may leave sides out: ask for the market itself.
+        const full = await client.markets.retrieveBySlug(m.slug).catch(() => null);
+        // deno-lint-ignore no-explicit-any
+        const fm = (full as any)?.market ?? full;
+        if (fm) {
+          lastMarket = fm;
+          ls = longSide(fm);
+        }
+      }
+      if (ls) {
+        lastHow = ls.how;
+        return { slug: m.slug, longIs: ls.side };
+      }
     }
-    lastSearch = `found ${e.slug} but couldn't tell whether its contract pays on Up or Down: ${JSON.stringify(markets.slice(0, 2)).slice(0, 200)}`;
+    lastMarket ??= markets[0] ?? null;
+    lastSearch = `found ${e.slug} but couldn't tell whether its contract pays on Up or Down (tap "Check Polymarket market" for the full record)`;
     return null;
   }
   const sample = (fiveMin.length ? fiveMin : btc)
@@ -598,8 +643,16 @@ Deno.serve(async (req) => {
     if (body?.action === "find-market") {
       // Read-only: which Polymarket market the bot would trade for the current window.
       const start = Math.floor(Date.now() / 1000 / TF) * TF;
+      lastMarket = null;
+      lastHow = "";
       const m = await findMarket(start);
-      return json({ window: new Date(start * 1000).toISOString(), market: m, search: lastSearch });
+      return json({
+        window: new Date(start * 1000).toISOString(),
+        market: m,
+        search: lastSearch,
+        how: lastHow,
+        record: JSON.stringify(lastMarket ?? null).slice(0, 4000),
+      });
     }
     const authFailure = authenticateCronRequest(req);
     if (authFailure) return authFailure;

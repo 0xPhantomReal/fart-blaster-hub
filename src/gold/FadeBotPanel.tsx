@@ -107,8 +107,8 @@ export function FadeBotPanel() {
             "error" in r
               ? `error: ${r.error}`
               : r.market
-                ? `found ${r.market.slug} (YES pays on ${r.market.longIs}) for the window starting ${new Date(r.window).toLocaleTimeString()}`
-                : `not found: ${r.search}`,
+                ? `found ${r.market.slug} (YES pays on ${r.market.longIs}${r.how ? `, from ${r.how}` : ""}) for the window starting ${new Date(r.window).toLocaleTimeString()}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`
+                : `not found: ${r.search}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`,
           );
         }}
       >
