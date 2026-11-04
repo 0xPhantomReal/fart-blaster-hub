@@ -20,6 +20,7 @@ import postgres from "npm:postgres@3.4.4";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import { fib, holdDecision, nextStep, pnl, winner, type Side } from "../_shared/fadeStrategy.ts";
+import { authenticateCronRequest } from "../_shared/cron-auth.ts";
 
 const TF = 300; //        5-minute windows
 const READ_AT = 30; //    Jev reads the candle 30 seconds in
@@ -421,6 +422,8 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    const authFailure = authenticateCronRequest(req);
+    if (authFailure) return authFailure;
     // Test hook (only with FADEBOT_ALLOW_TEST=1, never set in production): decide the current window now.
     if (body?.action === "test-decide" && env("FADEBOT_ALLOW_TEST") === "1") {
       await setup();
