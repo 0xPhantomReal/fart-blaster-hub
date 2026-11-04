@@ -15,7 +15,7 @@
 // POST {}                    → the scheduled run
 // POST { action: "status" }  → settings, totals and recent bets (for the page)
 
-import postgres from "npm:postgres@3.4.4";
+import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import { holdDecision, pnl, winner, type Side } from "../_shared/fadeStrategy.ts";

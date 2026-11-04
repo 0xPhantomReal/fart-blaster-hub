@@ -83,6 +83,7 @@
     "globals": "^15.15.0",
     "jsdom": "^20.0.3",
     "lovable-tagger": "^1.1.13",
+    "polymarket-us": "0.1.1",
     "postcss": "^8.5.6",
     "postgres": "^3.4.9",
     "tailwindcss": "^3.4.17",
