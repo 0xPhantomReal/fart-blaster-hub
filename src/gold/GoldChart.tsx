@@ -104,6 +104,14 @@ export function GoldChart({
   const fpMarkers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const fpDrawn = useRef("");
   const drawn = useRef("");
+  const shown = useRef<{
+    first: number;
+    last: number;
+    n: number;
+    version: number;
+  } | null>(null);
+  const seriesLast = useRef<number | null>(null); // time of the last bar drawn on the candle series
+  const formingRef = useRef<Candle | null>(null);
   const zoomed = useRef(false);
 
   useEffect(() => {
@@ -152,6 +160,8 @@ export function GoldChart({
       wickDownColor: "rgba(239,83,80,0.6)",
       priceLineVisible: false,
       lastValueVisible: false,
+      // The forecast never rescales the price axis (it would jump every time the forecast is redrawn).
+      autoscaleInfoProvider: () => null,
     });
     candles.current = c.addSeries(CandlestickSeries, {
       upColor: COLORS.green,
@@ -172,6 +182,8 @@ export function GoldChart({
       c.remove();
       chart.current = null;
       drawn.current = "";
+      shown.current = null;
+      seriesLast.current = null;
       fpDrawn.current = "";
       zoomed.current = false;
     };
@@ -181,7 +193,45 @@ export function GoldChart({
     const key = `${version}:${arrows}:${minConf}`;
     if (!candles.current || drawn.current === key || !bars.length) return;
     drawn.current = key;
-    candles.current.setData(bars.map((b) => toBar(b.candle)));
+    // A candle closing just appends one bar: update the series in place instead of redrawing everything, so the
+    // view doesn't jump and the forming candle doesn't blink.
+    const prev = shown.current;
+    const firstT = bars[0].candle.time;
+    const lastT = bars[bars.length - 1].candle.time;
+    const appended =
+      prev !== null &&
+      prev.first === firstT &&
+      bars.length === prev.n + 1 &&
+      bars[bars.length - 2]?.candle.time === prev.last &&
+      seriesLast.current !== null &&
+      seriesLast.current <= lastT;
+    if (appended) {
+      candles.current.update(toBar(bars[bars.length - 1].candle));
+    } else if (
+      !prev ||
+      prev.first !== firstT ||
+      prev.n !== bars.length ||
+      prev.last !== lastT ||
+      version !== prev.version
+    ) {
+      const r = chart.current?.timeScale().getVisibleLogicalRange() ?? null;
+      candles.current.setData(bars.map((b) => toBar(b.candle)));
+      // Keep following the latest candles if that's where the view was.
+      const delta = prev ? bars.length - prev.n : 0;
+      if (r && prev && delta > 0 && delta < 50 && r.to >= prev.n - 2)
+        chart.current
+          ?.timeScale()
+          .setVisibleLogicalRange({ from: r.from + delta, to: r.to + delta });
+    }
+    seriesLast.current = Math.max(seriesLast.current ?? 0, lastT);
+    if (!appended && prev && seriesLast.current > lastT)
+      seriesLast.current = lastT;
+    // Put the forming candle back after a full redraw.
+    if (formingRef.current && formingRef.current.time > lastT) {
+      candles.current.update(toBar(formingRef.current));
+      seriesLast.current = formingRef.current.time;
+    }
+    shown.current = { first: firstT, last: lastT, n: bars.length, version };
     const ms = bars.flatMap((b) => markerFor(b, arrows, minConf));
     markers.current?.setMarkers(ms);
     fpMarkers.current?.setMarkers(ms);
@@ -222,9 +272,18 @@ export function GoldChart({
   }, [forecast, bars.length]);
 
   useEffect(() => {
+    formingRef.current = forming;
     if (!candles.current || !forming || !bars.length) return;
-    if (forming.time > bars[bars.length - 1].candle.time)
-      candles.current.update(toBar(forming));
+    const lastClosed = bars[bars.length - 1].candle.time;
+    if (forming.time <= lastClosed) return;
+    if (seriesLast.current !== null && forming.time < seriesLast.current) {
+      // Older than what's drawn (shouldn't happen): redraw cleanly.
+      candles.current.setData([
+        ...bars.map((b) => toBar(b.candle)),
+        toBar(forming),
+      ]);
+    } else candles.current.update(toBar(forming));
+    seriesLast.current = forming.time;
   }, [forming, bars]);
 
   // ── Footprint mode ──

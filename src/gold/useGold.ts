@@ -1453,15 +1453,19 @@ export function useGold(
       }
       setRefine({ pNow: null });
       bars.push(barFor(c));
-      if (bars.length > MAX_BARS) bars.shift();
+      // Trim old candles only now and then (dropping one per close would shift the whole chart every candle).
+      if (bars.length > MAX_BARS + 300) bars = bars.slice(-MAX_BARS);
       current = next;
-      lastForming = null;
+      // The next candle may already be forming (its ticks can arrive before this close is processed): keep it.
+      const keep =
+        lastForming && lastForming.time > c.time ? lastForming : null;
+      lastForming = keep;
       setState((s) => ({
         ...s,
         bars: [...bars],
-        forming: null,
+        forming: s.forming && s.forming.time > c.time ? s.forming : null,
         prediction: next,
-        live: null,
+        live: keep ? s.live : null,
         liveRecord: liveRecord(),
       }));
       setState((s) => ({ ...s, version: s.version + 1 }));
