@@ -3,15 +3,14 @@
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
 //   S … S+30: record BRTI, then ask Jev whether the candle holds its color or flips
-//     Jev says it HOLDS (any sureness over 50%) → bet the current color; Jev calls a flip → no bet
-//     bet = a market order for the Fibonacci stake, then a limit order for 15 more shares of the same side at 33¢,
-//     good until the window closes
+//     Jev says it HOLDS (any sureness over 50%) → a limit order for 30 shares of the current color at 33¢, good until
+//     the window closes (optionally also a market order: FADEBOT_MARKET_BET); Jev calls a flip → no bet
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
 // Secrets: SUPABASE_DB_URL, SUPABASE_URL, SUPABASE_ANON_KEY (provided by the platform);
-//   FADEBOT_MODE (dry | live, default dry), FADEBOT_BASE_BET (5), FADEBOT_MAX_FIB_STEP (blank = no cap),
-//   FADEBOT_LIMIT_PRICE (0.33), FADEBOT_LIMIT_SHARES (15); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
+//   FADEBOT_MODE (dry | live, default dry), FADEBOT_LIMIT_PRICE (0.33), FADEBOT_LIMIT_SHARES (30),
+//   FADEBOT_MARKET_BET (0 = none); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
 //
 // POST {}                    → the scheduled run
 // POST { action: "status" }  → settings, totals and recent bets (for the page)
@@ -19,7 +18,7 @@
 import postgres from "npm:postgres@3.4.4";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
-import { fib, holdDecision, nextStep, pnl, winner, type Side } from "../_shared/fadeStrategy.ts";
+import { holdDecision, pnl, winner, type Side } from "../_shared/fadeStrategy.ts";
 import { authenticateCronRequest } from "../_shared/cron-auth.ts";
 
 const TF = 300; //        5-minute windows
@@ -35,10 +34,10 @@ const json = (body: unknown, status = 200) =>
 
 const settings = () => ({
   mode: env("FADEBOT_MODE") === "live" ? "live" : "dry",
-  baseBet: Number(env("FADEBOT_BASE_BET") || 5),
-  maxFibStep: env("FADEBOT_MAX_FIB_STEP") ? Number(env("FADEBOT_MAX_FIB_STEP")) : null,
+  // Market-order stake in dollars on each hold call (0 = no market order, only the limit order). No Fibonacci.
+  marketBet: Number(env("FADEBOT_MARKET_BET") || 0),
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
-  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 15),
+  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 30),
 });
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -296,8 +295,7 @@ async function decideWindow(start: number) {
   const d = holdDecision(pGreen, move);
   if (!d) return skip(start, `Jev called a flip (${Math.round(pFlip * 100)}%): no bet`);
 
-  const st = (await sql`select * from fadebot_state5 where id = 1`)[0];
-  const stake = cfg.baseBet * fib(st.step);
+  const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
   if (!market) return skip(start, "no Polymarket 5-minute market found for this window");
 
@@ -307,26 +305,27 @@ async function decideWindow(start: number) {
   let orderId: string | null = null;
   let limitId: string | null = null;
   if (cfg.mode === "live") {
-    try {
-      const f = await marketBuy(market, d.side, stake);
-      orderId = f.id;
-      shares = f.shares;
-      fees = f.fees;
-      if (shares > 0) price = f.price;
-    } catch (e) {
-      return skip(start, `market order failed: ${(e as Error).message}`.slice(0, 300));
+    if (stake > 0) {
+      try {
+        const f = await marketBuy(market, d.side, stake);
+        orderId = f.id;
+        shares = f.shares;
+        fees = f.fees;
+        if (shares > 0) price = f.price;
+      } catch (e) {
+        console.error("market order failed:", (e as Error).message);
+      }
     }
-    if (!shares) return skip(start, `market order ${orderId} didn't fill`);
     try {
       limitId = await limitBuy(market, d.side, cfg.limitPrice, cfg.limitShares, start + TF);
     } catch (e) {
+      if (!shares) return skip(start, `limit order failed: ${(e as Error).message}`.slice(0, 300));
       console.error("limit order failed:", (e as Error).message);
     }
-  } else if (price && price > 0) shares = stake / price;
-  if (!price || !(shares > 0)) return skip(start, "no price on Polymarket");
+  } else if (stake > 0 && price && price > 0) shares = stake / price;
   await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, jev_sure, side, step, stake, price, shares, fees,
       limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id)
-    values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.sure}, ${d.side}, ${st.step}, ${stake}, ${price},
+    values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.sure}, ${d.side}, 0, ${stake}, ${price ?? 0},
       ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId})
     on conflict (window_start) do nothing`;
 }
@@ -367,7 +366,13 @@ async function settle() {
     let limitFilled = Number(b.limit_filled ?? 0);
     if (b.mode === "live" && b.limit_order_id) limitFilled = await filledQty(b.limit_order_id).catch(() => limitFilled);
     const ok = won === b.side;
-    const p = pnl(b.shares, b.price, ok) + pnl(limitFilled, b.limit_price, ok) - (b.fees ?? 0);
+    const p = pnl(Number(b.shares ?? 0), Number(b.price ?? 0), ok) + pnl(limitFilled, b.limit_price, ok) - (b.fees ?? 0);
+    if (!(Number(b.shares ?? 0) > 0) && !(limitFilled > 0)) {
+      // Nothing bought (the limit never filled): no trade.
+      await sql`update fadebot_bets5 set status = 'settled', result = 'no fill', pnl = 0, limit_filled = 0, settled_at = now()
+        where window_start = ${b.window_start} and status = 'open'`;
+      continue;
+    }
     await sql.begin(async (tx) => {
       const upd = await tx`update fadebot_bets5 set status = 'settled', result = ${ok ? "win" : "loss"}, pnl = ${p},
           limit_filled = ${limitFilled}, settled_at = now()
@@ -376,7 +381,7 @@ async function settle() {
       const st = (await tx`select * from fadebot_state5 where id = 1 for update`)[0];
       const total = st.total_pnl + p;
       const peak = Math.max(st.peak, total);
-      await tx`update fadebot_state5 set step = ${nextStep(st.step, ok, settings().maxFibStep)}, total_pnl = ${total},
+      await tx`update fadebot_state5 set step = 0, total_pnl = ${total},
         peak = ${peak}, worst_drawdown = ${Math.max(st.worst_drawdown, peak - total)}, trades = ${st.trades + 1},
         wins = ${st.wins + (ok ? 1 : 0)} where id = 1`;
     });
@@ -414,7 +419,7 @@ async function status() {
   const st = (await sql`select * from fadebot_state5 where id = 1`)[0];
   const bets = await sql`select * from fadebot_bets5 order by window_start desc limit 30`;
   const cfg = settings();
-  return { settings: cfg, state: st, nextStake: cfg.baseBet * fib(st.step), bets };
+  return { settings: cfg, state: st, nextStake: cfg.marketBet, bets };
 }
 
 Deno.serve(async (req) => {

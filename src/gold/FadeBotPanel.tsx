@@ -32,10 +32,13 @@ export function FadeBotPanel() {
     <div className="text-sm">
       <p className={`mb-2 text-xs ${MUTED}`}>
         BTC 5-minute market on Polymarket US. Jev reads each candle 30 seconds
-        in; when it says the candle holds its color, the bot market-buys that
-        side (Fibonacci stakes from ${cfg.baseBet}) and places a limit order for{" "}
-        {cfg.limitShares} more shares at {Math.round(cfg.limitPrice * 100)}¢
-        until the window closes. Flip calls are ignored.
+        in; when it says the candle holds its color, the bot places a limit
+        order for {cfg.limitShares} shares of that side at{" "}
+        {Math.round(cfg.limitPrice * 100)}¢ ($
+        {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
+        the window closes
+        {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
+        Flip calls are ignored.
       </p>
       <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">
         <span>
@@ -49,7 +52,8 @@ export function FadeBotPanel() {
           </b>
         </span>
         <span>
-          Next bet: ${s.nextStake.toFixed(2)} (step {st.step})
+          Max per window: $
+          {(cfg.limitShares * cfg.limitPrice + cfg.marketBet).toFixed(2)}
         </span>
         <span>
           Won {st.wins} of {st.trades}
@@ -98,10 +102,13 @@ export function FadeBotPanel() {
                       : ""}
                   </td>
                   <td className="py-1">
-                    {b.side} ${b.stake?.toFixed(0)} @ {b.price?.toFixed(2)}
+                    {b.side}
+                    {b.shares
+                      ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)} +`
+                      : ""}
                     <span className={MUTED}>
                       {" "}
-                      + {b.limit_shares} @{" "}
+                      {b.limit_shares} @{" "}
                       {Math.round((b.limit_price ?? 0) * 100)}¢{" "}
                       {b.limit_filled
                         ? "filled"

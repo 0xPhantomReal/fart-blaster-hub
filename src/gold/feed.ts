@@ -724,8 +724,7 @@ export interface FadeBotBet {
 export interface FadeBotStatus {
   settings: {
     mode: string;
-    baseBet: number;
-    maxFibStep: number | null;
+    marketBet: number;
     limitPrice: number;
     limitShares: number;
   };
