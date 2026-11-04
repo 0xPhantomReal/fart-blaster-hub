@@ -777,6 +777,7 @@ export async function fadeBotFindMarket(): Promise<
       search: string;
       how?: string;
       record?: string;
+      check?: { ok: boolean | null; note: string } | null;
     }
   | { error: string }
 > {

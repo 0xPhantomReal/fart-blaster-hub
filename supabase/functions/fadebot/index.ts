@@ -231,6 +231,13 @@ function longSide(m: any): { side: Side; how: string } | null {
     const sd = sideOf(t);
     if (sd) return { side: sd, how: `outcome/title = ${sd}` };
   }
+  // The settle rule: "This market will settle to Up if the Bitcoin price at the end … is greater than or equal to …"
+  // → the contract settles to (pays on) Up. Checked against real settlements before any live bet (checkLong).
+  for (const key of ["description", "rules", "resolutionRules", "settlementRules"]) {
+    const t = String(m?.[key] ?? "");
+    const r = t.match(/\b(?:settle|resolve)[sd]?\s+(?:to|as)\s+["“'‘]?(up|down)\b[^.]{0,200}?\bif\b/i);
+    if (r) return { side: r[1].toLowerCase() as Side, how: `settle rule in ${key}: settles to ${r[1]}` };
+  }
   return null;
 }
 
@@ -336,6 +343,48 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
   const any = [...seen.values()].slice(0, 3).map((e) => `${e.slug} "${e.title ?? ""}"`).join("; ");
   lastSearch = `${direct ? `direct lookup failed (${direct}); ` : ""}saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : any ? `; e.g. ${any}` : ""}${lastListError ? `; list error: ${lastListError}` : ""}`;
   return null;
+}
+
+/**
+ * Check the YES side against real results: for recent windows that Polymarket has settled and whose direction is
+ * clear from our own BRTI record (moved $10+), YES won ⇔ the window went `longIs`'s way. Cached once confirmed.
+ */
+let longChecked: { side: Side; note: string } | null = null;
+async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | null; note: string }> {
+  if (longChecked) {
+    return longChecked.side === longIs
+      ? { ok: true, note: longChecked.note }
+      : { ok: false, note: `YES side read as ${longIs}, but earlier settlements showed ${longChecked.side}` };
+  }
+  const client = pm();
+  let agree = 0;
+  let disagree = 0;
+  const seen: string[] = [];
+  for (let ws = start - 2 * TF; ws >= start - 14 * TF && agree < 2 && disagree < 2; ws -= TF) {
+    const open = await period(ws - 60);
+    const fin = await period(ws + TF - 60);
+    if (!open || !fin || open.n < 20 || fin.n < 20 || Math.abs(fin.avg - open.avg) < 10) continue;
+    const went: Side = fin.avg >= open.avg ? "up" : "down";
+    const r = await client.events.retrieveBySlug(`btc-updown-5m-${slugTime(ws)}`).catch(() => null);
+    const ev = (r as { event?: Ev } | null)?.event;
+    const mk = ev ? (await marketsOf(ev))[0] : undefined;
+    if (!mk) continue;
+    const st = await client.markets.settlement(mk.slug).catch(() => null);
+    const v = Number(st?.settlementPrice?.value);
+    if (!Number.isFinite(v)) continue;
+    const yesWon = v >= 0.5;
+    const ok = yesWon === (went === longIs);
+    if (ok) agree += 1;
+    else disagree += 1;
+    seen.push(`${slugTime(ws)} went ${went}, YES ${yesWon ? "won" : "lost"}`);
+  }
+  const note = seen.join("; ");
+  if (disagree > 0) return { ok: false, note: `settlements don't match YES = ${longIs}: ${note}` };
+  if (agree >= 2) {
+    longChecked = { side: longIs, note: `confirmed by settlements: ${note}` };
+    return { ok: true, note: longChecked.note };
+  }
+  return { ok: null, note: `not confirmed yet (${agree} settled window${agree === 1 ? "" : "s"} checked${note ? `: ${note}` : ""})` };
 }
 
 /** Cost of one share of `side` now (0–1). The book is quoted in YES prices: NO costs 1 − the best YES bid. */
@@ -501,6 +550,14 @@ async function decideWindow(start: number) {
     return;
   }
 
+  // Never bet with the YES side unconfirmed (live) or contradicted (either mode).
+  const chk = await checkLong(start, market.longIs).catch((e) => ({ ok: null, note: (e as Error).message }));
+  if (chk.ok === false || (chk.ok === null && cfg.mode === "live")) {
+    await skip(start, `Jev: ${d.kind} → ${d.side}; market ${market.slug} found (YES = ${market.longIs}, ${lastHow}) but ${chk.ok === false ? "" : "waiting: "}${chk.note}`.slice(0, 700));
+    await sql`update fadebot_bets5 set regime = ${regLabel}, kind = ${d.kind} where window_start = ${start}`;
+    return;
+  }
+
   let price: number | null = await priceFor(market, d.side).catch(() => null);
   let shares = 0;
   let fees = 0;
@@ -646,7 +703,9 @@ Deno.serve(async (req) => {
       lastMarket = null;
       lastHow = "";
       const m = await findMarket(start);
+      const check = m ? await checkLong(start, m.longIs).catch((e) => ({ ok: null, note: (e as Error).message })) : null;
       return json({
+        check,
         window: new Date(start * 1000).toISOString(),
         market: m,
         search: lastSearch,
