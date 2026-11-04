@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import * as front from "./flip";
 import * as shared from "../../supabase/functions/_shared/flipState";
+import * as bot from "../../supabase/functions/_shared/fadeStrategy";
 import { fib, holdDecision, nextStep, winner } from "../../supabase/functions/_shared/fadeStrategy";
+import * as page from "./minuteCall";
 
 describe("edge-function copy of the candle reader", () => {
   it("gives Jev exactly the same snapshot as the page", () => {
@@ -26,5 +28,21 @@ describe("edge-function copy of the candle reader", () => {
     expect([0, 1, 2, 3, 4, 5].map(fib)).toEqual([1, 1, 2, 3, 5, 8]);
     expect(nextStep(5, true, null)).toBe(3);
     expect(winner(1, 1)).toBe("up");
+  });
+
+  it("works out the same regime, and the same bet, as the page", () => {
+    const hits = Array.from({ length: 30 }, (_, i) => ({ time: i * 300, hit: (i * 7) % 5 < 2 }));
+    for (const now of [0, 1500, 3000, 6000, 9000, 20000]) {
+      const a = bot.regimeOf(hits, now, 300);
+      expect(page.regimeOf(hits, now, 300)).toEqual(a);
+      for (const [p, mv] of [[0.7, 5], [0.3, 5], [0.7, -5], [0.3, -5], [0.5, 1], [0.7, 0]] as const) {
+        const d = bot.regimeDecision(p, mv, a.regime);
+        expect(page.botSide(p, mv, a)).toEqual(d ? d.side : null);
+      }
+    }
+    expect(bot.regimeDecision(0.7, 5, "backwards")).toEqual({ side: "down", sure: 0.7, kind: "fade-hold" });
+    expect(bot.regimeDecision(0.3, 5, "backwards")).toEqual({ side: "up", sure: 0.7, kind: "fade-flip" });
+    expect(bot.regimeDecision(0.3, 5, "normal")).toBeNull();
+    expect(bot.regimeDecision(0.3, -5, "unsure")).toEqual({ side: "down", sure: 0.7, kind: "hold" });
   });
 });

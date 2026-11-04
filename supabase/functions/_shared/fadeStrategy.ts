@@ -28,6 +28,50 @@ export function holdDecision(pGreen: number, move: number): { side: Side; sure: 
   return { side: current, sure: Math.max(pGreen, 1 - pGreen) };
 }
 
+// ── Regimes ──
+// Jev's 30-second read seems to run in stretches: some where it's mostly right (its holds hold) and some where it's
+// mostly wrong (its flip calls go the other way and its holds reverse more). Jev's own record over the last
+// REGIME_N candles says which stretch we're in. Keep in step with src/gold/minuteCall.ts (parity test).
+
+export const REGIME_N = 12; //    candles looked back on
+export const REGIME_MIN = 6; //   fewer scored reads than this → "unsure"
+export type Regime = "normal" | "backwards" | "unsure";
+export interface JevHit {
+  time: number; // candle open time
+  hit: boolean; // Jev's read called the final color right
+}
+
+/** The regime before the candle opening at `now`: Jev's hits among the last `n` reads (only recent ones count). */
+export function regimeOf(hits: JevHit[], now: number, tfSec: number, n = REGIME_N): { regime: Regime; right: number; n: number } {
+  const recent = hits.filter((h) => h.time < now && h.time >= now - 3 * n * tfSec).slice(-n);
+  const right = recent.filter((h) => h.hit).length;
+  const k = recent.length;
+  const regime: Regime = k < REGIME_MIN || right * 2 === k ? "unsure" : right * 2 > k ? "normal" : "backwards";
+  return { regime, right, n: k };
+}
+
+/**
+ * The bot's bet with regimes:
+ *   normal / unsure → hold calls only (Jev says the current color holds → bet it; flip calls ignored)
+ *   backwards       → bet against Jev: its hold call → bet the reversal; its flip call → bet the hold
+ */
+export function regimeDecision(
+  pGreen: number,
+  move: number,
+  regime: Regime,
+): { side: Side; sure: number; kind: "hold" | "fade-hold" | "fade-flip" } | null {
+  if (move === 0 || pGreen === 0.5) return null;
+  const current: Side = move > 0 ? "up" : "down";
+  const jev: Side = pGreen > 0.5 ? "up" : "down";
+  const sure = Math.max(pGreen, 1 - pGreen);
+  if (regime === "backwards") {
+    const side: Side = jev === "up" ? "down" : "up";
+    return { side, sure, kind: jev === current ? "fade-hold" : "fade-flip" };
+  }
+  if (jev !== current) return null;
+  return { side: current, sure, kind: "hold" };
+}
+
 /** Up wins when the closing reference is >= the opening one. */
 export function winner(openRef: number, closeRef: number): Side {
   return closeRef >= openRef ? "up" : "down";

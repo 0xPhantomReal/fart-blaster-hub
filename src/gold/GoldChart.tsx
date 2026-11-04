@@ -38,13 +38,20 @@ const toBar = (c: Candle) => ({
 /** An arrow on each candle a call was made for: colored if right, gray if wrong. */
 function markerFor(
   b: ClosedBar,
-  mode: "jev" | "refined" | "minute",
+  mode: "jev" | "refined" | "minute" | "regime",
   minConf: number,
 ): SeriesMarker<Time>[] {
-  const p = mode === "refined" ? b.pRef : mode === "minute" ? b.pMin : b.pJev;
+  const p =
+    mode === "refined"
+      ? b.pRef
+      : mode === "minute"
+        ? b.pMin
+        : mode === "regime"
+          ? b.pAdj
+          : b.pJev;
   const c = b.candle;
   const o =
-    mode === "minute"
+    mode === "minute" || mode === "regime"
       ? p === undefined
         ? null
         : {
@@ -85,7 +92,7 @@ export function GoldChart({
   footprintMode?: boolean; //                   draw footprint candles instead of plain ones
   decimals?: number; // price decimals (XRP needs 4)
   minConf?: number; // only draw arrows at least this sure (0.5 = every call)
-  arrows?: "jev" | "refined" | "minute";
+  arrows?: "jev" | "refined" | "minute" | "regime";
   bars: ClosedBar[];
   forming: Candle | null;
   version: number;

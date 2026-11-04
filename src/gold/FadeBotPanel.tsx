@@ -33,14 +33,43 @@ export function FadeBotPanel() {
     <div className="text-sm">
       <p className={`mb-2 text-xs ${MUTED}`}>
         BTC 5-minute market on Polymarket US. Jev reads each candle 30 seconds
-        in; when it says the candle holds its color, the bot places a limit
-        order for {cfg.limitShares} shares of that side at{" "}
+        in.{" "}
+        {cfg.regimes
+          ? "When Jev has been right lately (or it's unclear), the bot bets only when Jev says the candle holds its color, and ignores flip calls. When Jev has been backwards lately (wrong on more than half of its last 12 reads), it bets against Jev: a hold call → the reversal, a flip call → the hold."
+          : "When Jev says the candle holds its color, the bot bets that color; flip calls are ignored."}{" "}
+        Each bet is a limit order for {cfg.limitShares} shares at{" "}
         {Math.round(cfg.limitPrice * 100)}¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
         the window closes
         {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
-        Flip calls are ignored.
       </p>
+      {cfg.regimes && s.regime && (
+        <p className="mb-2 text-xs">
+          Next window:{" "}
+          <b
+            className={
+              s.regime.regime === "backwards"
+                ? "text-[#ef5350]"
+                : s.regime.regime === "normal"
+                  ? "text-[#26a69a]"
+                  : MUTED
+            }
+          >
+            {s.regime.regime === "normal"
+              ? "Jev right → bet holds"
+              : s.regime.regime === "backwards"
+                ? "Jev backwards → bet against Jev"
+                : "unclear → bet holds"}
+          </b>{" "}
+          <span className={MUTED}>
+            (Jev {s.regime.right} of last {s.regime.n} right
+            {s.regime.afterHit.n >= 10 && s.regime.afterMiss.n >= 10
+              ? `; after a hit it's right ${Math.round((s.regime.afterHit.right / s.regime.afterHit.n) * 100)}%, after a miss ${Math.round((s.regime.afterMiss.right / s.regime.afterMiss.n) * 100)}%`
+              : `; ${s.regime.reads} reads recorded so far`}
+            )
+          </span>
+        </p>
+      )}
       <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">
         <span>
           Mode:{" "}
@@ -114,7 +143,11 @@ export function FadeBotPanel() {
               ) : (
                 <>
                   <td className="py-1">
-                    holds{" "}
+                    {b.kind === "fade-hold"
+                      ? "holds (faded)"
+                      : b.kind === "fade-flip"
+                        ? "flip (faded)"
+                        : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}

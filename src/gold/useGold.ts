@@ -10,9 +10,14 @@ import {
 } from "./predictor";
 import { marketContext } from "./context";
 import {
+  adjustForRegime,
   emptyScores,
+  regimeOf,
   scoreRead,
+  scoreRegime,
+  type JevHit,
   type MinuteRead,
+  type RegimeInfo,
   type MinuteScores,
 } from "./minuteCall";
 import {
@@ -110,6 +115,7 @@ export interface ClosedBar {
   pRef?: number; //            refined chance of green
   pMin?: number; //            Jev's chance of green read X minutes into the candle (minute mode)
   minMove?: number; //         the candle's move at that minute (its sign = "current color holds")
+  pAdj?: number; //            regime-adjusted chance of green at that minute (Jev, or Jev flipped when backwards)
 }
 
 /** Jev refined: Jev's chance of green after the correction learned from its own record. */
@@ -157,6 +163,10 @@ export interface GoldState {
     live: MinuteScores;
     now: MinuteRead | null; // read for the forming candle, once taken
     calls: number;
+    /** Jev's recent record at this minute → which regime the forming candle is in. */
+    regime: RegimeInfo | null;
+    /** True when "past" is this browser's own earlier live reads (30 seconds), not a replay. */
+    pastIsLive: boolean;
   };
   /** Order flow (Coinbase trades) for crypto: footprints per candle and how the feed is doing. */
   flow: {
@@ -310,6 +320,8 @@ export function useGold(
       live: emptyScores(),
       now: null,
       calls: 0,
+      regime: null,
+      pastIsLive: false,
     },
     refine: REFINE_START,
     blocked: null,
@@ -347,6 +359,8 @@ export function useGold(
         live: emptyScores(),
         now: null,
         calls: 0,
+        regime: null,
+        pastIsLive: false,
       },
       refine: REFINE_START,
       blocked: null,
@@ -388,6 +402,7 @@ export function useGold(
       pRef: refinedByTime.get(c.time),
       pMin: minuteReads.get(c.time)?.pJev,
       minMove: minuteReads.get(c.time)?.move,
+      pAdj: minuteReads.get(c.time)?.pAdj,
     });
     const redrawJevArrows = () => {
       bars = bars.map((b) => barFor(b.candle));
@@ -1201,6 +1216,43 @@ export function useGold(
     let minuteJevReady = false; // hookJev has finished (features known, backfills done)
     const liveRead = new Set<number>(); // candles read live (not from the replay)
     let liveMin = emptyScores();
+    let minuteHits: JevHit[] = []; // Jev right/wrong at this minute, in time order → the regime
+    const regimeNow = () =>
+      regimeOf(
+        minuteHits,
+        lastForming?.time ?? Math.floor(feed.now() / TF_SECONDS) * TF_SECONDS,
+        TF_SECONDS,
+      );
+    const liveStoreKey = (m: number) =>
+      `${tfKey("gold.minutelive.v1", where)}.m${m}`;
+    type Stored = {
+      time: number;
+      pJev: number;
+      pMath: number;
+      move: number;
+      y: 0 | 1 | null;
+    };
+    const loadStored = (m: number): Stored[] => {
+      try {
+        const v = JSON.parse(localStorage.getItem(liveStoreKey(m)) ?? "[]");
+        return Array.isArray(v) ? v : [];
+      } catch {
+        return [];
+      }
+    };
+    const saveStored = (m: number, r: Stored) => {
+      try {
+        const list = loadStored(m).filter((x) => x.time !== r.time);
+        list.push(r);
+        list.sort((a, b) => a.time - b.time);
+        localStorage.setItem(
+          liveStoreKey(m),
+          JSON.stringify(list.slice(-500)),
+        );
+      } catch {
+        // kept for this session only
+      }
+    };
     const setMinute = (patch: Partial<GoldState["minute"]>) =>
       !cancelled &&
       setState((s) => ({ ...s, minute: { ...s.minute, ...patch } }));
@@ -1213,6 +1265,7 @@ export function useGold(
       minuteReads.clear();
       liveRead.clear();
       liveMin = emptyScores();
+      minuteHits = [];
       redrawJevArrows();
       if (m === null)
         return setMinute({
@@ -1240,9 +1293,29 @@ export function useGold(
       if (TF_SECONDS < 300)
         return setMinute({ status: "not available on 1-minute candles" });
       if (m < 1) {
-        // Past candles are rebuilt from 1-minute bars, which can't show where a candle was 30 seconds in.
+        // Past candles are rebuilt from 1-minute bars, which can't show where a candle was 30 seconds in, so the
+        // record is this browser's own live reads, kept between visits.
+        const past = emptyScores();
+        for (const st of loadStored(m)) {
+          const reg = regimeOf(minuteHits, st.time, TF_SECONDS);
+          const read: MinuteRead = {
+            time: st.time,
+            pJev: st.pJev,
+            pMath: st.pMath,
+            move: st.move,
+            regime: reg,
+            pAdj: adjustForRegime(st.pJev, reg),
+          };
+          minuteReads.set(st.time, read);
+          scoreRead(past, read, st.y);
+          scoreRegime(past, minuteHits, read, st.y, TF_SECONDS);
+        }
+        redrawJevArrows();
         return setMinute({
-          status: `Live only: scored on candles from now on (past candles can't be rebuilt at ${Math.round(m * 60)} seconds from 1-minute data).`,
+          status: `Live only: past candles can't be rebuilt at ${Math.round(m * 60)} seconds from 1-minute data, so "Past" is this browser's own earlier reads${past.holds.n ? "" : " (none yet)"}.`,
+          past: past.holds.n ? past : null,
+          pastIsLive: true,
+          regime: regimeNow(),
         });
       }
       setMinute({ status: "loading 1-minute history…" });
@@ -1322,19 +1395,29 @@ export function useGold(
         // fetched again next visit
       }
       const past = emptyScores();
-      for (const sn of snaps) {
+      for (const sn of [...snaps].sort((a, b) => a.time - b.time)) {
         const pf = answers.get(sn.time);
         if (pf === undefined) continue;
+        const pJev = greenFromFlip(sn.move, pf);
+        const reg = regimeOf(minuteHits, sn.time, TF_SECONDS);
         const read: MinuteRead = {
           time: sn.time,
-          pJev: greenFromFlip(sn.move, pf),
+          pJev,
           pMath: sn.pMath,
           move: sn.move,
+          regime: reg,
+          pAdj: adjustForRegime(pJev, reg),
         };
         minuteReads.set(sn.time, read);
         scoreRead(past, read, sn.y);
+        scoreRegime(past, minuteHits, read, sn.y, TF_SECONDS);
       }
-      setMinute({ status: "ok", past, calls: minuteCalls });
+      setMinute({
+        status: "ok",
+        past,
+        calls: minuteCalls,
+        regime: regimeNow(),
+      });
       redrawJevArrows();
     };
     kickMinute.current = (m) => void runMinute(m);
@@ -1380,11 +1463,15 @@ export function useGold(
         if (minuteSel !== m || cancelled) return;
         minuteCalls += 1;
         const move = c.close - c.open;
+        const pJev = greenFromFlip(move, a.pFlip);
+        const reg = regimeOf(minuteHits, c.time, TF_SECONDS);
         const read: MinuteRead = {
           time: c.time,
-          pJev: greenFromFlip(move, a.pFlip),
+          pJev,
           pMath: predictor.live(c, feed.now())?.pGreen ?? 0.5,
           move,
+          regime: reg,
+          pAdj: adjustForRegime(pJev, reg),
         };
         minuteReads.set(c.time, read);
         liveRead.add(c.time);
@@ -1399,14 +1486,31 @@ export function useGold(
     const onClose = async (c: Candle) => {
       if (liveRead.has(c.time)) {
         const r = minuteReads.get(c.time);
-        if (r)
-          scoreRead(
-            liveMin,
-            r,
-            c.close > c.open ? 1 : c.close < c.open ? 0 : null,
-          );
-        setMinute({ live: { ...liveMin }, now: null });
-      } else setMinute({ now: null });
+        const y = c.close > c.open ? 1 : c.close < c.open ? 0 : null;
+        if (r) {
+          scoreRead(liveMin, r, y);
+          scoreRegime(liveMin, minuteHits, r, y, TF_SECONDS);
+          if (minuteSel !== null && minuteSel < 1)
+            saveStored(minuteSel, {
+              time: r.time,
+              pJev: r.pJev,
+              pMath: r.pMath,
+              move: r.move,
+              y,
+            });
+        }
+        setMinute({
+          live: { ...liveMin },
+          now: null,
+          regime: regimeOf(minuteHits, c.time + TF_SECONDS, TF_SECONDS),
+        });
+      } else
+        setMinute({
+          now: null,
+          ...(minuteSel !== null
+            ? { regime: regimeOf(minuteHits, c.time + TF_SECONDS, TF_SECONDS) }
+            : {}),
+        });
       if (halfwayFlip && halfwayFlip.forTime === c.time && c.close !== c.open) {
         setFlip({
           live: blender.recordLive({

@@ -720,6 +720,8 @@ export interface FadeBotBet {
   limit_filled: number | null;
   result: string | null;
   pnl: number | null;
+  regime?: string | null; // e.g. "Jev backwards (4/12)"
+  kind?: string | null; //   hold | fade-hold | fade-flip
 }
 export interface FadeBotStatus {
   settings: {
@@ -727,6 +729,7 @@ export interface FadeBotStatus {
     marketBet: number;
     limitPrice: number;
     limitShares: number;
+    regimes?: boolean;
   };
   state: {
     step: number;
@@ -737,6 +740,16 @@ export interface FadeBotStatus {
   };
   nextStake: number;
   bets: FadeBotBet[];
+  /** Jev's 30-second record (every window, bet or not) → the regime for the next window. */
+  regime?: {
+    regime: "normal" | "backwards" | "unsure";
+    right: number;
+    n: number;
+    window: number;
+    reads: number;
+    afterHit: { right: number; n: number };
+    afterMiss: { right: number; n: number };
+  };
 }
 
 /** The bot's settings, totals and recent bets, or null if the bot isn't deployed. */

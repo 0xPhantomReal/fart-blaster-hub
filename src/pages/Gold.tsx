@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
-import { minuteChoices, readLabel, readShort } from "@/gold/minuteCall";
+import {
+  minuteChoices,
+  readLabel,
+  readShort,
+  REGIME_MIN,
+  REGIME_N,
+  type RegimeInfo,
+} from "@/gold/minuteCall";
 import { MARKETS, TIMEFRAMES, type Market, type Timeframe } from "@/gold/feed";
 import { SUPPORT_NEEDED, type TrackRecord } from "@/gold/predictor";
 import { BACKFILL, useGold } from "@/gold/useGold";
@@ -10,6 +17,12 @@ import type { PathRecord } from "@/gold/forecast";
 
 const pct = (x: number | null | undefined, d = 1) =>
   x == null ? "—" : `${(x * 100).toFixed(d)}%`;
+const regimeText = (r: RegimeInfo) =>
+  r.regime === "unsure"
+    ? r.n < REGIME_MIN
+      ? `Regime: not enough reads yet (${r.n} of ${REGIME_MIN})`
+      : `Regime: unclear (Jev ${r.right} of last ${r.n} right)`
+    : `Regime: ${r.regime === "normal" ? "Jev right" : "Jev backwards"} (${r.right} of last ${r.n} right)`;
 const time = (t: number) =>
   new Date(t * 1000).toLocaleTimeString([], {
     hour: "numeric",
@@ -133,7 +146,8 @@ function save(key: string, v: unknown) {
 }
 const isTf = (v: unknown): v is Timeframe =>
   (TIMEFRAMES as readonly unknown[]).includes(v);
-type ArrowMode = "jev" | "refined" | "minute";
+type ArrowMode = "jev" | "refined" | "minute" | "regime";
+const usesMinute = (m: ArrowMode) => m === "minute" || m === "regime";
 const isMarket = (v: unknown): v is Market =>
   typeof v === "string" && v in MARKETS;
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
@@ -185,7 +199,8 @@ export default function Gold() {
   const [arrows, setArrows] = useState<ArrowMode>(() =>
     load(
       "gold.arrows",
-      (v): v is ArrowMode => v === "jev" || v === "refined" || v === "minute",
+      (v): v is ArrowMode =>
+        v === "jev" || v === "refined" || v === "minute" || v === "regime",
       "jev",
     ),
   );
@@ -218,12 +233,12 @@ export default function Gold() {
       : minuteOpts[minuteOpts.length - 1]
     : null;
   const arrowMode: ArrowMode =
-    arrows === "minute" && callMinute === null ? "jev" : arrows;
+    usesMinute(arrows) && callMinute === null ? "jev" : arrows;
   const g = useGold(
     market,
     tfMin,
     forecastOn,
-    arrowMode === "minute" ? callMinute : null,
+    usesMinute(arrowMode) ? callMinute : null,
   );
   const mn = g.minute;
   /** Jev's minute-X reads on the chart's candles, bucketed by how sure it was, vs "holds" on the same candles. */
@@ -263,9 +278,11 @@ export default function Gold() {
       holds: n ? holds / n : 0,
     };
   });
-  const cols: [ArrowMode, string][] =
-    arrowMode === "minute"
-      ? [["minute", `Jev at ${readLabel(callMinute!)}`]]
+  const cols: [ArrowMode, string][] = usesMinute(arrowMode)
+    ? [
+        ["minute", `Jev at ${readShort(callMinute!)}`],
+        ["regime", "Regime-adjusted"],
+      ]
       : [
           ["jev", "Jev"],
           ["refined", "Refined"],
@@ -276,7 +293,13 @@ export default function Gold() {
     g.bars.reduce(
       (acc, b) => {
         const pp =
-          src === "refined" ? b.pRef : src === "minute" ? b.pMin : b.pJev;
+          src === "refined"
+            ? b.pRef
+            : src === "minute"
+              ? b.pMin
+              : src === "regime"
+                ? b.pAdj
+                : b.pJev;
         const c = b.candle;
         if (
           pp === undefined ||
@@ -486,7 +509,7 @@ export default function Gold() {
                   )}
               </>
             )}
-            {arrowMode === "minute" &&
+            {usesMinute(arrowMode) &&
               g.forming &&
               callMinute !== null &&
               (() => {
@@ -503,6 +526,11 @@ export default function Gold() {
                     >
                       Jev at {readLabel(callMinute)}
                     </div>
+                    {!read && mn.regime && (
+                      <div className={`text-xs ${MUTED}`}>
+                        {regimeText(mn.regime)}
+                      </div>
+                    )}
                     {read ? (
                       <>
                         <div
@@ -524,6 +552,28 @@ export default function Gold() {
                             ? " · Jev is calling a flip"
                             : " · Jev says it holds"}
                         </div>
+                        {read.regime && read.pAdj !== undefined && (
+                          <div className="mt-1 text-sm">
+                            Regime-adjusted:{" "}
+                            <span
+                              className={`font-bold ${read.pAdj > 0.5 ? GREEN : read.pAdj < 0.5 ? RED : MUTED}`}
+                            >
+                              {read.pAdj > 0.5
+                                ? "GREEN"
+                                : read.pAdj < 0.5
+                                  ? "RED"
+                                  : "NO CALL"}
+                            </span>
+                            <span className={`text-xs ${MUTED}`}>
+                              {" "}
+                              ({regimeText(read.regime)}
+                              {read.regime.regime === "backwards"
+                                ? " → Jev's call flipped"
+                                : " → Jev's call as is"}
+                              )
+                            </span>
+                          </div>
+                        )}
                       </>
                     ) : due > 0 ? (
                       <div className="text-sm">
@@ -741,8 +791,8 @@ export default function Gold() {
           <section>
             <Label>Jev refined</Label>
             <div className="mb-2 flex overflow-hidden rounded-md border border-[#262c36] text-xs">
-              {(["jev", "refined", "minute"] as const)
-                .filter((m) => m !== "minute" || callMinute !== null)
+              {(["jev", "refined", "minute", "regime"] as const)
+                .filter((m) => !usesMinute(m) || callMinute !== null)
                 .map((m) => (
                   <button
                     key={m}
@@ -753,11 +803,13 @@ export default function Gold() {
                       ? "Jev"
                       : m === "refined"
                         ? "Refined"
-                        : `Jev at ${readShort(callMinute!)}`}
+                        : m === "minute"
+                          ? `Jev at ${readShort(callMinute!)}`
+                          : `Regime ${readShort(callMinute!)}`}
                   </button>
                 ))}
             </div>
-            {arrowMode === "minute" && (
+            {usesMinute(arrowMode) && (
               <div className="mb-3 rounded-md border border-[#262c36] p-2">
                 <div className="mb-2 flex items-center gap-1 text-xs">
                   <span className={MUTED}>Read the candle at</span>
@@ -785,7 +837,9 @@ export default function Gold() {
                         <th className="pb-1 text-left font-medium">
                           Right at close
                         </th>
-                        <th className="pb-1 text-right font-medium">Past</th>
+                        <th className="pb-1 text-right font-medium">
+                          {mn.pastIsLive ? "Earlier" : "Past"}
+                        </th>
                         <th className="pb-1 text-right font-medium">Live</th>
                       </tr>
                     </thead>
@@ -796,6 +850,10 @@ export default function Gold() {
                           ["Current color holds", "holds"],
                           ["Math", "math"],
                           ["Jev, when it calls a flip", "jevFlips"],
+                          ["Regime-adjusted Jev", "adjusted"],
+                          ["Bot rule (with regimes)", "bot"],
+                          ["Jev, right after a hit", "afterHit"],
+                          ["Jev, right after a miss", "afterMiss"],
                         ] as const
                       ).map(([name, k]) => {
                         const cell = (
@@ -898,6 +956,29 @@ export default function Gold() {
                   in "when it calls a flip" being well above 50%.
                   {` ${mn.calls} Jev calls for this.`}
                 </p>
+                <p className={`mt-2 text-xs ${MUTED}`}>
+                  <b>Regimes:</b> before each candle, Jev's record at{" "}
+                  {readLabel(callMinute!)} over the last {REGIME_N} candles
+                  decides the regime. More than half right → "Jev right", its
+                  call is used as is. Less than half → "Jev backwards", its
+                  call is flipped. Fewer than {REGIME_MIN} reads or exactly half
+                  → unclear, Jev as is. "Bot rule" bets hold calls only in the
+                  first two, and against Jev (both ways) when backwards.{" "}
+                  {mn.regime && `Now: ${regimeText(mn.regime)}.`}
+                  {(() => {
+                    const s = mn.past ?? mn.live;
+                    const h = s.afterHit;
+                    const m = s.afterMiss;
+                    if (h.n < 10 || m.n < 10)
+                      return " Whether the regimes are real shows in the last two rows: if Jev is right much more often after a hit than after a miss, they last long enough to catch. (Needs 10+ of each.)";
+                    const gap = h.right / h.n - m.right / m.n;
+                    return gap > 0.1
+                      ? ` After a hit Jev is right ${pct(h.right / h.n, 0)}, after a miss ${pct(m.right / m.n, 0)}: the stretches look real and last.`
+                      : gap < -0.1
+                        ? ` After a hit Jev is right ${pct(h.right / h.n, 0)}, after a miss ${pct(m.right / m.n, 0)}: hits and misses alternate more than they cluster, so following the regime will lag.`
+                        : ` After a hit ${pct(h.right / h.n, 0)} vs after a miss ${pct(m.right / m.n, 0)}: about the same, so the streaks look mostly like chance so far.`;
+                  })()}
+                </p>
               </div>
             )}
             <p className={`mb-1 text-xs ${MUTED}`}>
@@ -915,7 +996,7 @@ export default function Gold() {
                 </tr>
               </thead>
               <tbody>
-                {(arrowMode === "minute"
+                {(usesMinute(arrowMode)
                   ? [0.5, 0.6, 0.7, 0.8, 0.9]
                   : [0.5, 0.55, 0.58, 0.6, 0.65]
                 ).map((t) => {

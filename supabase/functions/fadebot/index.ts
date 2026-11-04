@@ -2,15 +2,18 @@
 //
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
-//   S … S+30: record BRTI, then ask Jev whether the candle holds its color or flips
-//     Jev says it HOLDS (any sureness over 50%) → a limit order for 30 shares of the current color at 33¢, good until
-//     the window closes (optionally also a market order: FADEBOT_MARKET_BET); Jev calls a flip → no bet
+//   S … S+30: record BRTI, then ask Jev whether the candle holds its color or flips. Every read is kept, and Jev's
+//     record over the last 12 windows sets the regime:
+//       Jev right lately (or unclear) → bet only when Jev says it HOLDS (any sureness over 50%); flip calls ignored
+//       Jev backwards lately         → bet against Jev: its hold call → bet the reversal, its flip call → bet the hold
+//     A bet = a limit order for 30 shares at 33¢ on that side, good until the window closes (optionally also a
+//     market order: FADEBOT_MARKET_BET). FADEBOT_REGIME=off → hold calls only, always.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
 // Secrets: SUPABASE_DB_URL, SUPABASE_URL, SUPABASE_ANON_KEY (provided by the platform);
 //   FADEBOT_MODE (dry | live, default dry), FADEBOT_LIMIT_PRICE (0.33), FADEBOT_LIMIT_SHARES (30),
-//   FADEBOT_MARKET_BET (0 = none); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
+//   FADEBOT_MARKET_BET (0 = none), FADEBOT_REGIME (on | off, default on); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
 //
 // POST {}                    → the scheduled run
 // POST { action: "status" }  → settings, totals and recent bets (for the page)
@@ -18,7 +21,15 @@
 import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
-import { holdDecision, pnl, winner, type Side } from "../_shared/fadeStrategy.ts";
+import {
+  pnl,
+  regimeDecision,
+  regimeOf,
+  REGIME_N,
+  winner,
+  type JevHit,
+  type Side,
+} from "../_shared/fadeStrategy.ts";
 import { authenticateCronRequest } from "../_shared/cron-auth.ts";
 
 const TF = 300; //        5-minute windows
@@ -38,6 +49,7 @@ const settings = () => ({
   marketBet: Number(env("FADEBOT_MARKET_BET") || 0),
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
   limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 30),
+  regimes: env("FADEBOT_REGIME") !== "off",
 });
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -67,10 +79,17 @@ async function setup() {
     total_pnl double precision not null default 0, peak double precision not null default 0,
     worst_drawdown double precision not null default 0, trades int not null default 0, wins int not null default 0)`;
   await sql`insert into fadebot_state5 (id) values (1) on conflict (id) do nothing`;
+  // Every 30-second Jev read (bet or not), and how the window ended: Jev's record → the regime.
+  await sql`create table if not exists fadebot_reads5 (
+    window_start bigint primary key, p_green double precision, move double precision, open_ref double precision,
+    outcome text, created_at timestamptz default now())`;
+  await sql`alter table fadebot_bets5 add column if not exists regime text`;
+  await sql`alter table fadebot_bets5 add column if not exists kind text`;
   // Only this function (through the database connection) reads and writes these tables.
   await sql`alter table fadebot_prices enable row level security`;
   await sql`alter table fadebot_bets5 enable row level security`;
   await sql`alter table fadebot_state5 enable row level security`;
+  await sql`alter table fadebot_reads5 enable row level security`;
   ready = true;
 }
 
@@ -328,6 +347,40 @@ async function settledSide(m: WindowMarket): Promise<Side | null> {
   }
 }
 
+// ── Regime: Jev's recent record at 30 seconds ─────────────────────────
+
+/** Fill in how recent windows ended (from the recorded final-minute BRTI average), then return Jev's hits. */
+async function jevHits(now: number, fill = true): Promise<JevHit[]> {
+  const sql = db();
+  const open = fill
+    ? await sql`select * from fadebot_reads5 where outcome is null and window_start + ${TF} <= ${now}
+        and window_start > ${now - 86400} order by window_start`
+    : [];
+  for (const r of open) {
+    const fin = await period(Number(r.window_start) + TF - 60);
+    if (!fin || fin.n < 20) continue;
+    await sql`update fadebot_reads5 set outcome = ${winner(r.open_ref, fin.avg)} where window_start = ${r.window_start}`;
+  }
+  const rows = await sql`select * from fadebot_reads5 where outcome is not null and p_green <> 0.5
+    order by window_start desc limit 300`;
+  return rows
+    .reverse()
+    .map((r) => ({ time: Number(r.window_start), hit: (r.p_green > 0.5) === (r.outcome === "up") }));
+}
+
+/** Jev right after a hit vs after a miss (back-to-back windows): whether the regimes last. */
+function persistence(hits: JevHit[]) {
+  const a = { right: 0, n: 0 };
+  const b = { right: 0, n: 0 };
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i].time - hits[i - 1].time !== TF) continue;
+    const x = hits[i - 1].hit ? a : b;
+    x.n += 1;
+    if (hits[i].hit) x.right += 1;
+  }
+  return { afterHit: a, afterMiss: b };
+}
+
 // ── The bot ────────────────────────────────────────────────────────────
 
 async function skip(start: number, reason: string) {
@@ -362,12 +415,28 @@ async function decideWindow(start: number) {
   const { pFlip } = await gold<{ pFlip: number }>({ action: "flip", market: "btc", timeframeMin: 5, state, slotKey: `bot:s30:${start}` });
   const move = forming.close - forming.open;
   const pGreen = greenFromFlip(move, pFlip);
-  const d = holdDecision(pGreen, move);
-  if (!d) return skip(start, `Jev called a flip (${Math.round(pFlip * 100)}%): no bet`);
+  await sql`insert into fadebot_reads5 (window_start, p_green, move, open_ref) values (${start}, ${pGreen}, ${move}, ${openRef})
+    on conflict (window_start) do nothing`;
+  const reg = cfg.regimes
+    ? regimeOf(await jevHits(start), start, TF)
+    : { regime: "unsure" as const, right: 0, n: 0 };
+  const regLabel = cfg.regimes
+    ? `${reg.regime === "normal" ? "Jev right" : reg.regime === "backwards" ? "Jev backwards" : "unclear"} (${reg.right}/${reg.n})`
+    : "regimes off";
+  const d = regimeDecision(pGreen, move, reg.regime);
+  if (!d) {
+    await skip(start, `Jev called a flip (${Math.round(pFlip * 100)}%), regime ${regLabel}: no bet`);
+    await sql`update fadebot_bets5 set regime = ${regLabel} where window_start = ${start}`;
+    return;
+  }
 
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
-  if (!market) return skip(start, `no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 600));
+  if (!market) {
+    await skip(start, `no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 600));
+    await sql`update fadebot_bets5 set regime = ${regLabel}, kind = ${d.kind} where window_start = ${start}`;
+    return;
+  }
 
   let price: number | null = await priceFor(market, d.side).catch(() => null);
   let shares = 0;
@@ -394,9 +463,9 @@ async function decideWindow(start: number) {
     }
   } else if (stake > 0 && price && price > 0) shares = stake / price;
   await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, jev_sure, side, step, stake, price, shares, fees,
-      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id)
+      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id, regime, kind)
     values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.sure}, ${d.side}, 0, ${stake}, ${price ?? 0},
-      ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId})
+      ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId}, ${regLabel}, ${d.kind})
     on conflict (window_start) do nothing`;
 }
 
@@ -480,6 +549,7 @@ async function run() {
   }
   await settle();
   await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
+  if (m !== 0) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
   return done;
 }
 
@@ -489,7 +559,17 @@ async function status() {
   const st = (await sql`select * from fadebot_state5 where id = 1`)[0];
   const bets = await sql`select * from fadebot_bets5 order by window_start desc limit 30`;
   const cfg = settings();
-  return { settings: cfg, state: st, nextStake: cfg.marketBet, bets };
+  const now = Math.floor(Date.now() / 1000);
+  const hits = await jevHits(now, false); // read-only here
+  const next = Math.floor(now / TF) * TF + (now % TF >= READ_AT ? TF : 0); // the next window Jev reads
+  const reg = regimeOf(hits, next, TF);
+  return {
+    settings: cfg,
+    state: st,
+    nextStake: cfg.marketBet,
+    bets,
+    regime: { ...reg, window: REGIME_N, reads: hits.length, ...persistence(hits) },
+  };
 }
 
 Deno.serve(async (req) => {
