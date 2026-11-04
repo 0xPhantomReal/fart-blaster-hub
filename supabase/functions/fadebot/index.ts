@@ -203,8 +203,17 @@ function longSide(m: { outcome?: string; title?: string }): Side | null {
   return null;
 }
 
-/** Window start from an event: a unix timestamp in its slug, else its start/end times. */
+/** Polymarket US slug label for a window start: 2026-11-04-1915z (UTC). */
+function slugTime(t: number): string {
+  const d = new Date(t * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}z`;
+}
+
+/** Window start from an event: the time in its slug (2026-11-04-1915z or a unix timestamp), else its start/end times. */
 function windowOf(e: Ev): number | null {
+  const dt = e.slug.match(/(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})z/i);
+  if (dt) return Date.UTC(+dt[1], +dt[2] - 1, +dt[3], +dt[4], +dt[5]) / 1000;
   const ts = e.slug.match(/(\d{10})(?!\d)/);
   if (ts) return Number(ts[1]);
   const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
@@ -223,11 +232,19 @@ async function marketsOf(e: Ev) {
 async function findMarket(start: number): Promise<WindowMarket | null> {
   const client = pm();
   const seen = new Map<string, Ev>();
-  // 1. Direct slugs (the international site uses btc-updown-5m-<window start>).
-  for (const slug of [`btc-updown-5m-${start}`, `btc-up-or-down-5m-${start}`, `bitcoin-up-or-down-5m-${start}`]) {
-    const r = await client.events.retrieveBySlug(slug).catch(() => null);
+  // 1. Direct slugs. Polymarket US: btc-updown-5m-2026-11-04-1915z (window start, UTC); the international site
+  //    uses a unix timestamp. Search alone only turned up the previous window's market.
+  let direct = "";
+  for (const slug of [`btc-updown-5m-${slugTime(start)}`, `btc-updown-5m-${start}`]) {
+    const r = await client.events.retrieveBySlug(slug).catch((e) => {
+      direct ||= `${slug}: ${(e as Error).message}`.slice(0, 160);
+      return null;
+    });
     const e = (r as { event?: Ev } | null)?.event;
-    if (e) seen.set(e.slug, e);
+    if (e) {
+      seen.set(e.slug, e);
+      break;
+    }
   }
   // 2. Events ending around this window's close (doesn't depend on how search ranks things).
   const iso = (t: number) => new Date(t * 1000).toISOString();
@@ -272,7 +289,7 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     .map((e) => `${e.slug} [${e.startTime ?? "?"} → ${e.endTime ?? "?"}]`)
     .join("; ");
   const any = [...seen.values()].slice(0, 3).map((e) => `${e.slug} "${e.title ?? ""}"`).join("; ");
-  lastSearch = `saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : any ? `; e.g. ${any}` : ""}${lastListError ? `; list error: ${lastListError}` : ""}`;
+  lastSearch = `${direct ? `direct lookup failed (${direct}); ` : ""}saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : any ? `; e.g. ${any}` : ""}${lastListError ? `; list error: ${lastListError}` : ""}`;
   return null;
 }
 
@@ -433,7 +450,8 @@ async function decideWindow(start: number) {
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
   if (!market) {
-    await skip(start, `no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 600));
+    const call = `Jev: ${d.kind === "hold" ? "holds" : d.kind === "fade-hold" ? "holds, faded" : "flip, faded"} → ${d.side} (${Math.round(d.sure * 100)}%)`;
+    await skip(start, `${call}, but no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 700));
     await sql`update fadebot_bets5 set regime = ${regLabel}, kind = ${d.kind} where window_start = ${start}`;
     return;
   }
