@@ -19,6 +19,7 @@ export type Database = {
           created_at: string | null
           fees: number | null
           jev_sure: number | null
+          kind: string | null
           limit_filled: number | null
           limit_order_id: string | null
           limit_price: number | null
@@ -31,6 +32,7 @@ export type Database = {
           pnl: number | null
           price: number | null
           reason: string | null
+          regime: string | null
           result: string | null
           settled_at: string | null
           shares: number | null
@@ -44,6 +46,7 @@ export type Database = {
           created_at?: string | null
           fees?: number | null
           jev_sure?: number | null
+          kind?: string | null
           limit_filled?: number | null
           limit_order_id?: string | null
           limit_price?: number | null
@@ -56,6 +59,7 @@ export type Database = {
           pnl?: number | null
           price?: number | null
           reason?: string | null
+          regime?: string | null
           result?: string | null
           settled_at?: string | null
           shares?: number | null
@@ -69,6 +73,7 @@ export type Database = {
           created_at?: string | null
           fees?: number | null
           jev_sure?: number | null
+          kind?: string | null
           limit_filled?: number | null
           limit_order_id?: string | null
           limit_price?: number | null
@@ -81,6 +86,7 @@ export type Database = {
           pnl?: number | null
           price?: number | null
           reason?: string | null
+          regime?: string | null
           result?: string | null
           settled_at?: string | null
           shares?: number | null
@@ -122,6 +128,33 @@ export type Database = {
           n?: number | null
           period_start?: number
           source?: string | null
+        }
+        Relationships: []
+      }
+      fadebot_reads5: {
+        Row: {
+          created_at: string | null
+          move: number | null
+          open_ref: number | null
+          outcome: string | null
+          p_green: number | null
+          window_start: number
+        }
+        Insert: {
+          created_at?: string | null
+          move?: number | null
+          open_ref?: number | null
+          outcome?: string | null
+          p_green?: number | null
+          window_start: number
+        }
+        Update: {
+          created_at?: string | null
+          move?: number | null
+          open_ref?: number | null
+          outcome?: string | null
+          p_green?: number | null
+          window_start?: number
         }
         Relationships: []
       }
