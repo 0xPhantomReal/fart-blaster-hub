@@ -755,3 +755,31 @@ export async function fadeBotStatus(): Promise<FadeBotStatus | null> {
   if (!res || !res.ok) return null;
   return (await res.json()) as FadeBotStatus;
 }
+
+/** Which Polymarket market the bot would trade right now, and what its search saw (read-only). */
+export async function fadeBotFindMarket(): Promise<
+  | {
+      window: string;
+      market: { slug: string; longIs: string } | null;
+      search: string;
+    }
+  | { error: string }
+> {
+  if (!FN_URL) return { error: "no backend" };
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY
+        ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
+        : {}),
+    },
+    body: JSON.stringify({ action: "find-market" }),
+  }).catch((e) => ({ ok: false, text: async () => String(e) }) as Response);
+  const t = await res.text();
+  try {
+    return JSON.parse(t);
+  } catch {
+    return { error: t.slice(0, 200) };
+  }
+}

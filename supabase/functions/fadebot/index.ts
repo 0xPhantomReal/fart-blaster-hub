@@ -161,29 +161,85 @@ interface WindowMarket {
   longIs: Side; // which outcome the YES (long) contract pays on
 }
 
+/** What the last market search saw, for the "no market found" message. */
+let lastSearch = "";
+
+type Ev = {
+  slug: string;
+  title?: string;
+  startTime?: string;
+  endTime?: string;
+  markets?: { slug: string; outcome?: string; title?: string; description?: string }[];
+};
+
+/** Which outcome the YES (long) contract pays on, from the market's outcome/title. */
+function longSide(m: { outcome?: string; title?: string }): Side | null {
+  for (const t of [m.outcome ?? "", m.title ?? ""]) {
+    const up = /\bup\b/i.test(t);
+    const down = /\bdown\b/i.test(t);
+    if (up && !down) return "up";
+    if (down && !up) return "down";
+  }
+  return null;
+}
+
+/** Window start from an event: a unix timestamp in its slug, else its start/end times. */
+function windowOf(e: Ev): number | null {
+  const ts = e.slug.match(/(\d{10})(?!\d)/);
+  if (ts) return Number(ts[1]);
+  const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
+  if (Number.isFinite(en)) return en - TF;
+  const s = e.startTime ? Date.parse(e.startTime) / 1000 : NaN;
+  return Number.isFinite(s) ? s : null;
+}
+
+async function marketsOf(e: Ev) {
+  if (e.markets?.length) return e.markets;
+  const r = await pm().markets.list({ eventSlug: [e.slug] }).catch(() => ({ markets: [] }));
+  return (r.markets ?? []) as NonNullable<Ev["markets"]>;
+}
+
 /** The BTC 5-minute Up/Down market covering [start, start + 300). */
 async function findMarket(start: number): Promise<WindowMarket | null> {
   const client = pm();
-  type Ev = { slug: string; title: string; startTime?: string; endTime?: string; markets?: { slug: string; outcome?: string }[] };
   const seen = new Map<string, Ev>();
-  for (const query of ["Bitcoin Up or Down 5", "BTC Up or Down 5 min", "Bitcoin Up or Down"]) {
-    const r = await client.search.query({ query, status: "active", limit: 100 }).catch(() => ({ events: [] }));
+  // 1. Direct slugs (the international site uses btc-updown-5m-<window start>).
+  for (const slug of [`btc-updown-5m-${start}`, `btc-up-or-down-5m-${start}`, `bitcoin-up-or-down-5m-${start}`]) {
+    const r = await client.events.retrieveBySlug(slug).catch(() => null);
+    const e = (r as { event?: Ev } | null)?.event;
+    if (e) seen.set(e.slug, e);
+  }
+  // 2. Search.
+  for (const query of ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 5 minutes", "BTC 5m"]) {
+    const r = await client.search.query({ query, limit: 100 }).catch(() => ({ events: [] }));
     for (const e of (r.events ?? []) as Ev[]) seen.set(e.slug, e);
   }
-  for (const e of seen.values()) {
-    if (!/btc|bitcoin/i.test(`${e.title} ${e.slug}`)) continue;
+  const btc = [...seen.values()].filter((e) => /btc|bitcoin/i.test(`${e.title ?? ""} ${e.slug}`));
+  const fiveMin = btc.filter((e) => {
     const s = e.startTime ? Date.parse(e.startTime) / 1000 : NaN;
     const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
-    if (!(Math.abs(s - start) < 5 && Math.abs(en - (start + TF)) < 5)) continue;
-    let markets = e.markets;
-    if (!markets?.length)
-      markets = ((await client.markets.list({ eventSlug: [e.slug] }).catch(() => ({ markets: [] }))).markets ??
-        []) as Ev["markets"];
-    const m = markets?.[0];
-    const o = m?.outcome ?? "";
-    const longIs: Side | null = /\bdown\b/i.test(o) ? "down" : /\bup\b/i.test(o) ? "up" : null;
-    if (m && longIs) return { slug: m.slug, longIs };
+    const text = `${e.slug} ${e.title ?? ""}`;
+    // Not the 15-minute, hourly or longer markets (their start times can line up with a 5-minute window).
+    if (/(^|[^0-9])(1[05]|30|60)\s?(m|min)|\b(1h|4h|hour|daily|1d)\b/i.test(text)) return false;
+    if (/(^|[^0-9])5\s?(m|min)/i.test(text)) return true;
+    return Math.abs(en - s - TF) < 5; // no label: go by duration (start time may be when the event was created)
+  });
+  for (const e of fiveMin) {
+    const w = windowOf(e);
+    if (w === null || Math.abs(w - start) >= 5) continue;
+    const markets = await marketsOf(e);
+    for (const m of markets) {
+      const longIs = longSide(m);
+      if (longIs) return { slug: m.slug, longIs };
+    }
+    lastSearch = `found ${e.slug} but couldn't tell whether its contract pays on Up or Down: ${JSON.stringify(markets.slice(0, 2)).slice(0, 200)}`;
+    return null;
   }
+  const sample = (fiveMin.length ? fiveMin : btc)
+    .slice(0, 4)
+    .map((e) => `${e.slug} [${e.startTime ?? "?"} → ${e.endTime ?? "?"}]`)
+    .join("; ");
+  lastSearch = `saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : ""}`;
   return null;
 }
 
@@ -297,7 +353,7 @@ async function decideWindow(start: number) {
 
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
-  if (!market) return skip(start, "no Polymarket 5-minute market found for this window");
+  if (!market) return skip(start, `no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 600));
 
   let price: number | null = await priceFor(market, d.side).catch(() => null);
   let shares = 0;
@@ -427,6 +483,12 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    if (body?.action === "find-market") {
+      // Read-only: which Polymarket market the bot would trade for the current window.
+      const start = Math.floor(Date.now() / 1000 / TF) * TF;
+      const m = await findMarket(start);
+      return json({ window: new Date(start * 1000).toISOString(), market: m, search: lastSearch });
+    }
     const authFailure = authenticateCronRequest(req);
     if (authFailure) return authFailure;
     // Test hook (only with FADEBOT_ALLOW_TEST=1, never set in production): decide the current window now.

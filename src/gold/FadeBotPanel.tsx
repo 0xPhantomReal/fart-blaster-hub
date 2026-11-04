@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fadeBotStatus, type FadeBotStatus } from "./feed";
+import { fadeBotFindMarket, fadeBotStatus, type FadeBotStatus } from "./feed";
 
 const MUTED = "text-[#8b949e]";
 const money = (v: number) =>
@@ -8,6 +8,7 @@ const money = (v: number) =>
 /** Read-only view of the Polymarket bot running in the backend. */
 export function FadeBotPanel() {
   const [s, setS] = useState<FadeBotStatus | null | undefined>(undefined);
+  const [check, setCheck] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     const load = () => fadeBotStatus().then((r) => alive && setS(r));
@@ -68,6 +69,23 @@ export function FadeBotPanel() {
           Worst drawdown so far: ${st.worst_drawdown.toFixed(2)}
         </span>
       </div>
+      <button
+        className="mb-2 rounded border border-[#262c36] px-2 py-0.5 text-xs text-[#8b949e] hover:bg-[#1f252e]"
+        onClick={async () => {
+          setCheck("checking…");
+          const r = await fadeBotFindMarket();
+          setCheck(
+            "error" in r
+              ? `error: ${r.error}`
+              : r.market
+                ? `found ${r.market.slug} (YES pays on ${r.market.longIs}) for the window starting ${new Date(r.window).toLocaleTimeString()}`
+                : `not found: ${r.search}`,
+          );
+        }}
+      >
+        Check Polymarket market
+      </button>
+      {check && <p className={`mb-2 break-all text-xs ${MUTED}`}>{check}</p>}
       <table className="w-full text-xs tabular-nums">
         <thead>
           <tr className={MUTED}>
