@@ -982,6 +982,8 @@ export default function Gold() {
               </div>
             )}
             <p className={`mb-1 text-xs ${MUTED}`}>
+              {usesMinute(arrowMode) &&
+                "★ on an arrow = a flip call (the call was the opposite of the candle's color when it was read). "}
               Only show arrows this sure (leaves coin-flip candles blank):
             </p>
             <table className="mb-3 w-full text-sm tabular-nums">

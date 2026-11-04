@@ -64,6 +64,12 @@ function markerFor(
   if (p === undefined || Math.max(p, 1 - p) < minConf) return []; // not confident enough to show
   if (!o || o.call === 0) return [];
   const up = o.call === 1;
+  // A flip call (minute/regime reads): the call is the opposite of the candle's color when it was read → ★.
+  const flip =
+    (mode === "minute" || mode === "regime") &&
+    b.minMove !== undefined &&
+    b.minMove !== 0 &&
+    up !== b.minMove > 0;
   return [
     {
       time: b.candle.time as UTCTimestamp,
@@ -71,6 +77,7 @@ function markerFor(
       shape: up ? "arrowUp" : "arrowDown",
       color: o.hit === false ? COLORS.miss : up ? COLORS.green : COLORS.red,
       size: 0.7,
+      ...(flip ? { text: "★" } : {}),
     },
   ];
 }
