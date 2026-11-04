@@ -14,7 +14,147 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      fadebot_bets5: {
+        Row: {
+          created_at: string | null
+          fees: number | null
+          jev_sure: number | null
+          limit_filled: number | null
+          limit_order_id: string | null
+          limit_price: number | null
+          limit_shares: number | null
+          long_is: string | null
+          market_slug: string | null
+          mode: string | null
+          open_ref: number | null
+          order_id: string | null
+          pnl: number | null
+          price: number | null
+          reason: string | null
+          result: string | null
+          settled_at: string | null
+          shares: number | null
+          side: string | null
+          stake: number | null
+          status: string | null
+          step: number | null
+          window_start: number
+        }
+        Insert: {
+          created_at?: string | null
+          fees?: number | null
+          jev_sure?: number | null
+          limit_filled?: number | null
+          limit_order_id?: string | null
+          limit_price?: number | null
+          limit_shares?: number | null
+          long_is?: string | null
+          market_slug?: string | null
+          mode?: string | null
+          open_ref?: number | null
+          order_id?: string | null
+          pnl?: number | null
+          price?: number | null
+          reason?: string | null
+          result?: string | null
+          settled_at?: string | null
+          shares?: number | null
+          side?: string | null
+          stake?: number | null
+          status?: string | null
+          step?: number | null
+          window_start: number
+        }
+        Update: {
+          created_at?: string | null
+          fees?: number | null
+          jev_sure?: number | null
+          limit_filled?: number | null
+          limit_order_id?: string | null
+          limit_price?: number | null
+          limit_shares?: number | null
+          long_is?: string | null
+          market_slug?: string | null
+          mode?: string | null
+          open_ref?: number | null
+          order_id?: string | null
+          pnl?: number | null
+          price?: number | null
+          reason?: string | null
+          result?: string | null
+          settled_at?: string | null
+          shares?: number | null
+          side?: string | null
+          stake?: number | null
+          status?: string | null
+          step?: number | null
+          window_start?: number
+        }
+        Relationships: []
+      }
+      fadebot_prices: {
+        Row: {
+          avg: number | null
+          created_at: string | null
+          high: number | null
+          last: number | null
+          low: number | null
+          n: number | null
+          period_start: number
+          source: string | null
+        }
+        Insert: {
+          avg?: number | null
+          created_at?: string | null
+          high?: number | null
+          last?: number | null
+          low?: number | null
+          n?: number | null
+          period_start: number
+          source?: string | null
+        }
+        Update: {
+          avg?: number | null
+          created_at?: string | null
+          high?: number | null
+          last?: number | null
+          low?: number | null
+          n?: number | null
+          period_start?: number
+          source?: string | null
+        }
+        Relationships: []
+      }
+      fadebot_state5: {
+        Row: {
+          id: number
+          peak: number
+          step: number
+          total_pnl: number
+          trades: number
+          wins: number
+          worst_drawdown: number
+        }
+        Insert: {
+          id: number
+          peak?: number
+          step?: number
+          total_pnl?: number
+          trades?: number
+          wins?: number
+          worst_drawdown?: number
+        }
+        Update: {
+          id?: number
+          peak?: number
+          step?: number
+          total_pnl?: number
+          trades?: number
+          wins?: number
+          worst_drawdown?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
