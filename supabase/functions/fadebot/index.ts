@@ -163,6 +163,7 @@ interface WindowMarket {
 
 /** What the last market search saw, for the "no market found" message. */
 let lastSearch = "";
+let lastListError = "";
 
 type Ev = {
   slug: string;
@@ -209,7 +210,19 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     const e = (r as { event?: Ev } | null)?.event;
     if (e) seen.set(e.slug, e);
   }
-  // 2. Search.
+  // 2. Events ending around this window's close (doesn't depend on how search ranks things).
+  const iso = (t: number) => new Date(t * 1000).toISOString();
+  for (const params of [
+    { active: true, closed: false, endDateMin: iso(start + TF - 30), endDateMax: iso(start + TF + 30), limit: 100 },
+    { closed: false, endDateMin: iso(start + TF - 30), endDateMax: iso(start + TF + 30), limit: 100 },
+  ]) {
+    const r = await client.events.list(params).catch((e) => {
+      lastListError = (e as Error).message;
+      return { events: [] };
+    });
+    for (const e of (r.events ?? []) as Ev[]) seen.set(e.slug, e);
+  }
+  // 3. Search.
   for (const query of ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 5 minutes", "BTC 5m"]) {
     const r = await client.search.query({ query, limit: 100 }).catch(() => ({ events: [] }));
     for (const e of (r.events ?? []) as Ev[]) seen.set(e.slug, e);
@@ -239,7 +252,8 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     .slice(0, 4)
     .map((e) => `${e.slug} [${e.startTime ?? "?"} → ${e.endTime ?? "?"}]`)
     .join("; ");
-  lastSearch = `saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : ""}`;
+  const any = [...seen.values()].slice(0, 3).map((e) => `${e.slug} "${e.title ?? ""}"`).join("; ");
+  lastSearch = `saw ${seen.size} events, ${btc.length} bitcoin, ${fiveMin.length} 5-minute${sample ? `: ${sample}` : any ? `; e.g. ${any}` : ""}${lastListError ? `; list error: ${lastListError}` : ""}`;
   return null;
 }
 
