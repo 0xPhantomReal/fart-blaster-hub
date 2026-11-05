@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
+import { ColorCount } from "@/gold/ColorCount";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import {
   minuteChoices,
@@ -610,6 +611,9 @@ export default function Gold() {
               {p?.jev && g.refine.pNow != null
                 ? ` · refined ${pct(g.refine.pNow, 0)}`
                 : ""}
+            </div>
+            <div className="mt-3">
+              <ColorCount candles={g.bars.map((b) => b.candle)} tfMin={tfMin} />
             </div>
             {p?.jev && p.jev.support !== null && modelDir && (
               <div
