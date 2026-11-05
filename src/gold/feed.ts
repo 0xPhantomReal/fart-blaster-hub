@@ -729,6 +729,7 @@ export interface FadeBotStatus {
     marketBet: number;
     limitPrice: number;
     limitShares: number;
+    fadeMin?: number;
     fadeMax?: number;
     readAt?: number;
   };

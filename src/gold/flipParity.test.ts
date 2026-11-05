@@ -47,11 +47,14 @@ describe("edge-function copy of the candle reader", () => {
   });
 
   it("3-minute fade: bets against Jev only when it's 51–70% sure", () => {
-    expect(bot.fadeCallDecision(0.65, 5)).toEqual({ side: "down", sure: 0.65, kind: "fade-hold" });
-    expect(bot.fadeCallDecision(0.4, 5)).toEqual({ side: "up", sure: 0.6, kind: "fade-flip" });
+    // default range 70–90%, both ends included
+    expect(bot.fadeCallDecision(0.8, 5)).toEqual({ side: "down", sure: 0.8, kind: "fade-hold" });
+    expect(bot.fadeCallDecision(0.25, 5)).toEqual({ side: "up", sure: 0.75, kind: "fade-flip" });
     expect(bot.fadeCallDecision(0.3, 5)?.side).toBe("up"); // exactly 70%
-    expect(bot.fadeCallDecision(0.71, 5)).toBeNull();
+    expect(bot.fadeCallDecision(0.9, 5)?.side).toBe("down"); // exactly 90%
+    expect(bot.fadeCallDecision(0.69, 5)).toBeNull();
+    expect(bot.fadeCallDecision(0.91, 5)).toBeNull();
     expect(bot.fadeCallDecision(0.5, 5)).toBeNull();
-    expect(bot.fadeCallDecision(0.6, -5)).toEqual({ side: "down", sure: 0.6, kind: "fade-flip" });
+    expect(bot.fadeCallDecision(0.6, -5, 0.7, 0.5)).toEqual({ side: "down", sure: 0.6, kind: "fade-flip" });
   });
 });

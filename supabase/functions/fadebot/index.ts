@@ -6,13 +6,13 @@
 //     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 15 candles,
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
-//     Jev's call 51–70% sure (FADEBOT_FADE_MAX) → a $1 market order (FADEBOT_STAKE) on the OTHER side; otherwise
+//     Jev's call 70–90% sure (FADEBOT_FADE_MIN / FADEBOT_FADE_MAX) → a $1 market order (FADEBOT_STAKE) on the OTHER side; otherwise
 //     no bet. Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
 // Secrets: SUPABASE_DB_URL, SUPABASE_URL, SUPABASE_ANON_KEY (provided by the platform);
-//   FADEBOT_MODE (dry | live, default dry), FADEBOT_STAKE (1), FADEBOT_FADE_MAX (0.7), FADEBOT_LIMIT_SHARES (0 = no
+//   FADEBOT_MODE (dry | live, default dry), FADEBOT_STAKE (1), FADEBOT_FADE_MIN (0.7), FADEBOT_FADE_MAX (0.9), FADEBOT_LIMIT_SHARES (0 = no
 //   limit order), FADEBOT_LIMIT_PRICE (0.33); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
 //
 // POST {}                    → the scheduled run
@@ -60,7 +60,8 @@ const settings = () => ({
   // Market order in dollars on each bet: the same every time (no Fibonacci).
   marketBet: Number(env("FADEBOT_STAKE") || 1),
   // Bet against Jev's 3-minute call when it's over 50% and at most this sure.
-  fadeMax: Number(env("FADEBOT_FADE_MAX") || 0.7),
+  fadeMin: Number(env("FADEBOT_FADE_MIN") || 0.7),
+  fadeMax: Number(env("FADEBOT_FADE_MAX") || 0.9),
   // Optional resting limit order on the same side (0 shares = none).
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
   limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 0),
@@ -713,13 +714,15 @@ async function decideWindow(start: number) {
   const jevSide = pGreen > 0.5 ? "up" : "down";
   const jevSure = Math.round(Math.max(pGreen, 1 - pGreen) * 100);
   const jevKind = move === 0 || (pGreen > 0.5) === move > 0 ? "holds" : "flip";
-  const d = fadeCallDecision(pGreen, move, cfg.fadeMax);
+  const d = fadeCallDecision(pGreen, move, cfg.fadeMax, cfg.fadeMin);
   if (!d) {
     await skip(
       start,
       pGreen === 0.5
         ? "Jev: no call (50%): no bet"
-        : `Jev: ${jevKind} → ${jevSide} (${jevSure}%), over ${Math.round(cfg.fadeMax * 100)}%: no bet`,
+        : `Jev: ${jevKind} → ${jevSide} (${jevSure}%), ${
+          jevSure > cfg.fadeMax * 100 ? `over ${Math.round(cfg.fadeMax * 100)}%` : `under ${Math.round(cfg.fadeMin * 100)}%`
+        }: no bet`,
     );
     await sql`update fadebot_bets5 set regime = ${regLabel} where window_start = ${start}`;
     return;
