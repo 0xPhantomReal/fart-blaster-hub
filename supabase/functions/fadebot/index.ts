@@ -523,6 +523,35 @@ async function closedCandles(before: number, days: number): Promise<Candle[]> {
   return r.candles.filter((c) => c.time + TF <= before).sort((a, b) => a.time - b.time);
 }
 
+// Coinbase is called directly (not through the gold function): Supabase limits how many calls one run may make to
+// another function, and catching up on trades takes dozens of pages.
+const COINBASE = env("COINBASE_URL") || "https://api.exchange.coinbase.com/products";
+
+async function coinbase(path: string): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${COINBASE}${path}`, { headers: { Accept: "application/json", "User-Agent": "fadebot/1.0" } });
+    if (res.status === 429 && attempt < 4) {
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) throw new Error(`Coinbase ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    return await res.json();
+  }
+}
+
+/** One page of BTC-USD trades older than trade id `after` (newest page when null), as the gold function returns. */
+async function tradesPage(after: number | null) {
+  const q = new URLSearchParams({ limit: "1000" });
+  if (after !== null) q.set("after", String(after));
+  const rows = (await coinbase(`/BTC-USD/trades?${q}`)) as { time: string; trade_id: number; price: string; size: string; side: string }[];
+  // [time (s), price, size, 1 = aggressive buy (maker side "sell"), trade id]
+  const trades = rows.map(
+    (r) => [Date.parse(r.time) / 1000, Number(r.price), Number(r.size), r.side === "sell" ? 1 : 0, r.trade_id] as [number, number, number, number, number],
+  );
+  const ids = rows.map((r) => r.trade_id);
+  return { trades, minId: ids.length ? Math.min(...ids) : null, maxId: ids.length ? Math.max(...ids) : null };
+}
+
 /** Add new Coinbase trades to the stored footprints (every run). Footprints are continuous from `flow_from`. */
 async function updateFlow(now: number, atr: number | null) {
   const sql = db();
@@ -544,12 +573,7 @@ async function updateFlow(now: number, atr: number | null) {
   if (gap) for (const t of [...fps.keys()]) fps.delete(t); // starting over: drop partial candles
   const touched = new Set<number>();
   const ok = await loadTradeHistory(
-    (after) =>
-      gold<{ trades: [number, number, number, number, number][]; minId: number | null; maxId: number | null }>({
-        action: "trades",
-        market: "btc",
-        after,
-      }),
+    tradesPage,
     from,
     now,
     (t) => {
@@ -560,7 +584,7 @@ async function updateFlow(now: number, atr: number | null) {
       touched.add(time);
     },
     () => {},
-    4,
+    3,
     400,
   );
   if (!ok) {
@@ -591,8 +615,13 @@ async function footprintsFrom(since: number): Promise<Map<number, Footprint>> {
 /** Bitcoin volume per candle (Coinbase), like the website's context. */
 async function volumes(from: number, to: number): Promise<Map<number, number> | undefined> {
   try {
-    const r = await gold<{ volume: { time: number; volume: number }[] }>({ action: "volume", market: "btc", from, to, granularity: TF });
-    return new Map(r.volume.map((v) => [v.time, v.volume]));
+    const q = new URLSearchParams({
+      granularity: String(TF),
+      start: new Date(from * 1000).toISOString(),
+      end: new Date(to * 1000).toISOString(),
+    });
+    const rows = (await coinbase(`/BTC-USD/candles?${q}`)) as number[][];
+    return new Map(rows.map((r) => [r[0], r[5]]));
   } catch {
     return undefined;
   }
