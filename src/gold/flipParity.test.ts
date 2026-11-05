@@ -45,4 +45,13 @@ describe("edge-function copy of the candle reader", () => {
     expect(bot.regimeDecision(0.3, 5, "normal")).toBeNull();
     expect(bot.regimeDecision(0.3, -5, "unsure")).toEqual({ side: "down", sure: 0.7, kind: "hold" });
   });
+
+  it("3-minute fade: bets against Jev only when it's 51–70% sure", () => {
+    expect(bot.fadeCallDecision(0.65, 5)).toEqual({ side: "down", sure: 0.65, kind: "fade-hold" });
+    expect(bot.fadeCallDecision(0.4, 5)).toEqual({ side: "up", sure: 0.6, kind: "fade-flip" });
+    expect(bot.fadeCallDecision(0.3, 5)?.side).toBe("up"); // exactly 70%
+    expect(bot.fadeCallDecision(0.71, 5)).toBeNull();
+    expect(bot.fadeCallDecision(0.5, 5)).toBeNull();
+    expect(bot.fadeCallDecision(0.6, -5)).toEqual({ side: "down", sure: 0.6, kind: "fade-flip" });
+  });
 });

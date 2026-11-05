@@ -32,42 +32,24 @@ export function FadeBotPanel() {
   return (
     <div className="text-sm">
       <p className={`mb-2 text-xs ${MUTED}`}>
-        BTC 5-minute market on Polymarket US. Jev reads each candle 30 seconds
-        in.{" "}
-        {cfg.regimes
-          ? "When Jev has been right lately (or it's unclear), the bot bets only when Jev says the candle holds its color, and ignores flip calls. When Jev has been backwards lately (wrong on more than half of its last 12 reads), it bets against Jev: a hold call → the reversal, a flip call → the hold."
-          : "When Jev says the candle holds its color, the bot bets that color; flip calls are ignored."}{" "}
-        Each bet is a limit order for {cfg.limitShares} shares at{" "}
-        {Math.round(cfg.limitPrice * 100)}¢ ($
-        {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
-        the window closes
-        {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
+        BTC 5-minute market on Polymarket US. Jev reads each candle{" "}
+        {cfg.readAt ? `${cfg.readAt / 60} minutes` : "3 minutes"} in. When its
+        call is over 50% and at most {Math.round((cfg.fadeMax ?? 0.7) * 100)}%
+        sure (hold or flip), the bot places a ${cfg.marketBet} market order on
+        the <b>other</b> side. Surer calls and 50% calls: no bet. Same stake
+        every time.
+        {cfg.limitShares > 0
+          ? ` Plus a limit order for ${cfg.limitShares} shares at ${Math.round(cfg.limitPrice * 100)}¢.`
+          : ""}
       </p>
-      {cfg.regimes && s.regime && (
-        <p className="mb-2 text-xs">
-          Next window:{" "}
-          <b
-            className={
-              s.regime.regime === "backwards"
-                ? "text-[#ef5350]"
-                : s.regime.regime === "normal"
-                  ? "text-[#26a69a]"
-                  : MUTED
-            }
-          >
-            {s.regime.regime === "normal"
-              ? "Jev right → bet holds"
-              : s.regime.regime === "backwards"
-                ? "Jev backwards → bet against Jev"
-                : "unclear → bet holds"}
-          </b>{" "}
-          <span className={MUTED}>
-            (Jev {s.regime.right} of last {s.regime.n} right
-            {s.regime.afterHit.n >= 10 && s.regime.afterMiss.n >= 10
-              ? `; after a hit it's right ${Math.round((s.regime.afterHit.right / s.regime.afterHit.n) * 100)}%, after a miss ${Math.round((s.regime.afterMiss.right / s.regime.afterMiss.n) * 100)}%`
-              : `; ${s.regime.reads} reads recorded so far`}
-            )
-          </span>
+      {s.regime && (
+        <p className={`mb-2 text-xs ${MUTED}`}>
+          For reference: Jev was right on {s.regime.right} of its last{" "}
+          {s.regime.n} reads
+          {s.regime.afterHit.n >= 10 && s.regime.afterMiss.n >= 10
+            ? `; after a hit it's right ${Math.round((s.regime.afterHit.right / s.regime.afterHit.n) * 100)}%, after a miss ${Math.round((s.regime.afterMiss.right / s.regime.afterMiss.n) * 100)}%`
+            : ""}
+          .
         </p>
       )}
       <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">

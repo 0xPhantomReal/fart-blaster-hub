@@ -2,18 +2,15 @@
 //
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
-//   S … S+30: record BRTI, then ask Jev whether the candle holds its color or flips. Every read is kept, and Jev's
-//     record over the last 12 windows sets the regime:
-//       Jev right lately (or unclear) → bet only when Jev says it HOLDS (any sureness over 50%); flip calls ignored
-//       Jev backwards lately         → bet against Jev: its hold call → bet the reversal, its flip call → bet the hold
-//     A bet = a limit order for 30 shares at 33¢ on that side, good until the window closes (optionally also a
-//     market order: FADEBOT_MARKET_BET). FADEBOT_REGIME=off → hold calls only, always.
+//   S … S+180: record BRTI each minute, then (3 minutes in) ask Jev whether the candle ends green or red.
+//     Jev's call 51–70% sure (FADEBOT_FADE_MAX) → a $5 market order (FADEBOT_STAKE) on the OTHER side; otherwise
+//     no bet. Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
 // Secrets: SUPABASE_DB_URL, SUPABASE_URL, SUPABASE_ANON_KEY (provided by the platform);
-//   FADEBOT_MODE (dry | live, default dry), FADEBOT_LIMIT_PRICE (0.33), FADEBOT_LIMIT_SHARES (30),
-//   FADEBOT_MARKET_BET (0 = none), FADEBOT_REGIME (on | off, default on); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
+//   FADEBOT_MODE (dry | live, default dry), FADEBOT_STAKE (5), FADEBOT_FADE_MAX (0.7), FADEBOT_LIMIT_SHARES (0 = no
+//   limit order), FADEBOT_LIMIT_PRICE (0.33); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
 //
 // POST {}                    → the scheduled run
 // POST { action: "status" }  → settings, totals and recent bets (for the page)
@@ -22,8 +19,8 @@ import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
+  fadeCallDecision,
   pnl,
-  regimeDecision,
   regimeOf,
   REGIME_N,
   winner,
@@ -33,7 +30,7 @@ import {
 import { authenticateCronRequest } from "../_shared/cron-auth.ts";
 
 const TF = 300; //        5-minute windows
-const READ_AT = 30; //    Jev reads the candle 30 seconds in
+const READ_AT = 180; //   Jev reads the candle 3 minutes in
 const env = (k: string) => Deno.env.get(k) ?? "";
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -45,11 +42,14 @@ const json = (body: unknown, status = 200) =>
 
 const settings = () => ({
   mode: env("FADEBOT_MODE") === "live" ? "live" : "dry",
-  // Market-order stake in dollars on each hold call (0 = no market order, only the limit order). No Fibonacci.
-  marketBet: Number(env("FADEBOT_MARKET_BET") || 0),
+  // Market order in dollars on each bet: the same every time (no Fibonacci).
+  marketBet: Number(env("FADEBOT_STAKE") || 5),
+  // Bet against Jev's 3-minute call when it's over 50% and at most this sure.
+  fadeMax: Number(env("FADEBOT_FADE_MAX") || 0.7),
+  // Optional resting limit order on the same side (0 shares = none).
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
-  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 30),
-  regimes: env("FADEBOT_REGIME") !== "off",
+  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 0),
+  readAt: READ_AT,
 });
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -458,7 +458,7 @@ async function settledSide(m: WindowMarket): Promise<Side | null> {
   }
 }
 
-// ── Regime: Jev's recent record at 30 seconds ─────────────────────────
+// ── Regime: Jev's recent record at the read ─────────────────────────
 
 /** Fill in how recent windows ended (from the recorded final-minute BRTI average), then return Jev's hits. */
 async function jevHits(now: number, fill = true): Promise<JevHit[]> {
@@ -499,22 +499,26 @@ async function skip(start: number, reason: string) {
     on conflict (window_start) do nothing`;
 }
 
-/** 30 seconds into window `start`: ask Jev; on a hold call, market order + resting limit order. */
+/** 3 minutes into window `start`: ask Jev; if its call is 51–70% sure, a $5 market order on the other side. */
 async function decideWindow(start: number) {
   const sql = db();
   if ((await sql`select 1 from fadebot_bets5 where window_start = ${start}`).length) return;
   const cfg = settings();
   const before = await period(start - 60);
-  const first = await period(start);
   if (!before || before.n < 20) return skip(start, "no price to beat (the minute before the window wasn't recorded)");
-  if (!first || first.n < 3) return skip(start, "no prices recorded in the first 30 seconds");
+  // The candle so far: the three recorded minutes (the last one ends at the read).
+  const mins = (await Promise.all([0, 60, 120].map((o) => period(start + o)))).filter(
+    (x): x is NonNullable<typeof x> => !!x && x.n >= 3,
+  );
+  const last = await period(start + 120);
+  if (!last || last.n < 3) return skip(start, "no prices recorded in the third minute");
   const openRef = before.avg;
   const forming: Candle = {
     time: start,
     open: openRef,
-    high: Math.max(openRef, first.high),
-    low: Math.min(openRef, first.low),
-    close: first.last,
+    high: Math.max(openRef, ...mins.map((x) => x.high)),
+    low: Math.min(openRef, ...mins.map((x) => x.low)),
+    close: last.last,
   };
   const hist = await gold<{ candles: Candle[] }>({ action: "history", market: "btc", resolution: 5, from: start - 86400, to: start });
   const closed = hist.candles.filter((c) => c.time + TF <= start);
@@ -523,20 +527,25 @@ async function decideWindow(start: number) {
   if (!atr || !sd) return skip(start, "not enough candle history");
   const state = flipState({ forming, secondsLeft: start + TF - Date.now() / 1000, tfSeconds: TF, atr, sd, previous: closed.slice(-15) });
   if (!state) return skip(start, "price exactly at the price to beat");
-  const { pFlip } = await gold<{ pFlip: number }>({ action: "flip", market: "btc", timeframeMin: 5, state, slotKey: `bot:s30:${start}` });
+  const { pFlip } = await gold<{ pFlip: number }>({ action: "flip", market: "btc", timeframeMin: 5, state, slotKey: `bot:s${READ_AT}:${start}` });
   const move = forming.close - forming.open;
   const pGreen = greenFromFlip(move, pFlip);
   await sql`insert into fadebot_reads5 (window_start, p_green, move, open_ref) values (${start}, ${pGreen}, ${move}, ${openRef})
     on conflict (window_start) do nothing`;
-  const reg = cfg.regimes
-    ? regimeOf(await jevHits(start), start, TF)
-    : { regime: "unsure" as const, right: 0, n: 0 };
-  const regLabel = cfg.regimes
-    ? `${reg.regime === "normal" ? "Jev right" : reg.regime === "backwards" ? "Jev backwards" : "unclear"} (${reg.right}/${reg.n})`
-    : "regimes off";
-  const d = regimeDecision(pGreen, move, reg.regime);
+  // Regime is only shown for reference now (Jev's recent record at 3 minutes); it doesn't change the bet.
+  const reg = regimeOf(await jevHits(start), start, TF);
+  const regLabel = `${reg.regime === "normal" ? "Jev right" : reg.regime === "backwards" ? "Jev backwards" : "unclear"} (${reg.right}/${reg.n})`;
+  const jevSide = pGreen > 0.5 ? "up" : "down";
+  const jevSure = Math.round(Math.max(pGreen, 1 - pGreen) * 100);
+  const jevKind = move === 0 || (pGreen > 0.5) === move > 0 ? "holds" : "flip";
+  const d = fadeCallDecision(pGreen, move, cfg.fadeMax);
   if (!d) {
-    await skip(start, `Jev called a flip (${Math.round(pFlip * 100)}%), regime ${regLabel}: no bet`);
+    await skip(
+      start,
+      pGreen === 0.5
+        ? "Jev: no call (50%): no bet"
+        : `Jev: ${jevKind} → ${jevSide} (${jevSure}%), over ${Math.round(cfg.fadeMax * 100)}%: no bet`,
+    );
     await sql`update fadebot_bets5 set regime = ${regLabel} where window_start = ${start}`;
     return;
   }
@@ -544,7 +553,7 @@ async function decideWindow(start: number) {
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
   if (!market) {
-    const call = `Jev: ${d.kind === "hold" ? "holds" : d.kind === "fade-hold" ? "holds, faded" : "flip, faded"} → ${d.side} (${Math.round(d.sure * 100)}%)`;
+    const call = `Jev: ${jevKind} → ${jevSide} (${jevSure}%), bet ${d.side}`;
     await skip(start, `${call}, but no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 700));
     await sql`update fadebot_bets5 set regime = ${regLabel}, kind = ${d.kind} where window_start = ${start}`;
     return;
@@ -572,14 +581,17 @@ async function decideWindow(start: number) {
         fees = f.fees;
         if (shares > 0) price = f.price;
       } catch (e) {
+        if (!(cfg.limitShares > 0)) return skip(start, `market order failed: ${(e as Error).message}`.slice(0, 300));
         console.error("market order failed:", (e as Error).message);
       }
     }
-    try {
-      limitId = await limitBuy(market, d.side, cfg.limitPrice, cfg.limitShares, start + TF);
-    } catch (e) {
-      if (!shares) return skip(start, `limit order failed: ${(e as Error).message}`.slice(0, 300));
-      console.error("limit order failed:", (e as Error).message);
+    if (cfg.limitShares > 0) {
+      try {
+        limitId = await limitBuy(market, d.side, cfg.limitPrice, cfg.limitShares, start + TF);
+      } catch (e) {
+        if (!shares) return skip(start, `limit order failed: ${(e as Error).message}`.slice(0, 300));
+        console.error("limit order failed:", (e as Error).message);
+      }
     }
   } else if (stake > 0 && price && price > 0) shares = stake / price;
   await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, jev_sure, side, step, stake, price, shares, fees,
@@ -660,16 +672,21 @@ async function run() {
     const { ticks, source } = await record(from + 58);
     await savePeriod(from, from + 60, ticks, source);
     done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
-  } else if (m === 0) {
-    const { ticks, source } = await record(start + READ_AT);
-    await savePeriod(start, start + READ_AT, ticks, source);
-    done.push(`recorded the first 30 seconds (${ticks.length} ticks from ${source})`);
-    await decideWindow(start).catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)));
-    done.push("decided");
+  } else if (m <= 2) {
+    // Minutes 1–3 of the window, then (at 3:00) Jev's read and the bet.
+    const from = start + m * 60;
+    const until = m === 2 ? start + READ_AT : from + 58;
+    const { ticks, source } = await record(until);
+    await savePeriod(from, from + 60, ticks, source);
+    done.push(`recorded minute ${m + 1} (${ticks.length} ticks from ${source})`);
+    if (m === 2) {
+      await decideWindow(start).catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)));
+      done.push("decided");
+    }
   }
   await settle();
   await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
-  if (m !== 0) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
+  if (m === 3) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
   return done;
 }
 
@@ -720,7 +737,7 @@ Deno.serve(async (req) => {
       await setup();
       const start = Math.floor(Date.now() / 1000 / TF) * TF;
       const { ticks, source } = await record(Date.now() / 1000 + 5);
-      await savePeriod(start, start + TF, ticks.map((t) => ({ ...t, t: start + 1 })), source);
+      for (const o of [0, 60, 120]) await savePeriod(start + o, start + o + 60, ticks.map((t) => ({ ...t, t: start + o + 1 })), source);
       await decideWindow(start);
       await dryLimitCheck();
       await settle();

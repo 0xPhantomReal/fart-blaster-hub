@@ -72,6 +72,23 @@ export function regimeDecision(
   return { side: current, sure, kind: "hold" };
 }
 
+/**
+ * The 3-minute fade: when Jev's call is only mildly sure (over 50%, up to `max`), bet the OTHER side.
+ * Jev's call can be a hold or a flip; either way the bet goes against it. Above `max` → no bet.
+ */
+export function fadeCallDecision(
+  pGreen: number,
+  move: number,
+  max = 0.7,
+): { side: Side; sure: number; kind: "fade-hold" | "fade-flip" } | null {
+  if (pGreen === 0.5) return null;
+  const sure = Math.max(pGreen, 1 - pGreen);
+  if (sure > max + 1e-9) return null;
+  const jev: Side = pGreen > 0.5 ? "up" : "down";
+  const current: Side | null = move > 0 ? "up" : move < 0 ? "down" : null;
+  return { side: jev === "up" ? "down" : "up", sure, kind: current === null || jev === current ? "fade-hold" : "fade-flip" };
+}
+
 /** Up wins when the closing reference is >= the opening one. */
 export function winner(openRef: number, closeRef: number): Side {
   return closeRef >= openRef ? "up" : "down";
