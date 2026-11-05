@@ -98,6 +98,21 @@ export type Database = {
         }
         Relationships: []
       }
+      fadebot_flow: {
+        Row: {
+          fp: Json
+          time: number
+        }
+        Insert: {
+          fp: Json
+          time: number
+        }
+        Update: {
+          fp?: Json
+          time?: number
+        }
+        Relationships: []
+      }
       fadebot_prices: {
         Row: {
           avg: number | null
@@ -160,6 +175,9 @@ export type Database = {
       }
       fadebot_state5: {
         Row: {
+          flow_from: number | null
+          flow_step: number | null
+          flow_until: number | null
           id: number
           peak: number
           step: number
@@ -169,6 +187,9 @@ export type Database = {
           worst_drawdown: number
         }
         Insert: {
+          flow_from?: number | null
+          flow_step?: number | null
+          flow_until?: number | null
           id: number
           peak?: number
           step?: number
@@ -178,6 +199,9 @@ export type Database = {
           worst_drawdown?: number
         }
         Update: {
+          flow_from?: number | null
+          flow_step?: number | null
+          flow_until?: number | null
           id?: number
           peak?: number
           step?: number
