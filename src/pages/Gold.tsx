@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
 import { ColorCount } from "@/gold/ColorCount";
+import { runTvIndicator, TV_COLORS } from "@/gold/tvIndicator";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import {
   minuteChoices,
@@ -218,6 +219,10 @@ export default function Gold() {
     load("gold.footprint", isBool, false),
   );
   useEffect(() => save("gold.footprint", footprintOn), [footprintOn]);
+  const [tvOn, setTvOn] = useState<boolean>(() =>
+    load("gold.tvindicator", isBool, false),
+  );
+  useEffect(() => save("gold.tvindicator", tvOn), [tvOn]);
   const [forecastOn, setForecastOn] = useState<boolean>(() =>
     load("gold.forecast", isBool, true),
   );
@@ -242,6 +247,17 @@ export default function Gold() {
     usesMinute(arrowMode) ? callMinute : null,
   );
   const mn = g.minute;
+  // The TradingView indicator, run over the chart's closed candles (recomputed when a candle closes).
+  const tv = useMemo(
+    () =>
+      tvOn && g.bars.length
+        ? runTvIndicator(
+            g.bars.map((b) => b.candle),
+            null,
+          )
+        : null,
+    [tvOn, g.bars],
+  );
   /** Jev's minute-X reads on the chart's candles, bucketed by how sure it was, vs "holds" on the same candles. */
   const byConf = [
     [0.5, 0.6],
@@ -284,10 +300,10 @@ export default function Gold() {
         ["minute", `Jev at ${readShort(callMinute!)}`],
         ["regime", "Regime-adjusted"],
       ]
-      : [
-          ["jev", "Jev"],
-          ["refined", "Refined"],
-        ];
+    : [
+        ["jev", "Jev"],
+        ["refined", "Refined"],
+      ];
   const fc = g.forecast;
   /** Right / total for arrows at least `conf` sure, from Jev's or the refined %. */
   const tallyAt = (src: ArrowMode, conf: number) =>
@@ -394,6 +410,13 @@ export default function Gold() {
         >
           Forecast {forecastOn ? "on" : "off"}
         </button>
+        <button
+          onClick={() => setTvOn((v) => !v)}
+          className={`self-center rounded-md border px-2.5 py-1 text-xs ${tvOn ? "border-[#d4a72c] text-[#d4a72c]" : "border-[#262c36] text-[#8b949e]"}`}
+          title="The TradingView indicator: Gold Next-Candle Bias (EMAs, triangles, hit-rate table)"
+        >
+          TV indicator {tvOn ? "on" : "off"}
+        </button>
         {mk.coinbase && (
           <button
             onClick={() => setFootprintOn((v) => !v)}
@@ -437,7 +460,9 @@ export default function Gold() {
             footprints={g.flow.on ? g.flow.footprints : null}
             fpVersion={g.flow.version}
             footprintMode={footprintOn && !!mk.coinbase && g.flow.on}
+            tv={tv}
           />
+          {tv && <TvTable tv={tv} />}
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
               <p className="max-w-md">{g.blocked}</p>
@@ -964,9 +989,9 @@ export default function Gold() {
                   <b>Regimes:</b> before each candle, Jev's record at{" "}
                   {readLabel(callMinute!)} over the last {REGIME_N} candles
                   decides the regime. More than half right → "Jev right", its
-                  call is used as is. Less than half → "Jev backwards", its
-                  call is flipped. Fewer than {REGIME_MIN} reads or exactly half
-                  → unclear, Jev as is. "Bot rule" bets hold calls only in the
+                  call is used as is. Less than half → "Jev backwards", its call
+                  is flipped. Fewer than {REGIME_MIN} reads or exactly half →
+                  unclear, Jev as is. "Bot rule" bets hold calls only in the
                   first two, and against Jev (both ways) when backwards.{" "}
                   {mn.regime && `Now: ${regimeText(mn.regime)}.`}
                   {(() => {
@@ -1223,6 +1248,65 @@ export default function Gold() {
           </p>
         </aside>
       </main>
+    </div>
+  );
+}
+
+/** Pine str.tostring(x, "#.#") / "#": rounded, no trailing zeros; na → "NaN". */
+const pineNum = (x: number | null, d: number) => {
+  if (x === null || !Number.isFinite(x)) return "NaN";
+  const r = Number(x.toFixed(d));
+  return String(r);
+};
+
+/** The indicator's table (Pine table.new(position.top_right, 2, 3, bgcolor = black at 15% transparency)). */
+function TvTable({ tv }: { tv: ReturnType<typeof runTvIndicator> }) {
+  const dirCol =
+    tv.dirTxt === "GREEN"
+      ? TV_COLORS.green
+      : tv.dirTxt === "RED"
+        ? TV_COLORS.red
+        : TV_COLORS.gray;
+  const cell = "px-1.5 py-0.5 whitespace-nowrap";
+  return (
+    <div
+      className="pointer-events-none absolute right-[76px] top-2 z-[5] text-[12px] leading-tight"
+      style={{ background: "rgba(0,0,0,0.85)", padding: 1 }}
+    >
+      <table style={{ borderCollapse: "separate", borderSpacing: 1 }}>
+        <tbody>
+          <tr>
+            <td className={cell} style={{ color: TV_COLORS.white }}>
+              This candle
+            </td>
+            <td className={cell} style={{ color: dirCol }}>
+              {tv.dirTxt}
+              {"\u00a0\u00a0"}
+              {pineNum(tv.pShow === null ? null : tv.pShow * 100, 0)}% up
+            </td>
+          </tr>
+          <tr>
+            <td className={cell} style={{ color: TV_COLORS.white }}>
+              Hit rate
+            </td>
+            <td className={cell} style={{ color: TV_COLORS.white }}>
+              {tv.calls > 0
+                ? `${pineNum((tv.hits * 100) / tv.calls, 1)}% of ${tv.calls}`
+                : "—"}
+            </td>
+          </tr>
+          <tr>
+            <td className={cell} style={{ color: TV_COLORS.white }}>
+              Green baseline
+            </td>
+            <td className={cell} style={{ color: TV_COLORS.gray }}>
+              {tv.bars_ > 0
+                ? `${pineNum((tv.greens * 100) / tv.bars_, 1)}%`
+                : "—"}
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

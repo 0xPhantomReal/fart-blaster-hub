@@ -4,6 +4,7 @@ import {
   createChart,
   createSeriesMarkers,
   CrosshairMode,
+  LineSeries,
   TickMarkType,
   type IChartApi,
   type ISeriesApi,
@@ -17,6 +18,8 @@ import type { Candle } from "./indicators";
 import { FootprintSeries, type FootprintBar } from "./footprintSeries";
 import { rows as fpRows, type Footprint } from "./orderflow";
 import type { ClosedBar } from "./useGold";
+import { TV_COLORS, TV_INPUTS, type TvResult } from "./tvIndicator";
+import { TvTriangles } from "./tvTriangles";
 
 const COLORS = {
   bg: "#0e1116",
@@ -93,7 +96,9 @@ export function GoldChart({
   footprints = null,
   fpVersion = 0,
   footprintMode = false,
+  tv = null,
 }: {
+  tv?: TvResult | null; //                       the TradingView indicator (closed candles), or null to hide
   footprints?: Map<number, Footprint> | null; // order flow per candle (crypto)
   fpVersion?: number; //                        bumps when footprints change
   footprintMode?: boolean; //                   draw footprint candles instead of plain ones
@@ -127,6 +132,9 @@ export function GoldChart({
   const seriesLast = useRef<number | null>(null); // time of the last bar drawn on the candle series
   const formingRef = useRef<Candle | null>(null);
   const zoomed = useRef(false);
+  const tvFast = useRef<ISeriesApi<"Line"> | null>(null);
+  const tvSlow = useRef<ISeriesApi<"Line"> | null>(null);
+  const tvTri = useRef<TvTriangles[]>([]);
 
   useEffect(() => {
     if (!el.current) return;
@@ -191,6 +199,22 @@ export function GoldChart({
       lastValueVisible: true,
     });
     fpMarkers.current = createSeriesMarkers(fp.current, []);
+    // TradingView indicator: Fast/Slow EMA lines (Pine plot, width 1) and the next-candle triangles.
+    const line = (color: string, title: string) =>
+      c.addSeries(LineSeries, {
+        color,
+        lineWidth: 1,
+        title,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: false,
+        visible: false,
+      });
+    tvFast.current = line(TV_COLORS.orange, "Fast EMA");
+    tvSlow.current = line(TV_COLORS.blue, "Slow EMA");
+    tvTri.current = [new TvTriangles(), new TvTriangles()];
+    candles.current.attachPrimitive(tvTri.current[0]);
+    fp.current.attachPrimitive(tvTri.current[1]);
     chart.current = c;
     return () => {
       c.remove();
@@ -204,7 +228,7 @@ export function GoldChart({
   }, []);
 
   useEffect(() => {
-    const key = `${version}:${arrows}:${minConf}`;
+    const key = `${version}:${arrows}:${minConf}:${tv ? 1 : 0}`;
     if (!candles.current || drawn.current === key || !bars.length) return;
     drawn.current = key;
     // A candle closing just appends one bar: update the series in place instead of redrawing everything, so the
@@ -246,7 +270,8 @@ export function GoldChart({
       seriesLast.current = formingRef.current.time;
     }
     shown.current = { first: firstT, last: lastT, n: bars.length, version };
-    const ms = bars.flatMap((b) => markerFor(b, arrows, minConf));
+    // With the TradingView indicator on, only its triangles show (as on TradingView).
+    const ms = tv ? [] : bars.flatMap((b) => markerFor(b, arrows, minConf));
     markers.current?.setMarkers(ms);
     fpMarkers.current?.setMarkers(ms);
     if (!zoomed.current && chart.current) {
@@ -257,7 +282,7 @@ export function GoldChart({
         to: bars.length + 3,
       });
     }
-  }, [bars, version, arrows, minConf]);
+  }, [bars, version, arrows, minConf, tv]);
 
   useEffect(() => {
     const priceFormat = {
@@ -299,6 +324,58 @@ export function GoldChart({
     } else candles.current.update(toBar(forming));
     seriesLast.current = forming.time;
   }, [forming, bars]);
+
+  // ── TradingView indicator ──
+  useEffect(() => {
+    const on = !!tv && bars.length > 0;
+    tvFast.current?.applyOptions({ visible: on });
+    tvSlow.current?.applyOptions({ visible: on });
+    if (!on) {
+      tvFast.current?.setData([]);
+      tvSlow.current?.setData([]);
+      for (const t of tvTri.current) t.set([]);
+      return;
+    }
+    const pts = (k: "emaFast" | "emaSlow") =>
+      tv!.bars.map((b) =>
+        b[k] === null
+          ? { time: b.time as UTCTimestamp }
+          : { time: b.time as UTCTimestamp, value: b[k] as number },
+      );
+    tvFast.current?.setData(pts("emaFast"));
+    tvSlow.current?.setData(pts("emaSlow"));
+    const byTime = new Map(bars.map((b) => [b.candle.time, b.candle]));
+    const tri = tv!.bars
+      .filter((b) => b.bias !== 0 && byTime.has(b.time))
+      .map((b) => {
+        const c = byTime.get(b.time)!;
+        return {
+          time: b.time,
+          up: b.bias === 1,
+          high: c.high,
+          low: c.low,
+          color: b.bias === 1 ? TV_COLORS.green : TV_COLORS.red,
+        };
+      });
+    for (const t of tvTri.current) t.set(tri);
+  }, [tv, bars]);
+
+  // The EMAs follow the forming candle's price, as TradingView plots them live.
+  useEffect(() => {
+    if (!tv || !forming || !tv.bars.length) return;
+    const last = tv.bars[tv.bars.length - 1];
+    if (forming.time <= last.time) return;
+    const step = (prev: number | null, len: number) =>
+      prev === null
+        ? null
+        : (2 / (len + 1)) * forming.close + (1 - 2 / (len + 1)) * prev;
+    const f = step(last.emaFast, TV_INPUTS.emaFastLen);
+    const s2 = step(last.emaSlow, TV_INPUTS.emaSlowLen);
+    if (f !== null)
+      tvFast.current?.update({ time: forming.time as UTCTimestamp, value: f });
+    if (s2 !== null)
+      tvSlow.current?.update({ time: forming.time as UTCTimestamp, value: s2 });
+  }, [tv, forming]);
 
   // ── Footprint mode ──
   const toFp = (c: Candle): FootprintBar => {
