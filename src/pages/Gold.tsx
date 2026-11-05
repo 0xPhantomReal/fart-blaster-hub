@@ -551,6 +551,9 @@ export default function Gold() {
                           {read.pJev > 0.5 !== read.move > 0
                             ? " · Jev is calling a flip"
                             : " · Jev says it holds"}
+                          {read.fromBot
+                            ? " · the bot's read (measured from Polymarket's price to beat)"
+                            : ""}
                         </div>
                         {read.regime && read.pAdj !== undefined && (
                           <div className="mt-1 text-sm">

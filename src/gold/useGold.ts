@@ -59,6 +59,7 @@ import {
   askCheck,
   askFlip,
   askForecast,
+  fadeBotRead,
   fetchVolume,
   backendConfigured,
   backendVersion,
@@ -1423,6 +1424,7 @@ export function useGold(
     kickMinute.current = (m) => void runMinute(m);
 
     /** Live: read the forming candle once, right at minute X. */
+    let botPollAt = 0;
     const minuteTick = async () => {
       const m = minuteSel;
       const c = lastForming;
@@ -1437,6 +1439,34 @@ export function useGold(
         return;
       const elapsed = feed.now() - c.time;
       if (elapsed < m * 60 || elapsed > m * 60 + (m < 1 ? 15 : 45)) return; // only at minute X, not later
+      // BTC 5m at minute 3 is what the Polymarket bot bets on: show ITS read (one Jev call, the bot's price to
+      // beat), so the page and the bot never disagree. If the bot hasn't read this candle 40 s in, ask Jev here.
+      if (market === "btc" && tfMin === 5 && m === 3 && elapsed < m * 60 + 40) {
+        if (Date.now() - botPollAt < 2500) return;
+        botPollAt = Date.now();
+        minuteAsking = true;
+        try {
+          const r = await fadeBotRead(c.time);
+          if (!r || minuteSel !== m || cancelled || minuteReads.has(c.time))
+            return;
+          const reg = regimeOf(minuteHits, c.time, TF_SECONDS);
+          const read: MinuteRead = {
+            time: c.time,
+            pJev: r.p_green,
+            pMath: predictor.live(c, feed.now())?.pGreen ?? 0.5,
+            move: r.move,
+            regime: reg,
+            pAdj: adjustForRegime(r.p_green, reg),
+            fromBot: true,
+          };
+          minuteReads.set(c.time, read);
+          liveRead.add(c.time);
+          setMinute({ now: read });
+        } finally {
+          minuteAsking = false;
+        }
+        return;
+      }
       const atr = predictor.atr;
       const sd = bodySd(bars.map((b) => b.candle));
       if (!atr || !sd) return;

@@ -394,9 +394,7 @@ async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | n
       miss("settlement lookup failed", `${mk.slug}: ${(e as Error).message}`);
       return null;
     });
-    // deno-lint-ignore no-explicit-any
-    const sa = st as any;
-    const v = Number(sa?.settlementPrice?.value ?? sa?.settlementPrice ?? sa?.settlement?.settlementPrice?.value ?? sa?.value);
+    const v = settleValue(st);
     if (!Number.isFinite(v)) {
       if (st) miss("settlement unreadable", `${mk.slug}: ${JSON.stringify(st).slice(0, 200)}`);
       continue;
@@ -420,6 +418,12 @@ async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | n
     ok: null,
     note: `not confirmed yet (${agree} settled window${agree === 1 ? "" : "s"} checked${note ? `: ${note}` : ""}${whyText ? `; skipped: ${whyText}` : ""}${firstErr ? `; e.g. ${firstErr}` : ""})`,
   };
+}
+
+/** Polymarket US settlement value (1 = YES won, 0 = YES lost), from either response shape. */
+// deno-lint-ignore no-explicit-any
+function settleValue(st: any): number {
+  return Number(st?.settlement ?? st?.settlementPrice?.value ?? st?.settlementPrice ?? st?.value);
 }
 
 /** Cost of one share of `side` now (0–1). The book is quoted in YES prices: NO costs 1 − the best YES bid. */
@@ -484,8 +488,7 @@ async function filledQty(orderId: string): Promise<number> {
 
 async function settledSide(m: WindowMarket): Promise<Side | null> {
   try {
-    const s = await pm().markets.settlement(m.slug);
-    const v = Number(s.settlementPrice?.value);
+    const v = settleValue(await pm().markets.settlement(m.slug));
     if (!Number.isFinite(v)) return null;
     return v >= 0.5 ? m.longIs : m.longIs === "up" ? "down" : "up";
   } catch {
@@ -751,6 +754,14 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    if (body?.action === "read") {
+      // Read-only: the bot's Jev read for one window, so the page shows the same call the bot bets on.
+      const w = Math.floor(Number(body.window));
+      const r = await db()`select window_start, p_green, move, open_ref from fadebot_reads5 where window_start = ${w}`.catch(
+        () => [],
+      );
+      return json({ read: r[0] ?? null, readAt: READ_AT });
+    }
     if (body?.action === "find-market") {
       // Read-only: which Polymarket market the bot would trade for the current window.
       const start = Math.floor(Date.now() / 1000 / TF) * TF;
