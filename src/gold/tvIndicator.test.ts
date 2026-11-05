@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Ema } from "./indicators";
 import { emaSeries, rsiSeries, runTvIndicator } from "./tvIndicator";
+import * as bot from "../../supabase/functions/_shared/tvIndicator";
 
 describe("TradingView indicator port", () => {
   it("RSI matches the textbook Wilder example (StockCharts example, computed without its rounding)", () => {
@@ -32,5 +33,14 @@ describe("TradingView indicator port", () => {
     expect(r.calls).toBe(r.bars.slice(0, -1).filter((b) => b.bias !== 0).length);
     expect(r.hits).toBe(r.bars.slice(0, -1).filter((b) => b.bias === 1).length); // every up call hit
     expect(r.pShow).toBe(last.probUp);
+  });
+
+  it("the bot's copy gives identical results", () => {
+    const candles = Array.from({ length: 3000 }, (_, i) => {
+      const o = 100000 + Math.sin(i / 23) * 700 + Math.cos(i / 4) * 90;
+      const c = o + Math.sin(i * 1.3) * 60;
+      return { time: i * 900, open: o, high: Math.max(o, c) + 20, low: Math.min(o, c) - 15, close: c };
+    });
+    expect(bot.runTvIndicator(candles, null)).toEqual(runTvIndicator(candles, null));
   });
 });

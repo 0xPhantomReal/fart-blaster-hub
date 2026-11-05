@@ -722,6 +722,7 @@ export interface FadeBotBet {
   pnl: number | null;
   regime?: string | null; // e.g. "Jev backwards (4/12)"
   kind?: string | null; //   hold | fade-hold | fade-flip
+  tv15?: string | null; //   the 15m TV indicator at the bet, e.g. "15m indicator GREEN 62% up"
 }
 export interface FadeBotStatus {
   settings: {
@@ -730,6 +731,7 @@ export interface FadeBotStatus {
     limitPrice: number;
     limitShares: number;
     fadeMin?: number;
+    tv15?: boolean;
     fadeMax?: number;
     readAt?: number;
   };

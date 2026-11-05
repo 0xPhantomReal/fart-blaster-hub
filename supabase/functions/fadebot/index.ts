@@ -7,7 +7,8 @@
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
 //     Jev's call over 50% and up to 90% sure (FADEBOT_FADE_MIN / FADEBOT_FADE_MAX) → a $1 market order (FADEBOT_STAKE) on the OTHER side; otherwise
-//     no bet. Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
+//     no bet — and only when Jev's call goes AGAINST the TradingView indicator on 15-minute candles (so the bet
+//     goes with the indicator; FADEBOT_TV15=off turns that check off). Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
@@ -41,6 +42,7 @@ import {
   niceStep,
   type Footprint,
 } from "../_shared/jevContext.ts";
+import { runTvIndicator } from "../_shared/tvIndicator.ts";
 
 const TF = 300; //        5-minute windows
 // Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 30, 60, 120 or 180 (default 30). The page's
@@ -66,6 +68,8 @@ const settings = () => ({
   // Bet against Jev's 3-minute call when it's over 50% and at most this sure.
   fadeMin: Number(env("FADEBOT_FADE_MIN") || 0.5),
   fadeMax: Number(env("FADEBOT_FADE_MAX") || 0.9),
+  // Only fade Jev when its call goes against the TradingView indicator on 15-minute candles (off = no check).
+  tv15: env("FADEBOT_TV15") !== "off",
   // Optional resting limit order on the same side (0 shares = none).
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
   limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 0),
@@ -111,6 +115,7 @@ async function setup() {
     outcome text, created_at timestamptz default now())`;
   await sql`alter table fadebot_bets5 add column if not exists regime text`;
   await sql`alter table fadebot_bets5 add column if not exists kind text`;
+  await sql`alter table fadebot_bets5 add column if not exists tv15 text`;
   // Only this function (through the database connection) reads and writes these tables.
   await sql`alter table fadebot_prices enable row level security`;
   await sql`alter table fadebot_bets5 enable row level security`;
@@ -605,6 +610,34 @@ async function volumes(from: number, to: number): Promise<Map<number, number> | 
   }
 }
 
+// ── The TradingView indicator on 15-minute candles ───────────────────
+
+/**
+ * What the chart's "TV indicator" table shows on BTC 15m right now: the call made at the last 15-minute close
+ * (GREEN / RED / NO CALL). Same candles as the chart loads (3,000 of them), same code (shared copy, parity-tested).
+ */
+async function tvIndicator15(now: number): Promise<{ dir: Side | null; label: string }> {
+  const TF15 = 900;
+  const r = await gold<{ candles: Candle[] }>({
+    action: "history",
+    market: "btc",
+    resolution: 15,
+    from: Math.floor(now - 3000 * TF15 * 1.7),
+    to: Math.floor(now),
+  });
+  const closed = r.candles
+    .filter((c) => c.time + TF15 <= now)
+    .sort((a, b) => a.time - b.time)
+    .slice(-3000);
+  if (closed.length < 30) throw new Error("not enough 15-minute history");
+  const tv = runTvIndicator(closed, null);
+  const pct = tv.pShow === null ? "?" : `${Math.round(tv.pShow * 100)}% up`;
+  return {
+    dir: tv.dirTxt === "GREEN" ? "up" : tv.dirTxt === "RED" ? "down" : null,
+    label: `15m indicator ${tv.dirTxt} ${pct}`,
+  };
+}
+
 // ── Regime: Jev's recent record at the read ─────────────────────────
 
 /** Fill in how recent windows ended (from the recorded final-minute BRTI average), then return Jev's hits. */
@@ -732,6 +765,26 @@ async function decideWindow(start: number) {
     return;
   }
 
+  // Only fade Jev when its call goes against the 15-minute TradingView indicator (so the bet goes WITH the
+  // indicator). Indicator agrees with Jev, or shows NO CALL → no bet. Can't read it → no bet.
+  let tvLabel: string | null = null;
+  if (cfg.tv15) {
+    const jevTxt = `Jev: ${jevKind} → ${jevSide} (${jevSure}%)`;
+    let t: { dir: Side | null; label: string };
+    try {
+      t = await tvIndicator15(Date.now() / 1000);
+    } catch (e) {
+      return skip(start, `${jevTxt}; couldn't read the 15m indicator (${(e as Error).message}): no bet`.slice(0, 300));
+    }
+    tvLabel = t.label;
+    const why = t.dir === null ? "shows no call" : t.dir === jevSide ? "agrees with Jev" : null;
+    if (why) {
+      await skip(start, `${jevTxt}; ${t.label} ${why}: no bet`);
+      await sql`update fadebot_bets5 set regime = ${regLabel}, tv15 = ${t.label} where window_start = ${start}`;
+      return;
+    }
+  }
+
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
   if (!market) {
@@ -778,10 +831,10 @@ async function decideWindow(start: number) {
     }
   } else if (stake > 0 && price && price > 0) shares = stake / price;
   await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, jev_sure, side, step, stake, price, shares, fees,
-      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id, regime, kind, reason)
+      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id, regime, kind, reason, tv15)
     values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.sure}, ${d.side}, 0, ${stake}, ${price ?? 0},
       ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId}, ${regLabel}, ${d.kind},
-      ${chk.ok ? null : `YES = ${market.longIs} from the ${lastHow}; ${chk.note}`.slice(0, 700)})
+      ${chk.ok ? null : `YES = ${market.longIs} from the ${lastHow}; ${chk.note}`.slice(0, 700)}, ${tvLabel})
     on conflict (window_start) do nothing`;
 }
 

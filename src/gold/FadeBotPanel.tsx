@@ -42,8 +42,11 @@ export function FadeBotPanel() {
         call is {Math.round((cfg.fadeMin ?? 0.5) * 100)}% to{" "}
         {Math.round((cfg.fadeMax ?? 0.9) * 100)}%
         sure (hold or flip), the bot places a ${cfg.marketBet} market order on
-        the <b>other</b> side. Calls outside that range: no bet. Same stake
-        every time.
+        the <b>other</b> side
+        {cfg.tv15 !== false
+          ? " — but only when Jev's call goes against the TV indicator on 15-minute candles (so the bet goes with the indicator; if they agree, or the indicator shows no call, no bet)"
+          : ""}
+        . Calls outside that range: no bet. Same stake every time.
         {cfg.limitShares > 0
           ? ` Plus a limit order for ${cfg.limitShares} shares at ${Math.round(cfg.limitPrice * 100)}¢.`
           : ""}
@@ -139,6 +142,9 @@ export function FadeBotPanel() {
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
+                    {b.tv15 ? (
+                      <div className={`text-[10px] ${MUTED}`}>{b.tv15}</div>
+                    ) : null}
                   </td>
                   <td className="py-1" title={b.reason ?? undefined}>
                     {b.side}
