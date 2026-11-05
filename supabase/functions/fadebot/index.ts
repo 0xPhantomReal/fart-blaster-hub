@@ -116,6 +116,12 @@ async function setup() {
   await sql`alter table fadebot_bets5 add column if not exists regime text`;
   await sql`alter table fadebot_bets5 add column if not exists kind text`;
   await sql`alter table fadebot_bets5 add column if not exists tv15 text`;
+  // Polymarket's own price history per 5-minute market: the lowest Up and Down prices during the window.
+  await sql`create table if not exists fadebot_pmhist (
+    window_start bigint primary key, slug text, long_is text, up_low double precision, down_low double precision,
+    up_read double precision, down_read double precision, n_points int, error text, sample text,
+    fetched_at timestamptz default now())`;
+  await sql`alter table fadebot_pmhist enable row level security`;
   // Only this function (through the database connection) reads and writes these tables.
   await sql`alter table fadebot_prices enable row level security`;
   await sql`alter table fadebot_bets5 enable row level security`;
@@ -610,6 +616,135 @@ async function volumes(from: number, to: number): Promise<Map<number, number> | 
   }
 }
 
+// ── Polymarket price history per window ───────────────────────────────
+// gateway.polymarket.us GET /v1/price-history?symbol=<market slug>&fidelity=1&fixedInterval=… gives about one point
+// a minute of the Yes display price (longPrice, from the best ask = the cost to buy Yes) and the No display price
+// (shortPrice, 1 − best bid = the cost to buy No). Display prices, not trades.
+
+const GATEWAY = env("PM_GATEWAY_URL") || "https://gateway.polymarket.us";
+
+const num = (v: unknown): number | null => {
+  const x = typeof v === "object" && v !== null ? (v as { value?: unknown }).value : v;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+};
+const toSec = (v: unknown): number | null => {
+  if (typeof v === "string" && !/^\d+(\.\d+)?$/.test(v)) {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t / 1000 : null;
+  }
+  const n = num(v);
+  return n === null ? null : n > 1e11 ? n / 1000 : n;
+};
+
+/** Points {t, yes, no} from a price-history response, whatever the exact shape (first array of price objects). */
+function historyPoints(j: unknown): { t: number; yes: number | null; no: number | null }[] {
+  const seen = new Set<unknown>();
+  const find = (x: unknown): Record<string, unknown>[] | null => {
+    if (!x || typeof x !== "object" || seen.has(x)) return null;
+    seen.add(x);
+    if (Array.isArray(x)) {
+      if (x.some((e) => e && typeof e === "object" && ("longPrice" in e || "shortPrice" in e))) return x as Record<string, unknown>[];
+      for (const e of x) {
+        const f = find(e);
+        if (f) return f;
+      }
+      return null;
+    }
+    for (const v of Object.values(x as Record<string, unknown>)) {
+      const f = find(v);
+      if (f) return f;
+    }
+    return null;
+  };
+  const arr = find(j) ?? [];
+  const out: { t: number; yes: number | null; no: number | null }[] = [];
+  for (const e of arr) {
+    const t = toSec(e.t ?? e.ts ?? e.time ?? e.timestamp ?? e.createTime ?? e.updateTime ?? e.date);
+    if (t === null) continue;
+    out.push({ t, yes: num(e.longPrice), no: num(e.shortPrice) });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+async function priceHistory(slug: string): Promise<{ pts: ReturnType<typeof historyPoints>; sample: string }> {
+  let last = "";
+  for (const fixedInterval of ["INTERVAL_6H", "INTERVAL_1D", "INTERVAL_LIVE"]) {
+    const q = new URLSearchParams({ symbol: slug, fidelity: "1", fixedInterval });
+    const res = await fetch(`${GATEWAY}/v1/price-history?${q}`, { headers: { Accept: "application/json" } });
+    const text = await res.text();
+    last = `${fixedInterval} ${res.status}: ${text.slice(0, 300)}`;
+    if (!res.ok) continue;
+    let j: unknown = null;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const pts = historyPoints(j);
+    if (pts.length) return { pts, sample: `${fixedInterval}: ${text.slice(0, 300)}` };
+  }
+  return { pts: [], sample: last };
+}
+
+/** Fill in the price history for finished windows (the scheduled run, a batch at a time, last 6 hours). */
+async function updatePmHistory(now: number) {
+  const sql = db();
+  const last = Math.floor(now / TF) * TF - TF; // the newest finished window (ended at least a few seconds ago)
+  const done = new Set(
+    (await sql`select window_start from fadebot_pmhist where window_start > ${last - 72 * TF} and (n_points > 0 or fetched_at > now() - interval '30 minutes')`).map(
+      (r) => Number(r.window_start),
+    ),
+  );
+  let budget = 24;
+  for (let ws = last - TF; ws > last - 72 * TF && budget > 0; ws -= TF) {
+    // (the window that just ended is left for the next run, so its last minute is in the history)
+    if (done.has(ws)) continue;
+    budget -= 1;
+    let row: Record<string, unknown> = { window_start: ws, n_points: 0 };
+    try {
+      const r = await pm().events.retrieveBySlug(`btc-updown-5m-${slugTime(ws)}`).catch(() => null);
+      const ev = (r as { event?: Ev } | null)?.event;
+      const mk = ev ? (await marketsOf(ev))[0] : undefined;
+      if (!mk) {
+        row.error = "no market for this window";
+      } else {
+        const ls = longSide(mk);
+        const longIs: Side = ls?.side ?? "up";
+        const { pts, sample } = await priceHistory(mk.slug);
+        const inWin = pts.filter((p) => p.t >= ws && p.t <= ws + TF);
+        const up = (p: (typeof pts)[number]) => (longIs === "up" ? p.yes : p.no);
+        const down = (p: (typeof pts)[number]) => (longIs === "up" ? p.no : p.yes);
+        const low = (f: (p: (typeof pts)[number]) => number | null) => {
+          const v = inWin.map(f).filter((x): x is number => x !== null);
+          return v.length ? Math.min(...v) : null;
+        };
+        // The price around the bot's read: the latest point at or before it, else the first in the window.
+        const atRead = [...inWin].reverse().find((p) => p.t <= ws + READ_AT) ?? inWin[0];
+        row = {
+          window_start: ws,
+          slug: mk.slug,
+          long_is: ls ? longIs : "up?",
+          up_low: low(up),
+          down_low: low(down),
+          up_read: atRead ? up(atRead) : null,
+          down_read: atRead ? down(atRead) : null,
+          n_points: inWin.length,
+          error: inWin.length ? null : pts.length ? "no points inside the window" : "no price history",
+          sample: inWin.length ? null : sample,
+        };
+      }
+    } catch (e) {
+      row.error = (e as Error).message.slice(0, 200);
+    }
+    await sql`insert into fadebot_pmhist ${sql(row)} on conflict (window_start) do update set
+      slug = excluded.slug, long_is = excluded.long_is, up_low = excluded.up_low, down_low = excluded.down_low,
+      up_read = excluded.up_read, down_read = excluded.down_read, n_points = excluded.n_points,
+      error = excluded.error, sample = excluded.sample, fetched_at = now()`;
+  }
+  await sql`delete from fadebot_pmhist where window_start < ${Math.floor(now - 3 * 86400)}`;
+}
+
 // ── The TradingView indicator on 15-minute candles ───────────────────
 
 /**
@@ -928,6 +1063,7 @@ async function run() {
   await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
   if (m >= READ_MIN && m <= 3) {
     if (m === 3) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
+    if (m === 3) await updatePmHistory(now).catch((e) => console.error("price history:", (e as Error).message));
     // First run: work out the footprint step from the ATR, then keep the order flow current.
     const st = (await db()`select flow_step from fadebot_state5 where id = 1`)[0];
     let atr: number | null = null;
@@ -956,6 +1092,10 @@ async function status() {
     nextStake: cfg.marketBet,
     bets,
     regime: { ...reg, window: REGIME_N, reads: hits.length, ...persistence(hits) },
+    // Polymarket's prices per window (last 6 hours), with how the window ended (BRTI, Polymarket's rule).
+    pmHistory: await db()`select h.window_start, h.up_low, h.down_low, h.up_read, h.down_read, h.n_points, h.long_is,
+        h.error, h.sample, r.outcome from fadebot_pmhist h left join fadebot_reads5 r on r.window_start = h.window_start
+        where h.window_start > ${now - 6 * 3600} order by h.window_start desc`.catch(() => []),
   };
 }
 
@@ -991,6 +1131,11 @@ Deno.serve(async (req) => {
     const authFailure = authenticateCronRequest(req);
     if (authFailure) return authFailure;
     // Test hook (only with FADEBOT_ALLOW_TEST=1, never set in production): decide the current window now.
+    if (body?.action === "test-pmhist" && env("FADEBOT_ALLOW_TEST") === "1") {
+      await setup();
+      await updatePmHistory(Date.now() / 1000);
+      return json(await status());
+    }
     if (body?.action === "test-decide" && env("FADEBOT_ALLOW_TEST") === "1") {
       await setup();
       const start = Math.floor(Date.now() / 1000 / TF) * TF;

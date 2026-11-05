@@ -204,7 +204,101 @@ export function FadeBotPanel({
           ))}
         </tbody>
       </table>
+      {s.pmHistory && <PmHistory s={s} readAt={cfg.readAt ?? 30} />}
       {bt(cfg.fadeMin ?? 0.5, cfg.fadeMax ?? 0.9, cfg.readAt ?? 30)}
+    </div>
+  );
+}
+
+const cents = (v: number | null | undefined) =>
+  v === null || v === undefined ? "—" : `${Math.round(v * 100)}¢`;
+
+/** Polymarket's prices for each recent window: lowest Up and Down during the window, prices at the read, result. */
+function PmHistory({ s, readAt }: { s: FadeBotStatus; readAt: number }) {
+  const rows = s.pmHistory ?? [];
+  const bets = new Map(s.bets.map((b) => [Number(b.window_start), b]));
+  const failed = rows.find((r) => r.n_points === 0 && r.sample);
+  const read = readAt < 60 ? `${readAt}s` : `${readAt / 60}m`;
+  return (
+    <div className="mt-3 rounded-md border border-[#262c36] p-2 text-xs">
+      <div className="mb-1 font-semibold">Polymarket prices per window</div>
+      <p className={`mb-1 ${MUTED}`}>
+        From Polymarket's price history, about one price a minute (the cost to
+        buy each side), so the true low between minutes can be lower. Last 6
+        hours, filled in a few minutes after each window ends.
+      </p>
+      {!rows.length ? (
+        <p className={MUTED}>
+          Nothing yet: the bot fills this in on its next runs.
+        </p>
+      ) : (
+        <table className="w-full tabular-nums">
+          <thead className={MUTED}>
+            <tr>
+              <th className="pb-1 text-left font-medium">Window</th>
+              <th className="pb-1 text-right font-medium">Low Up</th>
+              <th className="pb-1 text-right font-medium">Low Down</th>
+              <th className="pb-1 text-right font-medium">At {read} Up/Down</th>
+              <th className="pb-1 text-right font-medium">Ended</th>
+              <th className="pb-1 text-right font-medium">Bot</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const b = bets.get(Number(r.window_start));
+              return (
+                <tr
+                  key={String(r.window_start)}
+                  className="border-t border-[#1b2028]"
+                  title={r.error ?? undefined}
+                >
+                  <td className="py-0.5">
+                    {new Date(Number(r.window_start) * 1000).toLocaleTimeString(
+                      [],
+                      { hour: "numeric", minute: "2-digit" },
+                    )}
+                  </td>
+                  {r.n_points ? (
+                    <>
+                      <td className="py-0.5 text-right">{cents(r.up_low)}</td>
+                      <td className="py-0.5 text-right">{cents(r.down_low)}</td>
+                      <td className={`py-0.5 text-right ${MUTED}`}>
+                        {cents(r.up_read)} / {cents(r.down_read)}
+                      </td>
+                    </>
+                  ) : (
+                    <td colSpan={3} className={`py-0.5 text-right ${MUTED}`}>
+                      {r.error ?? "no data"}
+                    </td>
+                  )}
+                  <td
+                    className={`py-0.5 text-right ${r.outcome === "up" ? "text-[#26a69a]" : r.outcome === "down" ? "text-[#ef5350]" : MUTED}`}
+                  >
+                    {r.outcome ?? "—"}
+                  </td>
+                  <td className={`py-0.5 text-right ${MUTED}`}>
+                    {b && b.status !== "skipped" && b.side
+                      ? `${b.side}${b.price ? ` @ ${cents(b.price)}` : ""}${b.result ? ` ${b.result}` : ""}`
+                      : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {failed && (
+        <p className={`mt-1 break-all ${MUTED}`}>
+          Price history not readable yet. What Polymarket returned:{" "}
+          {failed.sample}
+        </p>
+      )}
+      {rows.some((r) => r.long_is === "up?") && (
+        <p className={`mt-1 ${MUTED}`}>
+          "Up" assumes the Yes side pays on Up (it couldn't be read from the
+          market for some windows).
+        </p>
+      )}
     </div>
   );
 }

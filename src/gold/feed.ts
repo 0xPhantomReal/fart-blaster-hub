@@ -761,6 +761,19 @@ export interface FadeBotStatus {
   };
   nextStake: number;
   bets: FadeBotBet[];
+  /** Polymarket's own prices per 5-minute window (last 6 hours), from its price history (about one point a minute). */
+  pmHistory?: {
+    window_start: string | number;
+    up_low: number | null;
+    down_low: number | null;
+    up_read: number | null;
+    down_read: number | null;
+    n_points: number;
+    long_is: string | null;
+    error: string | null;
+    sample: string | null;
+    outcome: string | null;
+  }[];
   /** Jev's 30-second record (every window, bet or not) → the regime for the next window. */
   regime?: {
     regime: "normal" | "backwards" | "unsure";
