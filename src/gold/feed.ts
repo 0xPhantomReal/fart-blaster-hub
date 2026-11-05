@@ -531,6 +531,23 @@ export async function askCheck(
 }
 
 /** Bitcoin volume per candle (Coinbase BTC-USD), for Jev's context. */
+/** Candles for any resolution (minutes) from the gold function, oldest first. */
+export async function fetchCandles(
+  market: Market,
+  resolution: number,
+  from: number,
+  to: number,
+): Promise<Candle[]> {
+  const r = await callFn<{ candles: Candle[] }>({
+    action: "history",
+    market,
+    resolution,
+    from: Math.floor(from),
+    to: Math.floor(to),
+  });
+  return [...r.candles].sort((a, b) => a.time - b.time);
+}
+
 export async function fetchVolume(
   market: Market,
   tfMin: number,

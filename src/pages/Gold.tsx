@@ -1166,7 +1166,16 @@ export default function Gold() {
           {market === "btc" && tfMin === 5 && g.source !== "Simulated" && (
             <section>
               <Label>Polymarket bot</Label>
-              <FadeBotPanel />
+              <FadeBotPanel
+                bars={g.bars}
+                readSec={
+                  usesMinute(arrowMode) && callMinute !== null
+                    ? Math.round(callMinute * 60)
+                    : null
+                }
+                readLabel={callMinute !== null ? readLabel(callMinute) : ""}
+                pastIsLive={mn.pastIsLive}
+              />
             </section>
           )}
 

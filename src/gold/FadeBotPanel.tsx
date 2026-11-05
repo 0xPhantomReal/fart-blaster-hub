@@ -1,12 +1,24 @@
 import { useEffect, useState } from "react";
+import { FadeBacktestBox } from "./FadeBacktestBox";
 import { fadeBotFindMarket, fadeBotStatus, type FadeBotStatus } from "./feed";
+import type { ClosedBar } from "./useGold";
 
 const MUTED = "text-[#8b949e]";
 const money = (v: number) =>
   `${v < 0 ? "−" : v > 0 ? "+" : ""}$${Math.abs(v).toFixed(2)}`;
 
 /** Read-only view of the Polymarket bot running in the backend. */
-export function FadeBotPanel() {
+export function FadeBotPanel({
+  bars,
+  readSec,
+  readLabel,
+  pastIsLive,
+}: {
+  bars: ClosedBar[];
+  readSec: number | null;
+  readLabel: string;
+  pastIsLive: boolean;
+}) {
   const [s, setS] = useState<FadeBotStatus | null | undefined>(undefined);
   const [check, setCheck] = useState<string | null>(null);
   useEffect(() => {
@@ -19,13 +31,27 @@ export function FadeBotPanel() {
       clearInterval(id);
     };
   }, []);
+  const bt = (min: number, max: number, botReadSec: number) => (
+    <FadeBacktestBox
+      bars={bars}
+      readSec={readSec}
+      readLabel={readLabel}
+      pastIsLive={pastIsLive}
+      min={min}
+      max={max}
+      botReadSec={botReadSec}
+    />
+  );
   if (s === undefined) return null;
   if (s === null)
     return (
-      <p className={`text-xs ${MUTED}`}>
-        Not running yet: deploy the <code>fadebot</code> function and schedule
-        it every minute.
-      </p>
+      <>
+        <p className={`text-xs ${MUTED}`}>
+          Not running yet: deploy the <code>fadebot</code> function and schedule
+          it every minute.
+        </p>
+        {bt(0.5, 0.9, 30)}
+      </>
     );
   const st = s.state;
   const cfg = s.settings;
@@ -38,11 +64,9 @@ export function FadeBotPanel() {
           : cfg.readAt < 60
             ? `${cfg.readAt} seconds`
             : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
-        in. When its
-        call is {Math.round((cfg.fadeMin ?? 0.5) * 100)}% to{" "}
-        {Math.round((cfg.fadeMax ?? 0.9) * 100)}%
-        sure (hold or flip), the bot places a ${cfg.marketBet} market order on
-        the <b>other</b> side
+        in. When its call is {Math.round((cfg.fadeMin ?? 0.5) * 100)}% to{" "}
+        {Math.round((cfg.fadeMax ?? 0.9) * 100)}% sure (hold or flip), the bot
+        places a ${cfg.marketBet} market order on the <b>other</b> side
         {cfg.tv15 !== false
           ? " — but only when Jev's call goes against the TV indicator on 15-minute candles (so the bet goes with the indicator; if they agree, or the indicator shows no call, no bet)"
           : ""}
@@ -180,6 +204,7 @@ export function FadeBotPanel() {
           ))}
         </tbody>
       </table>
+      {bt(cfg.fadeMin ?? 0.5, cfg.fadeMax ?? 0.9, cfg.readAt ?? 30)}
     </div>
   );
 }
