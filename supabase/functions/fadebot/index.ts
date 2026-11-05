@@ -2,7 +2,7 @@
 //
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
-//   S … S+60·N: record BRTI, then (FADEBOT_READ_MIN = N minutes in, default 1) ask Jev whether the candle ends green or red, with
+//   S … S+READ: record BRTI, then (FADEBOT_READ_SEC: 30, 60, 120 or 180 seconds in, default 30) ask Jev whether the candle ends green or red, with
 //     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 15 candles,
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
@@ -43,9 +43,13 @@ import {
 } from "../_shared/jevContext.ts";
 
 const TF = 300; //        5-minute windows
-// Jev reads the candle this many minutes in (FADEBOT_READ_MIN: 1, 2 or 3; default 1).
-const READ_MIN = Math.min(3, Math.max(1, Math.round(Number(Deno.env.get("FADEBOT_READ_MIN") || 1))));
-const READ_AT = READ_MIN * 60;
+// Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 30, 60, 120 or 180 (default 30). The page's
+// "Jev at …" choices are the same, so the two share one answer.
+const READ_AT = (() => {
+  const v = Number(Deno.env.get("FADEBOT_READ_SEC") || (Number(Deno.env.get("FADEBOT_READ_MIN")) * 60 || 30));
+  return [30, 60, 120, 180].includes(v) ? v : 30;
+})();
+const READ_MIN = Math.ceil(READ_AT / 60); // minutes of BRTI to record before the read
 const env = (k: string) => Deno.env.get(k) ?? "";
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -642,7 +646,7 @@ async function skip(start: number, reason: string) {
     on conflict (window_start) do nothing`;
 }
 
-/** READ_MIN minutes into window `start`: ask Jev; if its call is 51–70% sure, a $1 market order on the other side. */
+/** READ_AT seconds into window `start`: ask Jev; if its call is 70–90% sure, a $1 market order on the other side. */
 async function decideWindow(start: number) {
   const sql = db();
   if ((await sql`select 1 from fadebot_bets5 where window_start = ${start}`).length) return;
@@ -656,8 +660,8 @@ async function decideWindow(start: number) {
   const mins = (await Promise.all(offsets.map((o) => period(start + o)))).filter(
     (x): x is NonNullable<typeof x> => !!x && x.n >= 3,
   );
-  const last = await period(start + READ_AT - 60);
-  if (!last || last.n < 3) return skip(start, `no prices recorded in minute ${READ_MIN}`);
+  const last = await period(start + (READ_MIN - 1) * 60);
+  if (!last || last.n < 3) return skip(start, `no prices recorded before the ${READ_AT}-second read`);
   const openRef = before.avg;
   const pageOpen = before.last;
   const forming: Candle = {
@@ -854,7 +858,7 @@ async function run() {
     done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
     await updateFlow(Date.now() / 1000, null).catch(() => {});
   } else if (m < READ_MIN) {
-    // The minutes before the read, then (at READ_MIN:00) Jev's read and the bet.
+    // The minutes before the read, then (READ_AT seconds in) Jev's read and the bet.
     const from = start + m * 60;
     const last = m === READ_MIN - 1;
     const until = last ? start + READ_AT : from + 58;
