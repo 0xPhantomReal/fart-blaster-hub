@@ -12,6 +12,8 @@
 // POST { action: "tickcheck" }                    → which Pyth host/feed works for live ticks, or exactly why not
 // POST { action: "version" }                        → { version, features }
 
+import postgres from "npm:postgres@3.4.9";
+
 const PYTH_BASE = "https://pyth.dourolabs.app/v1";
 const PYTH_CHANNEL = "fixed_rate@200ms";
 const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
@@ -36,6 +38,54 @@ function cached<T>(map: Map<string, { at: number; body: unknown }>, key: string,
   if (hit && Date.now() - hit.at < ttlMs) return hit.body as T;
   if (map.size > 2000) map.clear();
   return undefined;
+}
+
+// ── One shared Jev answer per minute read ─────────────────────────────
+// The page's "Jev at minute X" and the Polymarket bot ask about the same candle at about the same moment. The
+// in-memory cache above is per server copy, so they could get two different answers (68% vs 71%). Minute reads are
+// kept in the database instead: whoever asks first calls Jev; anyone asking the same thing gets that exact answer.
+
+let sharedConn: ReturnType<typeof postgres> | null | undefined;
+let sharedReady = false;
+async function sharedDb() {
+  if (sharedConn === undefined) {
+    const url = Deno.env.get("SUPABASE_DB_URL");
+    sharedConn = url ? postgres(url, { prepare: false, max: 2, idle_timeout: 20 }) : null;
+  }
+  if (sharedConn && !sharedReady) {
+    await sharedConn`create table if not exists jev_shared (key text primary key, body jsonb, created_at timestamptz default now())`;
+    await sharedConn`alter table jev_shared enable row level security`;
+    await sharedConn`delete from jev_shared where created_at < now() - interval '2 days'`;
+    sharedReady = true;
+  }
+  return sharedConn;
+}
+
+async function sharedAnswer(key: string, compute: () => Promise<unknown>): Promise<unknown> {
+  const sql = await sharedDb().catch(() => null);
+  if (!sql) return compute();
+  const claimed = await sql`insert into jev_shared (key) values (${key}) on conflict (key) do nothing returning 1`.catch(
+    () => null,
+  );
+  if (claimed === null) return compute();
+  if (claimed.length) {
+    try {
+      const r = await compute();
+      await sql`update jev_shared set body = ${sql.json(r as Parameters<typeof sql.json>[0])} where key = ${key}`;
+      return r;
+    } catch (e) {
+      await sql`delete from jev_shared where key = ${key} and body is null`.catch(() => {});
+      throw e;
+    }
+  }
+  // Someone else is asking Jev right now (or already did): wait for their answer.
+  for (let i = 0; i < 60; i++) {
+    const row = (await sql`select body from jev_shared where key = ${key}`)[0];
+    if (!row) return sharedAnswer(key, compute); // their call failed: ask ourselves
+    if (row.body) return row.body;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return compute();
 }
 
 // ── Markets ────────────────────────────────────────────────────────────
@@ -964,7 +1014,8 @@ Deno.serve(async (req) => {
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        run = flip(m, state as Record<string, unknown>, tf).then((r) => {
+        const ask = () => flip(m, state as Record<string, unknown>, tf);
+        run = (slotKey.startsWith("v2:m") ? sharedAnswer(key, ask) : ask()).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });
