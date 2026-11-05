@@ -212,6 +212,24 @@ export type Database = {
         }
         Relationships: []
       }
+      jev_shared: {
+        Row: {
+          body: Json | null
+          created_at: string | null
+          key: string
+        }
+        Insert: {
+          body?: Json | null
+          created_at?: string | null
+          key: string
+        }
+        Update: {
+          body?: Json | null
+          created_at?: string | null
+          key?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
