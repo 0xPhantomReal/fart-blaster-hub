@@ -134,21 +134,26 @@ export function FadeBotPanel() {
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
                   </td>
-                  <td className="py-1">
+                  <td className="py-1" title={b.reason ?? undefined}>
                     {b.side}
                     {b.shares
-                      ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)} +`
-                      : ""}
-                    <span className={MUTED}>
-                      {" "}
-                      {b.limit_shares} @{" "}
-                      {Math.round((b.limit_price ?? 0) * 100)}¢{" "}
-                      {b.limit_filled
-                        ? "filled"
-                        : b.status === "open"
-                          ? "waiting"
-                          : "not filled"}
-                    </span>
+                      ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)}`
+                      : b.stake
+                        ? ` $${b.stake.toFixed(0)} (no fill)`
+                        : ""}
+                    {b.limit_shares ? (
+                      <span className={MUTED}>
+                        {" "}
+                        + {b.limit_shares} @{" "}
+                        {Math.round((b.limit_price ?? 0) * 100)}¢{" "}
+                        {b.limit_filled
+                          ? "filled"
+                          : b.status === "open"
+                            ? "waiting"
+                            : "not filled"}
+                      </span>
+                    ) : null}
+                    {b.reason ? <span className={MUTED}> ⓘ</span> : null}
                   </td>
                   <td
                     className={`py-1 text-right ${b.result === "win" ? "text-[#26a69a]" : b.result === "loss" ? "text-[#ef5350]" : MUTED}`}

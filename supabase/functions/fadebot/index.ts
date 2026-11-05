@@ -360,18 +360,47 @@ async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | n
   let agree = 0;
   let disagree = 0;
   const seen: string[] = [];
+  // Why windows couldn't be used (shown in the row, so a stuck check can be fixed).
+  const why: Record<string, number> = {};
+  let firstErr = "";
+  const miss = (k: string, detail = "") => {
+    why[k] = (why[k] ?? 0) + 1;
+    if (detail && !firstErr) firstErr = detail.slice(0, 250);
+  };
   for (let ws = start - 2 * TF; ws >= start - 14 * TF && agree < 2 && disagree < 2; ws -= TF) {
     const open = await period(ws - 60);
     const fin = await period(ws + TF - 60);
-    if (!open || !fin || open.n < 20 || fin.n < 20 || Math.abs(fin.avg - open.avg) < 10) continue;
+    if (!open || !fin || open.n < 20 || fin.n < 20) {
+      miss("no BRTI record");
+      continue;
+    }
+    if (Math.abs(fin.avg - open.avg) < 10) {
+      miss("moved under $10");
+      continue;
+    }
     const went: Side = fin.avg >= open.avg ? "up" : "down";
-    const r = await client.events.retrieveBySlug(`btc-updown-5m-${slugTime(ws)}`).catch(() => null);
+    const evSlug = `btc-updown-5m-${slugTime(ws)}`;
+    const r = await client.events.retrieveBySlug(evSlug).catch((e) => {
+      miss("event lookup failed", `${evSlug}: ${(e as Error).message}`);
+      return null;
+    });
     const ev = (r as { event?: Ev } | null)?.event;
     const mk = ev ? (await marketsOf(ev))[0] : undefined;
-    if (!mk) continue;
-    const st = await client.markets.settlement(mk.slug).catch(() => null);
-    const v = Number(st?.settlementPrice?.value);
-    if (!Number.isFinite(v)) continue;
+    if (!mk) {
+      if (r) miss("event has no market", `${evSlug}: ${JSON.stringify(r).slice(0, 200)}`);
+      continue;
+    }
+    const st = await client.markets.settlement(mk.slug).catch((e) => {
+      miss("settlement lookup failed", `${mk.slug}: ${(e as Error).message}`);
+      return null;
+    });
+    // deno-lint-ignore no-explicit-any
+    const sa = st as any;
+    const v = Number(sa?.settlementPrice?.value ?? sa?.settlementPrice ?? sa?.settlement?.settlementPrice?.value ?? sa?.value);
+    if (!Number.isFinite(v)) {
+      if (st) miss("settlement unreadable", `${mk.slug}: ${JSON.stringify(st).slice(0, 200)}`);
+      continue;
+    }
     const yesWon = v >= 0.5;
     const ok = yesWon === (went === longIs);
     if (ok) agree += 1;
@@ -384,7 +413,13 @@ async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | n
     longChecked = { side: longIs, note: `confirmed by settlements: ${note}` };
     return { ok: true, note: longChecked.note };
   }
-  return { ok: null, note: `not confirmed yet (${agree} settled window${agree === 1 ? "" : "s"} checked${note ? `: ${note}` : ""})` };
+  const whyText = Object.entries(why)
+    .map(([k, n]) => `${k} ×${n}`)
+    .join(", ");
+  return {
+    ok: null,
+    note: `not confirmed yet (${agree} settled window${agree === 1 ? "" : "s"} checked${note ? `: ${note}` : ""}${whyText ? `; skipped: ${whyText}` : ""}${firstErr ? `; e.g. ${firstErr}` : ""})`,
+  };
 }
 
 /** Cost of one share of `side` now (0–1). The book is quoted in YES prices: NO costs 1 − the best YES bid. */
@@ -559,10 +594,11 @@ async function decideWindow(start: number) {
     return;
   }
 
-  // Never bet with the YES side unconfirmed (live) or contradicted (either mode).
+  // Never bet when real settlements contradict the YES side. Not yet confirmed (nothing settled to check) → bet on
+  // the market's own settle rule, and note it on the bet.
   const chk = await checkLong(start, market.longIs).catch((e) => ({ ok: null, note: (e as Error).message }));
-  if (chk.ok === false || (chk.ok === null && cfg.mode === "live")) {
-    await skip(start, `Jev: ${d.kind} → ${d.side}; market ${market.slug} found (YES = ${market.longIs}, ${lastHow}) but ${chk.ok === false ? "" : "waiting: "}${chk.note}`.slice(0, 700));
+  if (chk.ok === false) {
+    await skip(start, `Jev: ${d.kind} → ${d.side}; market ${market.slug} found (YES = ${market.longIs}, ${lastHow}) but ${chk.note}`.slice(0, 700));
     await sql`update fadebot_bets5 set regime = ${regLabel}, kind = ${d.kind} where window_start = ${start}`;
     return;
   }
@@ -595,9 +631,10 @@ async function decideWindow(start: number) {
     }
   } else if (stake > 0 && price && price > 0) shares = stake / price;
   await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, jev_sure, side, step, stake, price, shares, fees,
-      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id, regime, kind)
+      limit_order_id, limit_price, limit_shares, limit_filled, open_ref, order_id, regime, kind, reason)
     values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.sure}, ${d.side}, 0, ${stake}, ${price ?? 0},
-      ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId}, ${regLabel}, ${d.kind})
+      ${shares}, ${fees}, ${limitId}, ${cfg.limitPrice}, ${cfg.limitShares}, 0, ${openRef}, ${orderId}, ${regLabel}, ${d.kind},
+      ${chk.ok ? null : `YES = ${market.longIs} from the ${lastHow}; ${chk.note}`.slice(0, 700)})
     on conflict (window_start) do nothing`;
 }
 
