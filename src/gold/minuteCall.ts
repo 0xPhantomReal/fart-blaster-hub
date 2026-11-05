@@ -13,8 +13,6 @@ export interface MinuteRead {
   /** Regime-adjusted chance of green: Jev's read as is, or flipped when Jev has been backwards lately. */
   pAdj?: number;
   regime?: RegimeInfo;
-  /** Taken from the Polymarket bot (BTC 5m at minute 3): the exact read it bets on. */
-  fromBot?: boolean;
 }
 
 // ── Regimes (keep in step with supabase/functions/_shared/fadeStrategy.ts; see flipParity.test.ts) ──

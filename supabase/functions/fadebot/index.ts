@@ -2,7 +2,10 @@
 //
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
-//   S … S+180: record BRTI each minute, then (3 minutes in) ask Jev whether the candle ends green or red.
+//   S … S+180: record BRTI each minute, then (3 minutes in) ask Jev whether the candle ends green or red, with
+//     exactly the website's "Jev at minute 3" question: the candle as the website builds it, the last 15 candles,
+//     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
+//     share one answer when they ask within a minute.
 //     Jev's call 51–70% sure (FADEBOT_FADE_MAX) → a $5 market order (FADEBOT_STAKE) on the OTHER side; otherwise
 //     no bet. Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
@@ -28,6 +31,16 @@ import {
   type Side,
 } from "../_shared/fadeStrategy.ts";
 import { authenticateCronRequest } from "../_shared/cron-auth.ts";
+import {
+  addTrade,
+  emptyFootprint,
+  flowContext,
+  flowSoFar,
+  loadTradeHistory,
+  marketContext,
+  niceStep,
+  type Footprint,
+} from "../_shared/jevContext.ts";
 
 const TF = 300; //        5-minute windows
 const READ_AT = 180; //   Jev reads the candle 3 minutes in
@@ -79,6 +92,12 @@ async function setup() {
     total_pnl double precision not null default 0, peak double precision not null default 0,
     worst_drawdown double precision not null default 0, trades int not null default 0, wins int not null default 0)`;
   await sql`insert into fadebot_state5 (id) values (1) on conflict (id) do nothing`;
+  // Order flow, as the website builds it: Coinbase trades → a footprint per 5-minute candle (with 30-second slices).
+  await sql`create table if not exists fadebot_flow (time bigint primary key, fp jsonb not null)`;
+  await sql`alter table fadebot_flow enable row level security`;
+  await sql`alter table fadebot_state5 add column if not exists flow_until double precision`;
+  await sql`alter table fadebot_state5 add column if not exists flow_from double precision`;
+  await sql`alter table fadebot_state5 add column if not exists flow_step double precision`;
   // Every 30-second Jev read (bet or not), and how the window ended: Jev's record → the regime.
   await sql`create table if not exists fadebot_reads5 (
     window_start bigint primary key, p_green double precision, move double precision, open_ref double precision,
@@ -496,6 +515,89 @@ async function settledSide(m: WindowMarket): Promise<Side | null> {
   }
 }
 
+// ── The website's read: same candles, context and order flow ──────────
+
+/** BTC 5m candles from the gold function (the same history the website loads), oldest first. */
+async function closedCandles(before: number, days: number): Promise<Candle[]> {
+  const r = await gold<{ candles: Candle[] }>({ action: "history", market: "btc", resolution: 5, from: before - days * 86400, to: before });
+  return r.candles.filter((c) => c.time + TF <= before).sort((a, b) => a.time - b.time);
+}
+
+/** Add new Coinbase trades to the stored footprints (every run). Footprints are continuous from `flow_from`. */
+async function updateFlow(now: number, atr: number | null) {
+  const sql = db();
+  const st = (await sql`select flow_until, flow_from, flow_step from fadebot_state5 where id = 1`)[0] ?? {};
+  let step = st.flow_step as number | null;
+  if (!step) {
+    if (!atr) return;
+    step = niceStep(atr);
+    await sql`update fadebot_state5 set flow_step = ${step} where id = 1`;
+  }
+  const backfill = now - 22 * TF; // the website keeps 20+ candles of order flow
+  const until = st.flow_until as number | null;
+  const gap = !until || until < backfill;
+  const from = gap ? backfill : until;
+  if (now - from < 1) return;
+  const fps = new Map<number, Footprint>();
+  const first = Math.floor(from / TF) * TF;
+  for (const r of await sql`select time, fp from fadebot_flow where time >= ${first}`) fps.set(Number(r.time), r.fp as Footprint);
+  if (gap) for (const t of [...fps.keys()]) fps.delete(t); // starting over: drop partial candles
+  const touched = new Set<number>();
+  const ok = await loadTradeHistory(
+    (after) =>
+      gold<{ trades: [number, number, number, number, number][]; minId: number | null; maxId: number | null }>({
+        action: "trades",
+        market: "btc",
+        after,
+      }),
+    from,
+    now,
+    (t) => {
+      const time = Math.floor(t.t / TF) * TF;
+      let fp = fps.get(time);
+      if (!fp) fps.set(time, (fp = emptyFootprint(time, step!)));
+      addTrade(fp, t.p, t.s, t.buy, t.t);
+      touched.add(time);
+    },
+    () => {},
+    4,
+    400,
+  );
+  if (!ok) {
+    // Too many trades to catch up: start again from now.
+    await sql`update fadebot_state5 set flow_until = ${now}, flow_from = ${now} where id = 1`;
+    return;
+  }
+  for (const t of touched) {
+    await sql`insert into fadebot_flow (time, fp) values (${t}, ${sql.json(fps.get(t)! as unknown as Parameters<typeof sql.json>[0])})
+      on conflict (time) do update set fp = excluded.fp`;
+  }
+  await sql`update fadebot_state5 set flow_until = ${now}, flow_from = ${gap ? from : st.flow_from ?? from} where id = 1`;
+  await sql`delete from fadebot_flow where time < ${Math.floor(now - 2 * 86400)}`;
+}
+
+/** Stored footprints that are complete (inside the continuous stretch), by candle time. */
+async function footprintsFrom(since: number): Promise<Map<number, Footprint>> {
+  const sql = db();
+  const st = (await sql`select flow_from from fadebot_state5 where id = 1`)[0];
+  const okFrom = st?.flow_from ? Math.ceil(Number(st.flow_from) / TF) * TF : Infinity;
+  const out = new Map<number, Footprint>();
+  for (const r of await sql`select time, fp from fadebot_flow where time >= ${Math.max(since, okFrom)}`) {
+    out.set(Number(r.time), r.fp as Footprint);
+  }
+  return out;
+}
+
+/** Bitcoin volume per candle (Coinbase), like the website's context. */
+async function volumes(from: number, to: number): Promise<Map<number, number> | undefined> {
+  try {
+    const r = await gold<{ volume: { time: number; volume: number }[] }>({ action: "volume", market: "btc", from, to, granularity: TF });
+    return new Map(r.volume.map((v) => [v.time, v.volume]));
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Regime: Jev's recent record at the read ─────────────────────────
 
 /** Fill in how recent windows ended (from the recorded final-minute BRTI average), then return Jev's hits. */
@@ -544,28 +646,60 @@ async function decideWindow(start: number) {
   const cfg = settings();
   const before = await period(start - 60);
   if (!before || before.n < 20) return skip(start, "no price to beat (the minute before the window wasn't recorded)");
-  // The candle so far: the three recorded minutes (the last one ends at the read).
+  // The candle so far, built the way the website builds it from BRTI ticks: it opens at the last price before the
+  // window (the previous candle's close); high/low/close come from the ticks since. Polymarket's price to beat (the
+  // average of the minute before) is kept separately for settling.
   const mins = (await Promise.all([0, 60, 120].map((o) => period(start + o)))).filter(
     (x): x is NonNullable<typeof x> => !!x && x.n >= 3,
   );
   const last = await period(start + 120);
   if (!last || last.n < 3) return skip(start, "no prices recorded in the third minute");
   const openRef = before.avg;
+  const pageOpen = before.last;
   const forming: Candle = {
     time: start,
-    open: openRef,
-    high: Math.max(openRef, ...mins.map((x) => x.high)),
-    low: Math.min(openRef, ...mins.map((x) => x.low)),
+    open: pageOpen,
+    high: Math.max(...mins.map((x) => x.high)),
+    low: Math.min(...mins.map((x) => x.low)),
     close: last.last,
   };
-  const hist = await gold<{ candles: Candle[] }>({ action: "history", market: "btc", resolution: 5, from: start - 86400, to: start });
-  const closed = hist.candles.filter((c) => c.time + TF <= start);
-  const atr = atrByTime(closed).get(closed[closed.length - 1]?.time);
+  const closed = await closedCandles(start, 8);
+  const atrs = atrByTime(closed.slice(Math.max(0, closed.length - 700)));
+  const atr = atrs.get(start - TF) ?? null;
   const sd = bodySd(closed);
   if (!atr || !sd) return skip(start, "not enough candle history");
-  const state = flipState({ forming, secondsLeft: start + TF - Date.now() / 1000, tfSeconds: TF, atr, sd, previous: closed.slice(-15) });
-  if (!state) return skip(start, "price exactly at the price to beat");
-  const { pFlip } = await gold<{ pFlip: number }>({ action: "flip", market: "btc", timeframeMin: 5, state, slotKey: `bot:s${READ_AT}:${start}` });
+  const state = flipState({ forming, secondsLeft: TF - READ_AT, tfSeconds: TF, atr, sd, previous: closed.slice(-15) });
+  if (!state) return skip(start, "price exactly at the candle's open");
+  // The website's extras: market context, recent order flow, and this candle's order flow so far.
+  await updateFlow(Date.now() / 1000, atr).catch((e) => console.error("order flow:", (e as Error).message));
+  const fps = await footprintsFrom(start - 25 * TF).catch(() => new Map<number, Footprint>());
+  const ctx = marketContext({
+    closed,
+    forTime: start,
+    tfSeconds: TF,
+    atr,
+    market: "btc",
+    volume: await volumes(start - 30 * TF, start),
+  });
+  const recentFlow = flowContext(closed, fps, start, TF, atr);
+  const nowFlow = flowSoFar(
+    fps.get(start),
+    READ_AT,
+    [1, 2, 3, 4, 5, 6].map((k) => fps.get(start - k * TF)),
+  );
+  const extras = {
+    ...(ctx ? { market_context: ctx } : {}),
+    ...(recentFlow ? { order_flow_recent_candles: recentFlow } : {}),
+    ...(nowFlow ? { order_flow_this_candle_so_far: nowFlow } : {}),
+  };
+  // Same request key as the website's "Jev at minute 3": if both ask within a minute, they share one answer.
+  const { pFlip } = await gold<{ pFlip: number }>({
+    action: "flip",
+    market: "btc",
+    timeframeMin: 5,
+    state: { ...state, ...extras },
+    slotKey: `v2:m${READ_AT / 60}:${start}`,
+  });
   const move = forming.close - forming.open;
   const pGreen = greenFromFlip(move, pFlip);
   await sql`insert into fadebot_reads5 (window_start, p_green, move, open_ref) values (${start}, ${pGreen}, ${move}, ${openRef})
@@ -712,6 +846,7 @@ async function run() {
     const { ticks, source } = await record(from + 58);
     await savePeriod(from, from + 60, ticks, source);
     done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
+    await updateFlow(Date.now() / 1000, null).catch(() => {});
   } else if (m <= 2) {
     // Minutes 1–3 of the window, then (at 3:00) Jev's read and the bet.
     const from = start + m * 60;
@@ -719,6 +854,7 @@ async function run() {
     const { ticks, source } = await record(until);
     await savePeriod(from, from + 60, ticks, source);
     done.push(`recorded minute ${m + 1} (${ticks.length} ticks from ${source})`);
+    if (m < 2) await updateFlow(Date.now() / 1000, null).catch(() => {});
     if (m === 2) {
       await decideWindow(start).catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)));
       done.push("decided");
@@ -726,7 +862,17 @@ async function run() {
   }
   await settle();
   await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
-  if (m === 3) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
+  if (m === 3) {
+    await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
+    // First run: work out the footprint step from the ATR, then keep the order flow current.
+    const st = (await db()`select flow_step from fadebot_state5 where id = 1`)[0];
+    let atr: number | null = null;
+    if (!st?.flow_step) {
+      const closed = await closedCandles(start, 2).catch(() => []);
+      atr = atrByTime(closed).get(closed[closed.length - 1]?.time) ?? null;
+    }
+    await updateFlow(Date.now() / 1000, atr).catch((e) => console.error("order flow:", (e as Error).message));
+  }
   return done;
 }
 

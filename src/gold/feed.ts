@@ -770,28 +770,6 @@ export async function fadeBotStatus(): Promise<FadeBotStatus | null> {
   return (await res.json()) as FadeBotStatus;
 }
 
-/** The bot's own Jev read for one window (null until it has read it). */
-export async function fadeBotRead(
-  window: number,
-): Promise<{ p_green: number; move: number; open_ref: number } | null> {
-  if (!FN_URL) return null;
-  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(ANON_KEY
-        ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
-        : {}),
-    },
-    body: JSON.stringify({ action: "read", window }),
-  }).catch(() => null);
-  if (!res || !res.ok) return null;
-  const j = (await res.json().catch(() => null)) as {
-    read?: { p_green: number; move: number; open_ref: number } | null;
-  } | null;
-  return j?.read ?? null;
-}
-
 /** Which Polymarket market the bot would trade right now, and what its search saw (read-only). */
 export async function fadeBotFindMarket(): Promise<
   | {
