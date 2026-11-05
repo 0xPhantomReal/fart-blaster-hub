@@ -39,7 +39,7 @@ export function FadeBotPanel() {
             ? `${cfg.readAt} seconds`
             : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
         in. When its
-        call is {Math.round((cfg.fadeMin ?? 0.7) * 100)}% to{" "}
+        call is {Math.round((cfg.fadeMin ?? 0.5) * 100)}% to{" "}
         {Math.round((cfg.fadeMax ?? 0.9) * 100)}%
         sure (hold or flip), the bot places a ${cfg.marketBet} market order on
         the <b>other</b> side. Calls outside that range: no bet. Same stake

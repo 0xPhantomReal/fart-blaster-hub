@@ -80,7 +80,7 @@ export function fadeCallDecision(
   pGreen: number,
   move: number,
   max = 0.9,
-  min = 0.7,
+  min = 0.5,
 ): { side: Side; sure: number; kind: "fade-hold" | "fade-flip" } | null {
   if (pGreen === 0.5) return null;
   const sure = Math.max(pGreen, 1 - pGreen);
