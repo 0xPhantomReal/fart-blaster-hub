@@ -2,8 +2,8 @@
 //
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
-//   S … S+180: record BRTI each minute, then (3 minutes in) ask Jev whether the candle ends green or red, with
-//     exactly the website's "Jev at minute 3" question: the candle as the website builds it, the last 15 candles,
+//   S … S+60·N: record BRTI, then (FADEBOT_READ_MIN = N minutes in, default 1) ask Jev whether the candle ends green or red, with
+//     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 15 candles,
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
 //     Jev's call 51–70% sure (FADEBOT_FADE_MAX) → a $5 market order (FADEBOT_STAKE) on the OTHER side; otherwise
@@ -43,7 +43,9 @@ import {
 } from "../_shared/jevContext.ts";
 
 const TF = 300; //        5-minute windows
-const READ_AT = 180; //   Jev reads the candle 3 minutes in
+// Jev reads the candle this many minutes in (FADEBOT_READ_MIN: 1, 2 or 3; default 1).
+const READ_MIN = Math.min(3, Math.max(1, Math.round(Number(Deno.env.get("FADEBOT_READ_MIN") || 1))));
+const READ_AT = READ_MIN * 60;
 const env = (k: string) => Deno.env.get(k) ?? "";
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -639,7 +641,7 @@ async function skip(start: number, reason: string) {
     on conflict (window_start) do nothing`;
 }
 
-/** 3 minutes into window `start`: ask Jev; if its call is 51–70% sure, a $5 market order on the other side. */
+/** READ_MIN minutes into window `start`: ask Jev; if its call is 51–70% sure, a $5 market order on the other side. */
 async function decideWindow(start: number) {
   const sql = db();
   if ((await sql`select 1 from fadebot_bets5 where window_start = ${start}`).length) return;
@@ -649,11 +651,12 @@ async function decideWindow(start: number) {
   // The candle so far, built the way the website builds it from BRTI ticks: it opens at the last price before the
   // window (the previous candle's close); high/low/close come from the ticks since. Polymarket's price to beat (the
   // average of the minute before) is kept separately for settling.
-  const mins = (await Promise.all([0, 60, 120].map((o) => period(start + o)))).filter(
+  const offsets = Array.from({ length: READ_MIN }, (_, i) => i * 60);
+  const mins = (await Promise.all(offsets.map((o) => period(start + o)))).filter(
     (x): x is NonNullable<typeof x> => !!x && x.n >= 3,
   );
-  const last = await period(start + 120);
-  if (!last || last.n < 3) return skip(start, "no prices recorded in the third minute");
+  const last = await period(start + READ_AT - 60);
+  if (!last || last.n < 3) return skip(start, `no prices recorded in minute ${READ_MIN}`);
   const openRef = before.avg;
   const pageOpen = before.last;
   const forming: Candle = {
@@ -692,7 +695,7 @@ async function decideWindow(start: number) {
     ...(recentFlow ? { order_flow_recent_candles: recentFlow } : {}),
     ...(nowFlow ? { order_flow_this_candle_so_far: nowFlow } : {}),
   };
-  // Same request key as the website's "Jev at minute 3": if both ask within a minute, they share one answer.
+  // Same request key as the website's "Jev at minute N": if both ask within a minute, they share one answer.
   const { pFlip } = await gold<{ pFlip: number }>({
     action: "flip",
     market: "btc",
@@ -704,7 +707,7 @@ async function decideWindow(start: number) {
   const pGreen = greenFromFlip(move, pFlip);
   await sql`insert into fadebot_reads5 (window_start, p_green, move, open_ref) values (${start}, ${pGreen}, ${move}, ${openRef})
     on conflict (window_start) do nothing`;
-  // Regime is only shown for reference now (Jev's recent record at 3 minutes); it doesn't change the bet.
+  // Regime is only shown for reference now (Jev's recent record at the read); it doesn't change the bet.
   const reg = regimeOf(await jevHits(start), start, TF);
   const regLabel = `${reg.regime === "normal" ? "Jev right" : reg.regime === "backwards" ? "Jev backwards" : "unclear"} (${reg.right}/${reg.n})`;
   const jevSide = pGreen > 0.5 ? "up" : "down";
@@ -847,23 +850,24 @@ async function run() {
     await savePeriod(from, from + 60, ticks, source);
     done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
     await updateFlow(Date.now() / 1000, null).catch(() => {});
-  } else if (m <= 2) {
-    // Minutes 1–3 of the window, then (at 3:00) Jev's read and the bet.
+  } else if (m < READ_MIN) {
+    // The minutes before the read, then (at READ_MIN:00) Jev's read and the bet.
     const from = start + m * 60;
-    const until = m === 2 ? start + READ_AT : from + 58;
+    const last = m === READ_MIN - 1;
+    const until = last ? start + READ_AT : from + 58;
     const { ticks, source } = await record(until);
     await savePeriod(from, from + 60, ticks, source);
     done.push(`recorded minute ${m + 1} (${ticks.length} ticks from ${source})`);
-    if (m < 2) await updateFlow(Date.now() / 1000, null).catch(() => {});
-    if (m === 2) {
+    if (!last) await updateFlow(Date.now() / 1000, null).catch(() => {});
+    if (last) {
       await decideWindow(start).catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)));
       done.push("decided");
     }
   }
   await settle();
   await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
-  if (m === 3) {
-    await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
+  if (m >= READ_MIN && m <= 3) {
+    if (m === 3) await jevHits(Math.floor(now)).catch(() => []); // keep outcomes filled in for the page
     // First run: work out the footprint step from the ATR, then keep the order flow current.
     const st = (await db()`select flow_step from fadebot_state5 where id = 1`)[0];
     let atr: number | null = null;
@@ -931,7 +935,7 @@ Deno.serve(async (req) => {
       await setup();
       const start = Math.floor(Date.now() / 1000 / TF) * TF;
       const { ticks, source } = await record(Date.now() / 1000 + 5);
-      for (const o of [0, 60, 120]) await savePeriod(start + o, start + o + 60, ticks.map((t) => ({ ...t, t: start + o + 1 })), source);
+      for (let o = 0; o < READ_AT; o += 60) await savePeriod(start + o, start + o + 60, ticks.map((t) => ({ ...t, t: start + o + 1 })), source);
       await decideWindow(start);
       await dryLimitCheck();
       await settle();
