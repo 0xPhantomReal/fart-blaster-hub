@@ -1,6 +1,5 @@
 // Backtest of the Polymarket bot's EMA rule on past candles, from the page's "Jev at …" reads:
-//   Jev calls a flip → bet with Jev's call (the flip)
-//   Jev calls a hold up with the fast EMA above the slow EMA → bet up; hold down with fast below slow → bet down
+//   bet with Jev's call (hold or flip) only when the EMAs agree: up with the fast EMA above the slow, down below
 // EMAs are the TV indicator's (9/21, Pine's EMA) on this chart's candles, taken live at the read: the closed-candle
 // EMA moved by the candle's price at the read (its open + the move so far), as the chart draws the live lines.
 
@@ -20,10 +19,12 @@ export interface Tally {
 }
 export interface Backtest {
   bot: Tally; //       every bet the rule makes
-  flips: Tally; //     of which: flip calls, bet with Jev
+  flips: Tally; //     of which: flip calls that agreed with the EMAs
   holdsEma: Tally; //  of which: hold calls that agreed with the EMAs
   holdsAll: Tally; //  every hold call followed, no EMA check (for comparison)
+  flipsAll: Tally; //  every flip call followed, no EMA check (for comparison)
   skippedHolds: number; // hold calls skipped because the EMAs disagreed
+  skippedFlips: number; // flip calls skipped because the EMAs disagreed
 }
 
 /** EMA fast/slow at the read of each candle, by candle time. `closes` = all chart candles' closes, oldest first. */
@@ -63,7 +64,9 @@ export function backtest(
     flips: t(),
     holdsEma: t(),
     holdsAll: t(),
+    flipsAll: t(),
     skippedHolds: 0,
+    skippedFlips: 0,
   };
   const add = (x: Tally, up: boolean, y: 0 | 1) => {
     x.n += 1;
@@ -75,17 +78,17 @@ export function backtest(
     if (!e) continue; // no EMA for that candle: leave it out of every row
     const y = r.y;
     const jevUp = r.pJev > 0.5;
-    const greenNow = r.move > 0;
-    if (jevUp !== greenNow) {
-      add(out.flips, jevUp, y); // flip → with Jev's call
-      add(out.bot, jevUp, y);
+    const flip = jevUp !== r.move > 0;
+    const agree = (jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow);
+    if (!flip) add(out.holdsAll, jevUp, y);
+    else add(out.flipsAll, jevUp, y);
+    if (!agree) {
+      if (flip) out.skippedFlips += 1;
+      else out.skippedHolds += 1;
       continue;
     }
-    add(out.holdsAll, jevUp, y);
-    if ((jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow)) {
-      add(out.holdsEma, jevUp, y);
-      add(out.bot, jevUp, y);
-    } else out.skippedHolds += 1;
+    add(out.bot, jevUp, y); // with Jev's call
+    add(flip ? out.flips : out.holdsEma, jevUp, y);
   }
   return out;
 }

@@ -7,9 +7,9 @@
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
 //     The EMA rule, at that read:
-//       Jev calls a FLIP (against the candle's color so far) → bet WITH Jev's call (the flip)
-//       Jev calls a HOLD up and the fast EMA (9) is above the slow EMA (21) → bet up
-//       Jev calls a HOLD down and the fast EMA is below the slow EMA → bet down
+//       bet WITH Jev's call (hold or flip) only when the EMAs agree with it:
+//       Jev calls up and the fast EMA (9) is above the slow EMA (21) → bet up
+//       Jev calls down and the fast EMA is below the slow EMA → bet down
 //       otherwise no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
 //     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
 //     closes. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
@@ -891,7 +891,7 @@ async function decideWindow(start: number) {
   const jevSide = pGreen > 0.5 ? "up" : "down";
   const jevSure = Math.round(Math.max(pGreen, 1 - pGreen) * 100);
   const jevKind = move === 0 || (pGreen > 0.5) === move > 0 ? "holds" : "flip";
-  // The EMA rule: flip call → with Jev; hold call → only with the EMAs (fast over slow for up, under for down).
+  // The EMA rule: bet with Jev's call (hold or flip) only when the EMAs agree (fast over slow for up, under for down).
   let ema: { fast: number | null; slow: number | null } = { fast: null, slow: null };
   try {
     ema = await emasAt(cfg.emaTf, closed, forming);

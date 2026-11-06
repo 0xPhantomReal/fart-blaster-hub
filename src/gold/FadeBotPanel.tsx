@@ -70,11 +70,10 @@ export function FadeBotPanel({
           : cfg.readAt < 60
             ? `${cfg.readAt} seconds`
             : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
-        in. If Jev calls a <b>flip</b>, the bot bets with Jev's call. If Jev
-        calls a <b>hold</b>, it bets with Jev only when the {cfg.emaTf ?? 5}m
-        EMAs agree: up when the fast EMA is above the slow one, down when it's
-        below. Otherwise no bet. Each bet is a limit order for {cfg.limitShares}{" "}
-        shares at {Math.round(cfg.limitPrice * 100)}¢ ($
+        in. The bot bets with Jev's call, hold or flip, only when the{" "}
+        {cfg.emaTf ?? 5}m EMAs agree: up when the fast EMA is above the slow
+        one, down when it's below. Otherwise no bet. Each bet is a limit order
+        for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
         the window closes
         {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
@@ -162,17 +161,19 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "flip-follow"
-                      ? "flip → with Jev"
-                      : b.kind === "flip-fade"
-                        ? "flip → other side"
-                        : b.kind === "hold-ema"
-                          ? "holds + EMAs"
-                          : b.kind === "fade-hold"
-                            ? "holds (faded)"
-                            : b.kind === "fade-flip"
-                              ? "flip (faded)"
-                              : "holds"}{" "}
+                    {b.kind === "flip-ema"
+                      ? "flip + EMAs"
+                      : b.kind === "flip-follow"
+                        ? "flip → with Jev"
+                        : b.kind === "flip-fade"
+                          ? "flip → other side"
+                          : b.kind === "hold-ema"
+                            ? "holds + EMAs"
+                            : b.kind === "fade-hold"
+                              ? "holds (faded)"
+                              : b.kind === "fade-flip"
+                                ? "flip (faded)"
+                                : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}

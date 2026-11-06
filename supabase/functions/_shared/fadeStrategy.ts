@@ -14,13 +14,20 @@ export function fib(step: number): number {
 }
 
 /** One step up the Fibonacci sequence after a loss, two back after a win. */
-export function nextStep(step: number, won: boolean, maxStep: number | null): number {
+export function nextStep(
+  step: number,
+  won: boolean,
+  maxStep: number | null,
+): number {
   const s = won ? Math.max(0, step - 2) : step + 1;
   return maxStep === null ? s : Math.min(s, maxStep);
 }
 
 /** `move` = price now − price to beat. `pGreen` = Jev's chance it closes Up. */
-export function holdDecision(pGreen: number, move: number): { side: Side; sure: number } | null {
+export function holdDecision(
+  pGreen: number,
+  move: number,
+): { side: Side; sure: number } | null {
   if (move === 0 || pGreen === 0.5) return null;
   const current: Side = move > 0 ? "up" : "down";
   const jev: Side = pGreen > 0.5 ? "up" : "down";
@@ -42,11 +49,23 @@ export interface JevHit {
 }
 
 /** The regime before the candle opening at `now`: Jev's hits among the last `n` reads (only recent ones count). */
-export function regimeOf(hits: JevHit[], now: number, tfSec: number, n = REGIME_N): { regime: Regime; right: number; n: number } {
-  const recent = hits.filter((h) => h.time < now && h.time >= now - 3 * n * tfSec).slice(-n);
+export function regimeOf(
+  hits: JevHit[],
+  now: number,
+  tfSec: number,
+  n = REGIME_N,
+): { regime: Regime; right: number; n: number } {
+  const recent = hits
+    .filter((h) => h.time < now && h.time >= now - 3 * n * tfSec)
+    .slice(-n);
   const right = recent.filter((h) => h.hit).length;
   const k = recent.length;
-  const regime: Regime = k < REGIME_MIN || right * 2 === k ? "unsure" : right * 2 > k ? "normal" : "backwards";
+  const regime: Regime =
+    k < REGIME_MIN || right * 2 === k
+      ? "unsure"
+      : right * 2 > k
+        ? "normal"
+        : "backwards";
   return { regime, right, n: k };
 }
 
@@ -59,7 +78,11 @@ export function regimeDecision(
   pGreen: number,
   move: number,
   regime: Regime,
-): { side: Side; sure: number; kind: "hold" | "fade-hold" | "fade-flip" } | null {
+): {
+  side: Side;
+  sure: number;
+  kind: "hold" | "fade-hold" | "fade-flip";
+} | null {
   if (move === 0 || pGreen === 0.5) return null;
   const current: Side = move > 0 ? "up" : "down";
   const jev: Side = pGreen > 0.5 ? "up" : "down";
@@ -87,32 +110,46 @@ export function fadeCallDecision(
   if (sure > max + 1e-9 || sure < min - 1e-9) return null;
   const jev: Side = pGreen > 0.5 ? "up" : "down";
   const current: Side | null = move > 0 ? "up" : move < 0 ? "down" : null;
-  return { side: jev === "up" ? "down" : "up", sure, kind: current === null || jev === current ? "fade-hold" : "fade-flip" };
+  return {
+    side: jev === "up" ? "down" : "up",
+    sure,
+    kind: current === null || jev === current ? "fade-hold" : "fade-flip",
+  };
 }
 
 /**
- * The EMA rule (Jev's read + the chart's fast/slow EMAs):
- *   Jev calls a FLIP (its call is against the candle's color at the read) → bet WITH Jev's call (the flip)
- *   Jev calls a HOLD up   and fast EMA > slow EMA → bet up
- *   Jev calls a HOLD down and fast EMA < slow EMA → bet down
- *   anything else (hold against the EMAs, EMAs equal or unknown, 50% read, candle exactly flat) → no bet
+ * The EMA rule (Jev's read + the chart's fast/slow EMAs): bet WITH Jev's call — hold or flip — only when the EMAs
+ * agree with it:
+ *   Jev calls up   and fast EMA > slow EMA → bet up
+ *   Jev calls down and fast EMA < slow EMA → bet down
+ *   anything else (EMAs against Jev, equal or unknown, 50% read, candle exactly flat) → no bet
+ * `kind` says whether the call was a hold (with the candle's color at the read) or a flip (against it).
  */
 export function emaRuleDecision(
   pGreen: number,
   move: number,
   emaFast: number | null,
   emaSlow: number | null,
-): { side: Side; sure: number; kind: "flip-follow" | "hold-ema" } | { skip: string } {
+):
+  | { side: Side; sure: number; kind: "flip-ema" | "hold-ema" }
+  | { skip: string } {
   if (pGreen === 0.5) return { skip: "no call (50%)" };
-  if (move === 0) return { skip: "candle exactly at its open, so neither a hold nor a flip" };
+  if (move === 0)
+    return { skip: "candle exactly at its open, so neither a hold nor a flip" };
   const sure = Math.max(pGreen, 1 - pGreen);
   const jev: Side = pGreen > 0.5 ? "up" : "down";
-  const current: Side = move > 0 ? "up" : "down";
-  if (jev !== current) return { side: jev, sure, kind: "flip-follow" };
-  if (emaFast === null || emaSlow === null) return { skip: "EMAs not available" };
-  if (jev === "up" && emaFast > emaSlow) return { side: "up", sure, kind: "hold-ema" };
-  if (jev === "down" && emaFast < emaSlow) return { side: "down", sure, kind: "hold-ema" };
-  return { skip: `hold ${jev} but fast EMA is ${emaFast > emaSlow ? "above" : emaFast < emaSlow ? "below" : "equal to"} slow` };
+  const kind = jev === (move > 0 ? "up" : "down") ? "hold-ema" : "flip-ema";
+  const call = kind === "hold-ema" ? "hold" : "flip";
+  if (emaFast === null || emaSlow === null)
+    return { skip: "EMAs not available" };
+  if (
+    (jev === "up" && emaFast > emaSlow) ||
+    (jev === "down" && emaFast < emaSlow)
+  )
+    return { side: jev, sure, kind };
+  return {
+    skip: `${call} ${jev} but fast EMA is ${emaFast > emaSlow ? "above" : emaFast < emaSlow ? "below" : "equal to"} slow`,
+  };
 }
 
 /** Up wins when the closing reference is >= the opening one. */

@@ -105,8 +105,9 @@ export function FadeBacktestBox({
             </thead>
             <tbody>
               {row("Bot rule (all bets)", r.bot, true)}
-              {row("· flip calls, bet with Jev", r.flips)}
+              {row("· flip calls with the EMAs", r.flips)}
               {row("· hold calls with the EMAs", r.holdsEma)}
+              {row("Every flip call, no EMA check", r.flipsAll)}
               {row("Every hold call, no EMA check", r.holdsAll)}
             </tbody>
           </table>
@@ -115,9 +116,10 @@ export function FadeBacktestBox({
             {pastIsLive
               ? " (this browser's own live reads: 30s can't be replayed from history)"
               : " (replayed history plus live reads)"}
-            . {r.skippedHolds} hold calls skipped because the EMAs disagreed.
-            "Won" = the candle closed the bet's color. Each bet is {limitShares}{" "}
-            shares at {Math.round(limitPrice * 100)}¢: a win pays{" "}
+            . Skipped because the EMAs disagreed: {r.skippedFlips} flip calls,{" "}
+            {r.skippedHolds} hold calls. "Won" = the candle closed the bet's
+            color. Each bet is {limitShares} shares at{" "}
+            {Math.round(limitPrice * 100)}¢: a win pays{" "}
             {Math.round((1 - limitPrice) * 100)}¢ a share and a loss costs{" "}
             {Math.round(limitPrice * 100)}¢, so it needs to win more than{" "}
             {Math.round(limitPrice * 100)}% of filled orders. A limit order only
