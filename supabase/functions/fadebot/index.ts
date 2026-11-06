@@ -11,7 +11,9 @@
 //       Jev calls up and the fast EMA (9) is above the slow EMA (21) → bet up
 //       Jev calls down and the fast EMA is below the slow EMA → bet down
 //       …and only when the EMAs are at least $60 apart (FADEBOT_EMA_GAP); otherwise no bet.
-//       Flip calls also need the regime to be "Jev right" (FADEBOT_FLIP_REGIME=off to drop that). Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
+//       Flip calls also need the regime to be "Jev right" (FADEBOT_FLIP_REGIME=off to drop that).
+//     EMAs under $60 apart: a HOLD call matching the last closed candle's color → bet AGAINST Jev's call;
+//       flips and other holds → no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
 //     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
 //     closes. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
@@ -908,7 +910,11 @@ async function decideWindow(start: number) {
     ema.fast === null || ema.slow === null ? "vs" : ema.fast > ema.slow ? ">" : ema.fast < ema.slow ? "<" : "="
   } slow ${fmt(ema.slow)}`;
   const jevTxt = `Jev: ${jevKind} → ${jevSide} (${jevSure}%)`;
-  const dd = emaRuleDecision(pGreen, move, ema.fast, ema.slow, cfg.emaGap);
+  // The last closed candle's color (for the close-EMAs rule), as the chart shows it.
+  const prev = closed[closed.length - 1];
+  const lastColor: Side | null =
+    !prev || prev.time !== start - TF ? null : prev.close > prev.open ? "up" : prev.close < prev.open ? "down" : null;
+  const dd = emaRuleDecision(pGreen, move, ema.fast, ema.slow, cfg.emaGap, lastColor);
   if ("skip" in dd) {
     await skip(start, `${jevTxt}; ${tvLabel}: ${dd.skip}: no bet`);
     await sql`update fadebot_bets5 set regime = ${regLabel}, tv15 = ${tvLabel} where window_start = ${start}`;

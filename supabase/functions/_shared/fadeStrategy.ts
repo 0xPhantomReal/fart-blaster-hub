@@ -118,21 +118,27 @@ export function fadeCallDecision(
 }
 
 /**
- * The EMA rule (Jev's read + the chart's fast/slow EMAs): bet WITH Jev's call — hold or flip — only when the EMAs
- * agree with it:
- *   Jev calls up   and fast EMA > slow EMA → bet up
- *   Jev calls down and fast EMA < slow EMA → bet down
- *   anything else (EMAs against Jev, equal or unknown, 50% read, candle exactly flat) → no bet
- * `kind` says whether the call was a hold (with the candle's color at the read) or a flip (against it).
+ * The EMA rule (Jev's read + the chart's fast/slow EMAs).
+ * EMAs at least `minGap` apart (a trend):
+ *   bet WITH Jev's call (hold or flip) when the EMAs agree: up with fast > slow, down with fast < slow; else no bet
+ * EMAs closer than `minGap` (no clear trend):
+ *   a HOLD call whose color matches the last closed candle's color → bet AGAINST Jev's call
+ *   anything else (a flip call, or a hold that doesn't match the last candle) → no bet
+ * Always no bet on a 50% read or a candle exactly at its open.
  */
 export function emaRuleDecision(
   pGreen: number,
   move: number,
   emaFast: number | null,
   emaSlow: number | null,
-  minGap = 0, // the EMAs must be at least this far apart (in dollars)
+  minGap = 0, // the trend needs the EMAs at least this far apart (in dollars)
+  lastColor: Side | null = null, // the last closed candle: up = green, down = red, null = flat/unknown
 ):
-  | { side: Side; sure: number; kind: "flip-ema" | "hold-ema" }
+  | {
+      side: Side;
+      sure: number;
+      kind: "flip-ema" | "hold-ema" | "hold-fade-chop";
+    }
   | { skip: string } {
   if (pGreen === 0.5) return { skip: "no call (50%)" };
   if (move === 0)
@@ -141,11 +147,20 @@ export function emaRuleDecision(
   const jev: Side = pGreen > 0.5 ? "up" : "down";
   const kind = jev === (move > 0 ? "up" : "down") ? "hold-ema" : "flip-ema";
   const call = kind === "hold-ema" ? "hold" : "flip";
+  const color = (x: Side | null) =>
+    x === "up" ? "green" : x === "down" ? "red" : "flat";
   if (emaFast === null || emaSlow === null)
     return { skip: "EMAs not available" };
   const gap = Math.abs(emaFast - emaSlow);
-  if (gap < minGap - 1e-9)
-    return { skip: `EMAs only $${gap.toFixed(2)} apart (need $${minGap})` };
+  if (gap < minGap - 1e-9) {
+    const close = `EMAs only $${gap.toFixed(2)} apart (under $${minGap})`;
+    if (kind === "flip-ema") return { skip: `flip call with ${close}` };
+    if (lastColor !== jev)
+      return {
+        skip: `hold ${color(jev)} with ${close}, but the last candle was ${color(lastColor)}`,
+      };
+    return { side: jev === "up" ? "down" : "up", sure, kind: "hold-fade-chop" };
+  }
   if (
     (jev === "up" && emaFast > emaSlow) ||
     (jev === "down" && emaFast < emaSlow)

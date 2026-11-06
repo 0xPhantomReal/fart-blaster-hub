@@ -32,25 +32,38 @@ export function FadeBacktestBox({
   emaGap: number;
   flipNeedsRegime: boolean;
 }) {
-  const reads: Read[] = useMemo(
-    () =>
-      bars
-        .filter((b) => b.pMin !== undefined && b.minMove !== undefined)
-        .map((b) => ({
-          time: b.candle.time,
-          open: b.candle.open,
-          move: b.minMove!,
-          pJev: b.pMin!,
-          regime: b.minRegime,
-          y:
-            b.candle.close > b.candle.open
-              ? 1
-              : b.candle.close < b.candle.open
-                ? 0
-                : null,
-        })),
-    [bars],
-  );
+  const reads = useMemo((): Read[] => {
+    const colorAt = new Map(
+      bars.map((b) => [
+        b.candle.time,
+        b.candle.close > b.candle.open
+          ? (1 as const)
+          : b.candle.close < b.candle.open
+            ? (0 as const)
+            : null,
+      ]),
+    );
+    const tf =
+      bars.length > 1
+        ? bars[bars.length - 1].candle.time - bars[bars.length - 2].candle.time
+        : 300;
+    return bars
+      .filter((b) => b.pMin !== undefined && b.minMove !== undefined)
+      .map((b) => ({
+        time: b.candle.time,
+        open: b.candle.open,
+        move: b.minMove!,
+        pJev: b.pMin!,
+        regime: b.minRegime,
+        last: colorAt.get(b.candle.time - tf) ?? null,
+        y:
+          b.candle.close > b.candle.open
+            ? 1
+            : b.candle.close < b.candle.open
+              ? 0
+              : null,
+      }));
+  }, [bars]);
   const r = useMemo(() => {
     if (readSec === null || !reads.length) return null;
     return backtest(
@@ -114,6 +127,10 @@ export function FadeBacktestBox({
               {row("Bot rule (all bets)", r.bot, true)}
               {row("· flip calls with the EMAs", r.flips)}
               {row("· hold calls with the EMAs", r.holdsEma)}
+              {row(
+                `· EMAs under $${emaGap}: hold matching last candle, bet against`,
+                r.chop,
+              )}
               {row("Every flip call, no EMA check", r.flipsAll)}
               {row("Every hold call, no EMA check", r.holdsAll)}
             </tbody>

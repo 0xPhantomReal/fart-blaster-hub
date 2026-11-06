@@ -1,5 +1,6 @@
 // Backtest of the Polymarket bot's EMA rule on past candles, from the page's "Jev at …" reads:
-//   bet with Jev's call (hold or flip) only when the EMAs agree: up with the fast EMA above the slow, down below
+//   EMAs at least $gap apart: bet with Jev's call (hold or flip) when the EMAs agree (up: fast above slow)
+//   EMAs closer than that: a hold call matching the last candle's color → bet against Jev; else no bet
 // EMAs are the TV indicator's (9/21, Pine's EMA) on this chart's candles, taken live at the read: the closed-candle
 // EMA moved by the candle's price at the read (its open + the move so far), as the chart draws the live lines.
 
@@ -12,6 +13,7 @@ export interface Read {
   pJev: number; //   Jev's chance of green at the read
   y: 0 | 1 | null; // how the candle closed: 1 green, 0 red, null flat
   regime?: string; // the regime at the read: normal (Jev right) / backwards / unsure
+  last?: 0 | 1 | null; // the previous candle's color: 1 green, 0 red, null flat/unknown
 }
 
 export interface Tally {
@@ -22,6 +24,7 @@ export interface Backtest {
   bot: Tally; //       every bet the rule makes
   flips: Tally; //     of which: flip calls that agreed with the EMAs
   holdsEma: Tally; //  of which: hold calls that agreed with the EMAs
+  chop: Tally; //      of which: EMAs close, hold call matching the last candle → bet against Jev
   holdsAll: Tally; //  every hold call followed, no EMA check (for comparison)
   flipsAll: Tally; //  every flip call followed, no EMA check (for comparison)
   skippedHolds: number; // hold calls skipped because the EMAs disagreed
@@ -67,6 +70,7 @@ export function backtest(
     bot: t(),
     flips: t(),
     holdsEma: t(),
+    chop: t(),
     holdsAll: t(),
     flipsAll: t(),
     skippedHolds: 0,
@@ -84,11 +88,18 @@ export function backtest(
     const y = r.y;
     const jevUp = r.pJev > 0.5;
     const flip = jevUp !== r.move > 0;
-    const agree =
-      Math.abs(e.fast - e.slow) >= minGap - 1e-9 &&
-      ((jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow));
     if (!flip) add(out.holdsAll, jevUp, y);
     else add(out.flipsAll, jevUp, y);
+    if (Math.abs(e.fast - e.slow) < minGap - 1e-9) {
+      // EMAs close together: a hold matching the last candle's color → bet against Jev; else no bet
+      if (!flip && r.last === (jevUp ? 1 : 0)) {
+        add(out.chop, !jevUp, y);
+        add(out.bot, !jevUp, y);
+      } else if (flip) out.skippedFlips += 1;
+      else out.skippedHolds += 1;
+      continue;
+    }
+    const agree = (jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow);
     if (!agree) {
       if (flip) out.skippedFlips += 1;
       else out.skippedHolds += 1;
