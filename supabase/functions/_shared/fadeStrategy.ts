@@ -92,7 +92,7 @@ export function fadeCallDecision(
 
 /**
  * The EMA rule (Jev's read + the chart's fast/slow EMAs):
- *   Jev calls a FLIP (its call is against the candle's color at the read) → bet the opposite of Jev's call
+ *   Jev calls a FLIP (its call is against the candle's color at the read) → bet WITH Jev's call (the flip)
  *   Jev calls a HOLD up   and fast EMA > slow EMA → bet up
  *   Jev calls a HOLD down and fast EMA < slow EMA → bet down
  *   anything else (hold against the EMAs, EMAs equal or unknown, 50% read, candle exactly flat) → no bet
@@ -102,13 +102,13 @@ export function emaRuleDecision(
   move: number,
   emaFast: number | null,
   emaSlow: number | null,
-): { side: Side; sure: number; kind: "flip-fade" | "hold-ema" } | { skip: string } {
+): { side: Side; sure: number; kind: "flip-follow" | "hold-ema" } | { skip: string } {
   if (pGreen === 0.5) return { skip: "no call (50%)" };
   if (move === 0) return { skip: "candle exactly at its open, so neither a hold nor a flip" };
   const sure = Math.max(pGreen, 1 - pGreen);
   const jev: Side = pGreen > 0.5 ? "up" : "down";
   const current: Side = move > 0 ? "up" : "down";
-  if (jev !== current) return { side: current, sure, kind: "flip-fade" };
+  if (jev !== current) return { side: jev, sure, kind: "flip-follow" };
   if (emaFast === null || emaSlow === null) return { skip: "EMAs not available" };
   if (jev === "up" && emaFast > emaSlow) return { side: "up", sure, kind: "hold-ema" };
   if (jev === "down" && emaFast < emaSlow) return { side: "down", sure, kind: "hold-ema" };

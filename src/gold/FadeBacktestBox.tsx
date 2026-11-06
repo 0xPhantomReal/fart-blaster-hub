@@ -105,7 +105,7 @@ export function FadeBacktestBox({
             </thead>
             <tbody>
               {row("Bot rule (all bets)", r.bot, true)}
-              {row("· flip calls, bet the other side", r.flips)}
+              {row("· flip calls, bet with Jev", r.flips)}
               {row("· hold calls with the EMAs", r.holdsEma)}
               {row("Every hold call, no EMA check", r.holdsAll)}
             </tbody>
