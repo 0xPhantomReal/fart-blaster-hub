@@ -36,6 +36,7 @@ export function FadeBotPanel({
     limitPrice: number,
     limitShares: number,
     emaTf: number,
+    emaGap: number,
   ) => (
     <FadeBacktestBox
       bars={bars}
@@ -46,6 +47,7 @@ export function FadeBotPanel({
       limitPrice={limitPrice}
       limitShares={limitShares}
       emaTf={emaTf}
+      emaGap={emaGap}
     />
   );
   if (s === undefined) return null;
@@ -56,7 +58,7 @@ export function FadeBotPanel({
           Not running yet: deploy the <code>fadebot</code> function and schedule
           it every minute.
         </p>
-        {bt(30, 0.33, 15, 5)}
+        {bt(30, 0.33, 15, 5, 60)}
       </>
     );
   const st = s.state;
@@ -72,8 +74,12 @@ export function FadeBotPanel({
             : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
         in. The bot bets with Jev's call, hold or flip, only when the{" "}
         {cfg.emaTf ?? 5}m EMAs agree: up when the fast EMA is above the slow
-        one, down when it's below. Otherwise no bet. Each bet is a limit order
-        for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}¢ ($
+        one, down when it's below
+        {cfg.emaGap
+          ? `, and only when they're at least $${cfg.emaGap} apart`
+          : ""}
+        . Otherwise no bet. Each bet is a limit order for {cfg.limitShares}{" "}
+        shares at {Math.round(cfg.limitPrice * 100)}¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
         the window closes
         {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
@@ -214,7 +220,13 @@ export function FadeBotPanel({
         </tbody>
       </table>
       {s.pmHistory && <PmHistory s={s} readAt={cfg.readAt ?? 30} />}
-      {bt(cfg.readAt ?? 30, cfg.limitPrice, cfg.limitShares, cfg.emaTf ?? 5)}
+      {bt(
+        cfg.readAt ?? 30,
+        cfg.limitPrice,
+        cfg.limitShares,
+        cfg.emaTf ?? 5,
+        cfg.emaGap ?? 0,
+      )}
     </div>
   );
 }

@@ -750,6 +750,7 @@ export interface FadeBotStatus {
     fadeMin?: number;
     tv15?: boolean;
     emaTf?: number;
+    emaGap?: number;
     fadeMax?: number;
     readAt?: number;
   };

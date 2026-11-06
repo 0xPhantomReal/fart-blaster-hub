@@ -49,4 +49,29 @@ describe("EMA-rule backtest", () => {
       expect(side).toBe(exp);
     }
   });
+
+  it("skips bets when the EMAs are too close together", () => {
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      time: i * 300,
+      close: 100 + i,
+    }));
+    const reads: Read[] = [
+      { time: 40 * 300, open: 139, move: 2, pJev: 0.7, y: 1 },
+    ];
+    const emas = emasAtReads(candles, reads);
+    const e = emas.get(40 * 300)!;
+    const gap = e.fast - e.slow; // a few dollars on this series
+    expect(backtest(reads, emas, gap - 0.5).bot.n).toBe(1);
+    expect(backtest(reads, emas, gap + 0.5).bot.n).toBe(0);
+    expect(
+      "skip" in bot.emaRuleDecision(0.7, 2, e.fast, e.slow, gap + 0.5),
+    ).toBe(true);
+    expect(
+      bot.emaRuleDecision(0.7, 2, e.fast, e.slow, gap - 0.5),
+    ).toMatchObject({ side: "up" });
+    expect(bot.emaRuleDecision(0.3, -2, 100, 160, 60)).toMatchObject({
+      side: "down",
+    }); // exactly $60 apart
+    expect("skip" in bot.emaRuleDecision(0.3, -2, 100, 159.9, 60)).toBe(true); // $59.90 apart
+  });
 });

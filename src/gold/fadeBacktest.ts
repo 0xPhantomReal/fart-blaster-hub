@@ -57,6 +57,7 @@ export function emasAtReads(
 export function backtest(
   reads: Read[],
   emas: Map<number, { fast: number; slow: number }>,
+  minGap = 0, // the EMAs must be at least this many dollars apart
 ): Backtest {
   const t = (): Tally => ({ n: 0, wins: 0 });
   const out: Backtest = {
@@ -79,7 +80,9 @@ export function backtest(
     const y = r.y;
     const jevUp = r.pJev > 0.5;
     const flip = jevUp !== r.move > 0;
-    const agree = (jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow);
+    const agree =
+      Math.abs(e.fast - e.slow) >= minGap - 1e-9 &&
+      ((jevUp && e.fast > e.slow) || (!jevUp && e.fast < e.slow));
     if (!flip) add(out.holdsAll, jevUp, y);
     else add(out.flipsAll, jevUp, y);
     if (!agree) {

@@ -130,6 +130,7 @@ export function emaRuleDecision(
   move: number,
   emaFast: number | null,
   emaSlow: number | null,
+  minGap = 0, // the EMAs must be at least this far apart (in dollars)
 ):
   | { side: Side; sure: number; kind: "flip-ema" | "hold-ema" }
   | { skip: string } {
@@ -142,6 +143,9 @@ export function emaRuleDecision(
   const call = kind === "hold-ema" ? "hold" : "flip";
   if (emaFast === null || emaSlow === null)
     return { skip: "EMAs not available" };
+  const gap = Math.abs(emaFast - emaSlow);
+  if (gap < minGap - 1e-9)
+    return { skip: `EMAs only $${gap.toFixed(2)} apart (need $${minGap})` };
   if (
     (jev === "up" && emaFast > emaSlow) ||
     (jev === "down" && emaFast < emaSlow)
