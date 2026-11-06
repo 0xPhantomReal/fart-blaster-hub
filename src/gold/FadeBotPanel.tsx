@@ -161,19 +161,17 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "flip-ema"
-                      ? "flip + EMAs"
+                    {b.kind === "flip-ema" || b.kind === "hold-ema"
+                      ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
                       : b.kind === "flip-follow"
                         ? "flip → with Jev"
                         : b.kind === "flip-fade"
                           ? "flip → other side"
-                          : b.kind === "hold-ema"
-                            ? "holds + EMAs"
-                            : b.kind === "fade-hold"
-                              ? "holds (faded)"
-                              : b.kind === "fade-flip"
-                                ? "flip (faded)"
-                                : "holds"}{" "}
+                          : b.kind === "fade-hold"
+                            ? "holds (faded)"
+                            : b.kind === "fade-flip"
+                              ? "flip (faded)"
+                              : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
