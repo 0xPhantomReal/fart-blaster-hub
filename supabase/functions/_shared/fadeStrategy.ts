@@ -122,9 +122,9 @@ export function fadeCallDecision(
  * EMAs at least `minGap` apart (a trend):
  *   bet WITH Jev's call (hold or flip) when the EMAs agree: up with fast > slow, down with fast < slow; else no bet
  * EMAs closer than `minGap` (no clear trend):
- *   a HOLD call whose color matches the last closed candle's color, with the EMAs pointing against Jev (fast < slow
- *   when Jev says up, fast > slow when Jev says down) → bet AGAINST Jev's call (the EMAs' way)
- *   anything else (a flip call, or a hold that doesn't match the last candle) → no bet
+ *   a call (hold or flip) whose color matches the last closed candle's color, with the EMAs pointing against Jev
+ *   (fast < slow when Jev says up, fast > slow when Jev says down) → bet AGAINST Jev's call (the EMAs' way)
+ *   anything else → no bet
  * Always no bet on a 50% read or a candle exactly at its open.
  */
 export function emaRuleDecision(
@@ -138,7 +138,7 @@ export function emaRuleDecision(
   | {
       side: Side;
       sure: number;
-      kind: "flip-ema" | "hold-ema" | "hold-fade-chop";
+      kind: "flip-ema" | "hold-ema" | "hold-fade-chop" | "flip-fade-chop";
     }
   | { skip: string } {
   if (pGreen === 0.5) return { skip: "no call (50%)" };
@@ -155,10 +155,9 @@ export function emaRuleDecision(
   const gap = Math.abs(emaFast - emaSlow);
   if (gap < minGap - 1e-9) {
     const close = `EMAs only $${gap.toFixed(2)} apart (under $${minGap})`;
-    if (kind === "flip-ema") return { skip: `flip call with ${close}` };
     if (lastColor !== jev)
       return {
-        skip: `hold ${color(jev)} with ${close}, but the last candle was ${color(lastColor)}`,
+        skip: `${call} ${color(jev)} with ${close}, but the last candle was ${color(lastColor)}`,
       };
     // …and the EMAs must point the way of the bet (against Jev): down needs fast < slow, up needs fast > slow.
     const bet: Side = jev === "up" ? "down" : "up";
@@ -166,13 +165,17 @@ export function emaRuleDecision(
       emaFast > emaSlow ? "up" : emaFast < emaSlow ? "down" : null;
     if (emaSide !== bet)
       return {
-        skip: `hold ${color(jev)} with ${close}, but the EMAs ${
+        skip: `${call} ${color(jev)} with ${close}, but the EMAs ${
           emaSide === null
             ? "are level"
             : `point ${emaSide} too (fast ${emaSide === "up" ? "above" : "below"} slow)`
         }`,
       };
-    return { side: bet, sure, kind: "hold-fade-chop" };
+    return {
+      side: bet,
+      sure,
+      kind: kind === "hold-ema" ? "hold-fade-chop" : "flip-fade-chop",
+    };
   }
   if (
     (jev === "up" && emaFast > emaSlow) ||

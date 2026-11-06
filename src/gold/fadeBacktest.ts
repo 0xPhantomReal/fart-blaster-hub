@@ -1,6 +1,6 @@
 // Backtest of the Polymarket bot's EMA rule on past candles, from the page's "Jev at …" reads:
 //   EMAs at least $gap apart: bet with Jev's call (hold or flip) when the EMAs agree (up: fast above slow)
-//   EMAs closer than that: a hold call matching the last candle's color, with the EMAs pointing against Jev →
+//   EMAs closer than that: a call (hold or flip) matching the last candle's color, with the EMAs pointing against Jev →
 //   bet against Jev; else no bet
 // EMAs are the TV indicator's (9/21, Pine's EMA) on this chart's candles, taken live at the read: the closed-candle
 // EMA moved by the candle's price at the read (its open + the move so far), as the chart draws the live lines.
@@ -26,6 +26,7 @@ export interface Backtest {
   flips: Tally; //     of which: flip calls that agreed with the EMAs
   holdsEma: Tally; //  of which: hold calls that agreed with the EMAs
   chop: Tally; //      of which: EMAs close, hold call matching the last candle → bet against Jev
+  chopFlips: Tally; // of which: EMAs close, flip call matching the last candle → bet against Jev
   holdsAll: Tally; //  every hold call followed, no EMA check (for comparison)
   flipsAll: Tally; //  every flip call followed, no EMA check (for comparison)
   skippedHolds: number; // hold calls skipped because the EMAs disagreed
@@ -72,6 +73,7 @@ export function backtest(
     flips: t(),
     holdsEma: t(),
     chop: t(),
+    chopFlips: t(),
     holdsAll: t(),
     flipsAll: t(),
     skippedHolds: 0,
@@ -94,8 +96,8 @@ export function backtest(
     if (Math.abs(e.fast - e.slow) < minGap - 1e-9) {
       // EMAs close together: a hold matching the last candle's color → bet against Jev; else no bet
       const emasAgainstJev = jevUp ? e.fast < e.slow : e.fast > e.slow;
-      if (!flip && r.last === (jevUp ? 1 : 0) && emasAgainstJev) {
-        add(out.chop, !jevUp, y);
+      if (r.last === (jevUp ? 1 : 0) && emasAgainstJev) {
+        add(flip ? out.chopFlips : out.chop, !jevUp, y);
         add(out.bot, !jevUp, y);
       } else if (flip) out.skippedFlips += 1;
       else out.skippedHolds += 1;

@@ -131,6 +131,10 @@ export function FadeBacktestBox({
                 `· EMAs under $${emaGap}: hold matching last candle, bet against`,
                 r.chop,
               )}
+              {row(
+                `· EMAs under $${emaGap}: flip matching last candle, bet against`,
+                r.chopFlips,
+              )}
               {row("Every flip call, no EMA check", r.flipsAll)}
               {row("Every hold call, no EMA check", r.holdsAll)}
             </tbody>

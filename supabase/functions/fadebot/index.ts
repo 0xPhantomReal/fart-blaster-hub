@@ -12,9 +12,8 @@
 //       Jev calls down and the fast EMA is below the slow EMA → bet down
 //       …and only when the EMAs are at least $60 apart (FADEBOT_EMA_GAP); otherwise no bet.
 //       Flip calls also need the regime to be "Jev right" (FADEBOT_FLIP_REGIME=off to drop that).
-//     EMAs under $60 apart: a HOLD call matching the last closed candle's color, with the EMAs pointing against
-//       Jev → bet AGAINST Jev's call (the EMAs' way);
-//       flips and other holds → no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
+//     EMAs under $60 apart: a call (hold or flip) matching the last closed candle's color, with the EMAs pointing
+//       against Jev → bet AGAINST Jev's call (the EMAs' way); anything else → no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
 //     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
 //     closes. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
