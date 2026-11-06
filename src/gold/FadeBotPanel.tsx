@@ -37,6 +37,7 @@ export function FadeBotPanel({
     limitShares: number,
     emaTf: number,
     emaGap: number,
+    flipNeedsRegime: boolean,
   ) => (
     <FadeBacktestBox
       bars={bars}
@@ -48,6 +49,7 @@ export function FadeBotPanel({
       limitShares={limitShares}
       emaTf={emaTf}
       emaGap={emaGap}
+      flipNeedsRegime={flipNeedsRegime}
     />
   );
   if (s === undefined) return null;
@@ -58,7 +60,7 @@ export function FadeBotPanel({
           Not running yet: deploy the <code>fadebot</code> function and schedule
           it every minute.
         </p>
-        {bt(30, 0.33, 15, 5, 60)}
+        {bt(30, 0.33, 15, 5, 60, true)}
       </>
     );
   const st = s.state;
@@ -78,8 +80,12 @@ export function FadeBotPanel({
         {cfg.emaGap
           ? `, and only when they're at least $${cfg.emaGap} apart`
           : ""}
-        . Otherwise no bet. Each bet is a limit order for {cfg.limitShares}{" "}
-        shares at {Math.round(cfg.limitPrice * 100)}¢ ($
+        .{" "}
+        {cfg.flipNeedsRegime
+          ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
+          : " "}
+        Otherwise no bet. Each bet is a limit order for {cfg.limitShares} shares
+        at {Math.round(cfg.limitPrice * 100)}¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
         the window closes
         {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
@@ -226,6 +232,7 @@ export function FadeBotPanel({
         cfg.limitShares,
         cfg.emaTf ?? 5,
         cfg.emaGap ?? 0,
+        cfg.flipNeedsRegime ?? false,
       )}
     </div>
   );

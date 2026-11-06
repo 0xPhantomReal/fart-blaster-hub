@@ -10,7 +10,8 @@
 //       bet WITH Jev's call (hold or flip) only when the EMAs agree with it:
 //       Jev calls up and the fast EMA (9) is above the slow EMA (21) → bet up
 //       Jev calls down and the fast EMA is below the slow EMA → bet down
-//       …and only when the EMAs are at least $60 apart (FADEBOT_EMA_GAP); otherwise no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
+//       …and only when the EMAs are at least $60 apart (FADEBOT_EMA_GAP); otherwise no bet.
+//       Flip calls also need the regime to be "Jev right" (FADEBOT_FLIP_REGIME=off to drop that). Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
 //     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
 //     closes. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
@@ -79,6 +80,8 @@ const settings = () => ({
   emaTf: env("FADEBOT_EMA_TF") === "15" ? 15 : 5,
   // …and only when the two EMAs are at least this many dollars apart.
   emaGap: Number(env("FADEBOT_EMA_GAP") || 60),
+  // Flip trades only in the "Jev right" regime (Jev right on more than half of its last 12 reads); off = any regime.
+  flipNeedsRegime: env("FADEBOT_FLIP_REGIME") !== "off",
   readAt: READ_AT,
 });
 
@@ -912,6 +915,12 @@ async function decideWindow(start: number) {
     return;
   }
   const d = dd;
+  // Flip trades only while Jev has been right lately (regime "Jev right"); not when unclear or backwards.
+  if (cfg.flipNeedsRegime && d.kind === "flip-ema" && reg.regime !== "normal") {
+    await skip(start, `${jevTxt}; ${tvLabel}; flip call but regime is ${regLabel}: no bet`);
+    await sql`update fadebot_bets5 set regime = ${regLabel}, tv15 = ${tvLabel} where window_start = ${start}`;
+    return;
+  }
 
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);

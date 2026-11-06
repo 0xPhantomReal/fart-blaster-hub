@@ -19,6 +19,7 @@ export function FadeBacktestBox({
   limitShares,
   emaTf,
   emaGap,
+  flipNeedsRegime,
 }: {
   bars: ClosedBar[];
   readSec: number | null; // the "Jev at …" read the chart is showing (null = not a minute read)
@@ -29,6 +30,7 @@ export function FadeBacktestBox({
   limitShares: number;
   emaTf: number;
   emaGap: number;
+  flipNeedsRegime: boolean;
 }) {
   const reads: Read[] = useMemo(
     () =>
@@ -39,6 +41,7 @@ export function FadeBacktestBox({
           open: b.candle.open,
           move: b.minMove!,
           pJev: b.pMin!,
+          regime: b.minRegime,
           y:
             b.candle.close > b.candle.open
               ? 1
@@ -57,8 +60,9 @@ export function FadeBacktestBox({
         reads,
       ),
       emaGap,
+      flipNeedsRegime,
     );
-  }, [bars, reads, readSec, emaGap]);
+  }, [bars, reads, readSec, emaGap, flipNeedsRegime]);
   const fmtRead = (s: number) => (s < 60 ? `${s}s` : `${s / 60} min`);
   // P&L per filled order: a win pays (1 − price) a share, a loss costs the price.
   const pnl = (x: Tally) =>
@@ -121,8 +125,12 @@ export function FadeBacktestBox({
               : " (replayed history plus live reads)"}
             . Skipped because the EMAs disagreed with Jev or were less than $
             {emaGap} apart: {r.skippedFlips} flip calls, {r.skippedHolds} hold
-            calls. "Won" = the candle closed the bet's color. Each bet is{" "}
-            {limitShares} shares at {Math.round(limitPrice * 100)}¢: a win pays{" "}
+            calls.
+            {flipNeedsRegime
+              ? ` ${r.skippedFlipsRegime} more flip calls skipped because the regime wasn't "Jev right".`
+              : ""}{" "}
+            "Won" = the candle closed the bet's color. Each bet is {limitShares}{" "}
+            shares at {Math.round(limitPrice * 100)}¢: a win pays{" "}
             {Math.round((1 - limitPrice) * 100)}¢ a share and a loss costs{" "}
             {Math.round(limitPrice * 100)}¢, so it needs to win more than{" "}
             {Math.round(limitPrice * 100)}% of filled orders. A limit order only

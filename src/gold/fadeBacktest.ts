@@ -11,6 +11,7 @@ export interface Read {
   move: number; //   price at the read − open (its sign = the color at the read)
   pJev: number; //   Jev's chance of green at the read
   y: 0 | 1 | null; // how the candle closed: 1 green, 0 red, null flat
+  regime?: string; // the regime at the read: normal (Jev right) / backwards / unsure
 }
 
 export interface Tally {
@@ -25,6 +26,7 @@ export interface Backtest {
   flipsAll: Tally; //  every flip call followed, no EMA check (for comparison)
   skippedHolds: number; // hold calls skipped because the EMAs disagreed
   skippedFlips: number; // flip calls skipped because the EMAs disagreed
+  skippedFlipsRegime: number; // flip calls skipped because the regime wasn't "Jev right"
 }
 
 /** EMA fast/slow at the read of each candle, by candle time. `closes` = all chart candles' closes, oldest first. */
@@ -58,6 +60,7 @@ export function backtest(
   reads: Read[],
   emas: Map<number, { fast: number; slow: number }>,
   minGap = 0, // the EMAs must be at least this many dollars apart
+  flipNeedsRegime = false, // flip bets only in the "Jev right" regime
 ): Backtest {
   const t = (): Tally => ({ n: 0, wins: 0 });
   const out: Backtest = {
@@ -68,6 +71,7 @@ export function backtest(
     flipsAll: t(),
     skippedHolds: 0,
     skippedFlips: 0,
+    skippedFlipsRegime: 0,
   };
   const add = (x: Tally, up: boolean, y: 0 | 1) => {
     x.n += 1;
@@ -88,6 +92,10 @@ export function backtest(
     if (!agree) {
       if (flip) out.skippedFlips += 1;
       else out.skippedHolds += 1;
+      continue;
+    }
+    if (flip && flipNeedsRegime && r.regime !== "normal") {
+      out.skippedFlipsRegime += 1;
       continue;
     }
     add(out.bot, jevUp, y); // with Jev's call

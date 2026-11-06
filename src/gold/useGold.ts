@@ -117,6 +117,7 @@ export interface ClosedBar {
   pMin?: number; //            Jev's chance of green read X minutes into the candle (minute mode)
   minMove?: number; //         the candle's move at that minute (its sign = "current color holds")
   pAdj?: number; //            regime-adjusted chance of green at that minute (Jev, or Jev flipped when backwards)
+  minRegime?: string; //       the regime at that read: normal (Jev right) / backwards / unsure
 }
 
 /** Jev refined: Jev's chance of green after the correction learned from its own record. */
@@ -404,6 +405,7 @@ export function useGold(
       pMin: minuteReads.get(c.time)?.pJev,
       minMove: minuteReads.get(c.time)?.move,
       pAdj: minuteReads.get(c.time)?.pAdj,
+      minRegime: minuteReads.get(c.time)?.regime?.regime,
     });
     const redrawJevArrows = () => {
       bars = bars.map((b) => barFor(b.candle));

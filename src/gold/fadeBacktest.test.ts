@@ -74,4 +74,52 @@ describe("EMA-rule backtest", () => {
     }); // exactly $60 apart
     expect("skip" in bot.emaRuleDecision(0.3, -2, 100, 159.9, 60)).toBe(true); // $59.90 apart
   });
+
+  it("takes flip bets only in the 'Jev right' regime when asked", () => {
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      time: i * 300,
+      close: 100 + i,
+    }));
+    // flips up (candle red, Jev green) with fast > slow — the EMAs agree
+    const reads: Read[] = [
+      {
+        time: 40 * 300,
+        open: 139,
+        move: -1,
+        pJev: 0.6,
+        y: 1,
+        regime: "normal",
+      },
+      {
+        time: 41 * 300,
+        open: 140,
+        move: -1,
+        pJev: 0.6,
+        y: 1,
+        regime: "unsure",
+      },
+      {
+        time: 42 * 300,
+        open: 141,
+        move: -1,
+        pJev: 0.6,
+        y: 1,
+        regime: "backwards",
+      },
+      {
+        time: 43 * 300,
+        open: 142,
+        move: 1,
+        pJev: 0.6,
+        y: 1,
+        regime: "backwards",
+      }, // a hold: not affected
+    ];
+    const emas = emasAtReads(candles, reads);
+    expect(backtest(reads, emas).bot.n).toBe(4);
+    const r = backtest(reads, emas, 0, true);
+    expect(r.flips.n).toBe(1);
+    expect(r.holdsEma.n).toBe(1);
+    expect(r.skippedFlipsRegime).toBe(2);
+  });
 });

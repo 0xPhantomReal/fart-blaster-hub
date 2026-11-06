@@ -751,6 +751,7 @@ export interface FadeBotStatus {
     tv15?: boolean;
     emaTf?: number;
     emaGap?: number;
+    flipNeedsRegime?: boolean;
     fadeMax?: number;
     readAt?: number;
   };
