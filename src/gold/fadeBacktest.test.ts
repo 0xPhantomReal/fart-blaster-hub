@@ -1,38 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { backtest, Tv15 } from "./fadeBacktest";
+import { backtest, emasAtReads, type Read } from "./fadeBacktest";
+import * as bot from "../../supabase/functions/_shared/fadeStrategy";
 
-// 15m candles: a steady uptrend → the indicator calls GREEN once warmed up
-const c15 = Array.from({ length: 200 }, (_, i) => ({
-  time: i * 900,
-  open: 100 + i,
-  high: 101.5 + i,
-  low: 99.5 + i,
-  close: 101 + i,
-}));
-
-describe("bot-rule backtest", () => {
-  it("finds the indicator's call at a moment", () => {
-    const tv = new Tv15(c15);
-    expect(tv.at(0)).toBeNull(); // nothing closed yet
-    expect(tv.at(150 * 900 + 30)).toBe(1);
-  });
-
-  it("bets only when Jev goes against the 15m indicator, with the indicator", () => {
-    const tv = new Tv15(c15);
-    const T = 150 * 900;
+describe("EMA-rule backtest", () => {
+  it("bets flips the other way, and holds only with the EMAs — same as the bot", () => {
+    // rising candles → fast EMA above slow
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      time: i * 300,
+      close: 100 + i,
+    }));
+    const at = (
+      k: number,
+      pJev: number,
+      move: number,
+      y: 0 | 1 | null,
+    ): Read => ({ time: k * 300, open: 100 + k - 1, move, pJev, y });
     const reads = [
-      { time: T, pJev: 0.3, y: 1 as const }, //   Jev red 70% vs indicator green → bet green → win
-      { time: T + 300, pJev: 0.35, y: 0 as const }, // Jev red vs green → bet green → loss
-      { time: T + 600, pJev: 0.8, y: 1 as const }, //  Jev green agrees with indicator → skip
-      { time: T + 900, pJev: 0.95, y: 0 as const }, // over 90% → out of range
-      { time: T + 1200, pJev: 0.5, y: 1 as const }, // no call
-      { time: T + 1500, pJev: 0.4, y: null }, //       flat candle
+      at(40, 0.7, 2, 1), //   hold up, fast > slow → bet up → win
+      at(41, 0.3, -2, 1), //  hold down, fast > slow → skip
+      at(42, 0.3, 2, 0), //   flip (green now, Jev red) → bet up (the other side) → loss
+      at(43, 0.6, -1, 1), //  flip (red now, Jev green) → bet down → loss
+      at(44, 0.5, 1, 1), //   no call
+      at(45, 0.8, 0, 1), //   flat at the read
     ];
-    const r = backtest(reads, tv, 30, 0.5, 0.9);
-    expect(r.bot).toEqual({ n: 2, wins: 1 });
-    expect(r.skippedAgree).toBe(1);
-    expect(r.fadeAll).toEqual({ n: 3, wins: 1 }); // green, green, red bets → win, loss, loss
-    expect(r.jevInRange).toEqual({ n: 3, wins: 2 });
-    expect(r.tvAlone).toEqual({ n: 4, wins: 2 }); // every scored read with an indicator call (incl. the 95% one)
+    const emas = emasAtReads(candles, reads);
+    expect(emas.get(40 * 300)!.fast).toBeGreaterThan(emas.get(40 * 300)!.slow);
+    const r = backtest(reads, emas);
+    expect(r.bot).toEqual({ n: 3, wins: 1 });
+    expect(r.flips).toEqual({ n: 2, wins: 0 });
+    expect(r.holdsEma).toEqual({ n: 1, wins: 1 });
+    expect(r.holdsAll).toEqual({ n: 2, wins: 1 });
+    expect(r.skippedHolds).toBe(1);
+    // the bot's own rule gives the same bets
+    for (const x of reads) {
+      const e = emas.get(x.time)!;
+      const d = bot.emaRuleDecision(x.pJev, x.move, e.fast, e.slow);
+      const side = "skip" in d ? null : d.side;
+      const exp =
+        x.time === 40 * 300
+          ? "up"
+          : x.time === 42 * 300
+            ? "up"
+            : x.time === 43 * 300
+              ? "down"
+              : null;
+      expect(side).toBe(exp);
+    }
   });
 });

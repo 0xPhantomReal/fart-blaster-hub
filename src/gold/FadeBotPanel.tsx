@@ -31,15 +31,21 @@ export function FadeBotPanel({
       clearInterval(id);
     };
   }, []);
-  const bt = (min: number, max: number, botReadSec: number) => (
+  const bt = (
+    botReadSec: number,
+    limitPrice: number,
+    limitShares: number,
+    emaTf: number,
+  ) => (
     <FadeBacktestBox
       bars={bars}
       readSec={readSec}
       readLabel={readLabel}
       pastIsLive={pastIsLive}
-      min={min}
-      max={max}
       botReadSec={botReadSec}
+      limitPrice={limitPrice}
+      limitShares={limitShares}
+      emaTf={emaTf}
     />
   );
   if (s === undefined) return null;
@@ -50,7 +56,7 @@ export function FadeBotPanel({
           Not running yet: deploy the <code>fadebot</code> function and schedule
           it every minute.
         </p>
-        {bt(0.5, 0.9, 30)}
+        {bt(30, 0.33, 15, 5)}
       </>
     );
   const st = s.state;
@@ -64,16 +70,14 @@ export function FadeBotPanel({
           : cfg.readAt < 60
             ? `${cfg.readAt} seconds`
             : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
-        in. When its call is {Math.round((cfg.fadeMin ?? 0.5) * 100)}% to{" "}
-        {Math.round((cfg.fadeMax ?? 0.9) * 100)}% sure (hold or flip), the bot
-        places a ${cfg.marketBet} market order on the <b>other</b> side
-        {cfg.tv15 !== false
-          ? " — but only when Jev's call goes against the TV indicator on 15-minute candles (so the bet goes with the indicator; if they agree, or the indicator shows no call, no bet)"
-          : ""}
-        . Calls outside that range: no bet. Same stake every time.
-        {cfg.limitShares > 0
-          ? ` Plus a limit order for ${cfg.limitShares} shares at ${Math.round(cfg.limitPrice * 100)}¢.`
-          : ""}
+        in. If Jev calls a <b>flip</b>, the bot bets the opposite of Jev's call.
+        If Jev calls a <b>hold</b>, it bets with Jev only when the{" "}
+        {cfg.emaTf ?? 5}m EMAs agree: up when the fast EMA is above the slow
+        one, down when it's below. Otherwise no bet. Each bet is a limit order
+        for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}¢ ($
+        {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
+        the window closes
+        {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
       </p>
       {s.regime && (
         <p className={`mb-2 text-xs ${MUTED}`}>
@@ -158,11 +162,15 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "fade-hold"
-                      ? "holds (faded)"
-                      : b.kind === "fade-flip"
-                        ? "flip (faded)"
-                        : "holds"}{" "}
+                    {b.kind === "flip-fade"
+                      ? "flip → other side"
+                      : b.kind === "hold-ema"
+                        ? "holds + EMAs"
+                        : b.kind === "fade-hold"
+                          ? "holds (faded)"
+                          : b.kind === "fade-flip"
+                            ? "flip (faded)"
+                            : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
@@ -205,7 +213,7 @@ export function FadeBotPanel({
         </tbody>
       </table>
       {s.pmHistory && <PmHistory s={s} readAt={cfg.readAt ?? 30} />}
-      {bt(cfg.fadeMin ?? 0.5, cfg.fadeMax ?? 0.9, cfg.readAt ?? 30)}
+      {bt(cfg.readAt ?? 30, cfg.limitPrice, cfg.limitShares, cfg.emaTf ?? 5)}
     </div>
   );
 }

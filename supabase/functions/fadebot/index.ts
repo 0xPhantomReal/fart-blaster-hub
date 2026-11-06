@@ -6,15 +6,19 @@
 //     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 15 candles,
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
-//     Jev's call over 50% and up to 90% sure (FADEBOT_FADE_MIN / FADEBOT_FADE_MAX) → a $1 market order (FADEBOT_STAKE) on the OTHER side; otherwise
-//     no bet — and only when Jev's call goes AGAINST the TradingView indicator on 15-minute candles (so the bet
-//     goes with the indicator; FADEBOT_TV15=off turns that check off). Same stake every time. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
+//     The EMA rule, at that read:
+//       Jev calls a FLIP (against the candle's color so far) → bet the opposite of Jev's call
+//       Jev calls a HOLD up and the fast EMA (9) is above the slow EMA (21) → bet up
+//       Jev calls a HOLD down and the fast EMA is below the slow EMA → bet down
+//       otherwise no bet. Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
+//     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
+//     closes. Every read is kept; Jev's record over the last 12 windows is shown as the regime.
 //   after S+300: settle (Polymarket's settlement; in dry mode the final-minute BRTI average)
 // State lives in the project database (tables are created on first run).
 //
 // Secrets: SUPABASE_DB_URL, SUPABASE_URL, SUPABASE_ANON_KEY (provided by the platform);
-//   FADEBOT_MODE (dry | live, default dry), FADEBOT_STAKE (1), FADEBOT_FADE_MIN (0.5), FADEBOT_FADE_MAX (0.9), FADEBOT_LIMIT_SHARES (0 = no
-//   limit order), FADEBOT_LIMIT_PRICE (0.33); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
+//   FADEBOT_MODE (dry | live, default dry), FADEBOT_LIMIT_SHARES (15), FADEBOT_LIMIT_PRICE (0.33), FADEBOT_EMA_TF (5),
+//   FADEBOT_MARKET_BET (0 = no market order), FADEBOT_READ_SEC (30); POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY (live only)
 //
 // POST {}                    → the scheduled run
 // POST { action: "status" }  → settings, totals and recent bets (for the page)
@@ -23,7 +27,7 @@ import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
-  fadeCallDecision,
+  emaRuleDecision,
   pnl,
   regimeOf,
   REGIME_N,
@@ -63,16 +67,13 @@ const json = (body: unknown, status = 200) =>
 
 const settings = () => ({
   mode: env("FADEBOT_MODE") === "live" ? "live" : "dry",
-  // Market order in dollars on each bet: the same every time (no Fibonacci).
-  marketBet: Number(env("FADEBOT_STAKE") || 1),
-  // Bet against Jev's 3-minute call when it's over 50% and at most this sure.
-  fadeMin: Number(env("FADEBOT_FADE_MIN") || 0.5),
-  fadeMax: Number(env("FADEBOT_FADE_MAX") || 0.9),
-  // Only fade Jev when its call goes against the TradingView indicator on 15-minute candles (off = no check).
-  tv15: env("FADEBOT_TV15") !== "off",
-  // Optional resting limit order on the same side (0 shares = none).
+  // Each bet: a limit order for this many shares at this price on the chosen side, good until the window closes.
   limitPrice: Number(env("FADEBOT_LIMIT_PRICE") || 0.33),
-  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 0),
+  limitShares: Number(env("FADEBOT_LIMIT_SHARES") || 15),
+  // Optional market order in dollars on top (default none). The old FADEBOT_STAKE is no longer used.
+  marketBet: Number(env("FADEBOT_MARKET_BET") || 0),
+  // The EMA rule's fast/slow EMAs (9/21, as the chart's TV indicator draws them) on 5- or 15-minute candles.
+  emaTf: env("FADEBOT_EMA_TF") === "15" ? 15 : 5,
   readAt: READ_AT,
 });
 
@@ -748,29 +749,27 @@ async function updatePmHistory(now: number) {
 // ── The TradingView indicator on 15-minute candles ───────────────────
 
 /**
- * What the chart's "TV indicator" table shows on BTC 15m right now: the call made at the last 15-minute close
- * (GREEN / RED / NO CALL). Same candles as the chart loads (3,000 of them), same code (shared copy, parity-tested).
+ * The chart's Fast/Slow EMAs (the TV indicator's 9/21) at the read: run over the closed candles plus the forming
+ * candle at its current price, exactly as the chart draws the live EMA lines.
  */
-async function tvIndicator15(now: number): Promise<{ dir: Side | null; label: string }> {
-  const TF15 = 900;
-  const r = await gold<{ candles: Candle[] }>({
-    action: "history",
-    market: "btc",
-    resolution: 15,
-    from: Math.floor(now - 3000 * TF15 * 1.7),
-    to: Math.floor(now),
-  });
-  const closed = r.candles
-    .filter((c) => c.time + TF15 <= now)
-    .sort((a, b) => a.time - b.time)
-    .slice(-3000);
-  if (closed.length < 30) throw new Error("not enough 15-minute history");
-  const tv = runTvIndicator(closed, null);
-  const pct = tv.pShow === null ? "?" : `${Math.round(tv.pShow * 100)}% up`;
-  return {
-    dir: tv.dirTxt === "GREEN" ? "up" : tv.dirTxt === "RED" ? "down" : null,
-    label: `15m indicator ${tv.dirTxt} ${pct}`,
-  };
+async function emasAt(tfMin: number, closed5: Candle[], forming5: Candle): Promise<{ fast: number | null; slow: number | null }> {
+  let closed = closed5;
+  let forming = forming5;
+  if (tfMin === 15) {
+    const now = Date.now() / 1000;
+    const r = await gold<{ candles: Candle[] }>({
+      action: "history",
+      market: "btc",
+      resolution: 15,
+      from: Math.floor(now - 3000 * 900 * 1.7),
+      to: Math.floor(now),
+    });
+    closed = r.candles.filter((c) => c.time + 900 <= now).sort((a, b) => a.time - b.time).slice(-3000);
+    const t = Math.floor(forming5.time / 900) * 900;
+    forming = { time: t, open: forming5.open, high: forming5.high, low: forming5.low, close: forming5.close };
+  }
+  const tv = runTvIndicator(closed.slice(-3000), forming);
+  return { fast: tv.live?.emaFast ?? null, slow: tv.live?.emaSlow ?? null };
 }
 
 // ── Regime: Jev's recent record at the read ─────────────────────────
@@ -886,39 +885,25 @@ async function decideWindow(start: number) {
   const jevSide = pGreen > 0.5 ? "up" : "down";
   const jevSure = Math.round(Math.max(pGreen, 1 - pGreen) * 100);
   const jevKind = move === 0 || (pGreen > 0.5) === move > 0 ? "holds" : "flip";
-  const d = fadeCallDecision(pGreen, move, cfg.fadeMax, cfg.fadeMin);
-  if (!d) {
-    await skip(
-      start,
-      pGreen === 0.5
-        ? "Jev: no call (50%): no bet"
-        : `Jev: ${jevKind} → ${jevSide} (${jevSure}%), ${
-          jevSure > cfg.fadeMax * 100 ? `over ${Math.round(cfg.fadeMax * 100)}%` : `under ${Math.round(cfg.fadeMin * 100)}%`
-        }: no bet`,
-    );
-    await sql`update fadebot_bets5 set regime = ${regLabel} where window_start = ${start}`;
+  // The EMA rule: flip call → the other side; hold call → only with the EMAs (fast over slow for up, under for down).
+  let ema: { fast: number | null; slow: number | null } = { fast: null, slow: null };
+  try {
+    ema = await emasAt(cfg.emaTf, closed, forming);
+  } catch (e) {
+    console.error("EMAs:", (e as Error).message);
+  }
+  const fmt = (v: number | null) => (v === null ? "?" : v.toFixed(2));
+  const tvLabel = `${cfg.emaTf}m EMA fast ${fmt(ema.fast)} ${
+    ema.fast === null || ema.slow === null ? "vs" : ema.fast > ema.slow ? ">" : ema.fast < ema.slow ? "<" : "="
+  } slow ${fmt(ema.slow)}`;
+  const jevTxt = `Jev: ${jevKind} → ${jevSide} (${jevSure}%)`;
+  const dd = emaRuleDecision(pGreen, move, ema.fast, ema.slow);
+  if ("skip" in dd) {
+    await skip(start, `${jevTxt}; ${tvLabel}: ${dd.skip}: no bet`);
+    await sql`update fadebot_bets5 set regime = ${regLabel}, tv15 = ${tvLabel} where window_start = ${start}`;
     return;
   }
-
-  // Only fade Jev when its call goes against the 15-minute TradingView indicator (so the bet goes WITH the
-  // indicator). Indicator agrees with Jev, or shows NO CALL → no bet. Can't read it → no bet.
-  let tvLabel: string | null = null;
-  if (cfg.tv15) {
-    const jevTxt = `Jev: ${jevKind} → ${jevSide} (${jevSure}%)`;
-    let t: { dir: Side | null; label: string };
-    try {
-      t = await tvIndicator15(Date.now() / 1000);
-    } catch (e) {
-      return skip(start, `${jevTxt}; couldn't read the 15m indicator (${(e as Error).message}): no bet`.slice(0, 300));
-    }
-    tvLabel = t.label;
-    const why = t.dir === null ? "shows no call" : t.dir === jevSide ? "agrees with Jev" : null;
-    if (why) {
-      await skip(start, `${jevTxt}; ${t.label} ${why}: no bet`);
-      await sql`update fadebot_bets5 set regime = ${regLabel}, tv15 = ${t.label} where window_start = ${start}`;
-      return;
-    }
-  }
+  const d = dd;
 
   const stake = cfg.marketBet;
   const market = await findMarket(start).catch(() => null);
