@@ -151,14 +151,14 @@ describe("EMA-rule backtest", () => {
     expect("skip" in bot.emaRuleDecision(0.3, 2, 100, 120, 60, "down")).toBe(
       true,
     ); // flip down, EMAs down too
-    // a flip down (candle green, Jev red), last candle red, EMAs up → bet up
-    expect(bot.emaRuleDecision(0.3, 2, 120, 100, 60, "down")).toMatchObject({
+    // a flip down (candle green, Jev red), last candle GREEN (the other color from the call), EMAs up → bet up
+    expect(bot.emaRuleDecision(0.3, 2, 120, 100, 60, "up")).toMatchObject({
       side: "up",
       kind: "flip-fade-chop",
     });
-    expect("skip" in bot.emaRuleDecision(0.3, 2, 120, 100, 60, "up")).toBe(
+    expect("skip" in bot.emaRuleDecision(0.3, 2, 120, 100, 60, "down")).toBe(
       true,
-    ); // last candle green
+    ); // last candle red = the same color as the flip call → no bet
     // far apart: back to the trend rule
     expect(bot.emaRuleDecision(0.7, 2, 200, 100, 60, "up")).toMatchObject({
       side: "up",
@@ -173,7 +173,8 @@ describe("EMA-rule backtest", () => {
     const reads: Read[] = [
       { time: 40 * 300, open: 161, move: 2, pJev: 0.7, y: 0, last: 1 }, // hold green, last green, EMAs down → bet red → win
       { time: 41 * 300, open: 160, move: 2, pJev: 0.7, y: 1, last: 0 }, // last red → skip
-      { time: 42 * 300, open: 159, move: -2, pJev: 0.7, y: 1, last: 1 }, // flip green, last green, EMAs down → bet red → loss
+      { time: 42 * 300, open: 159, move: -2, pJev: 0.7, y: 1, last: 0 }, // flip green, last red, EMAs down → bet red → loss
+      { time: 44 * 300, open: 157, move: -2, pJev: 0.7, y: 1, last: 1 }, // flip green but last green → skip
       { time: 43 * 300, open: 158, move: -2, pJev: 0.3, y: 1, last: 0 }, // hold red, last red, but EMAs down too → skip
     ];
     const r = backtest(reads, emasAtReads(down, reads), 60);
@@ -181,6 +182,6 @@ describe("EMA-rule backtest", () => {
     expect(r.chopFlips).toEqual({ n: 1, wins: 0 });
     expect(r.bot).toEqual({ n: 2, wins: 1 });
     expect(r.skippedHolds).toBe(2);
-    expect(r.skippedFlips).toBe(0);
+    expect(r.skippedFlips).toBe(1);
   });
 });
