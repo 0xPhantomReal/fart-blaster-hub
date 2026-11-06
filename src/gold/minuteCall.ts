@@ -147,7 +147,13 @@ export function scoreRead(s: MinuteScores, r: MinuteRead, y: 0 | 1 | null) {
 
 /** Minutes offered per timeframe (0.5 = 30 seconds). */
 export function minuteChoices(tfMin: number): number[] {
-  return tfMin >= 15 ? [0.5, 1, 2, 3, 5, 8] : tfMin >= 5 ? [0.5, 1, 2, 3] : [];
+  // 3, 5 and 15 seconds are written as seconds/60 so they match the bot's request key exactly.
+  const early = [3 / 60, 5 / 60, 15 / 60];
+  return tfMin >= 15
+    ? [...early, 0.5, 1, 2, 3, 5, 8]
+    : tfMin >= 5
+      ? [...early, 0.5, 1, 2, 3]
+      : [];
 }
 
 /** "30 seconds" / "minute 2" — for labels. */

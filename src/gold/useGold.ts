@@ -1,3 +1,4 @@
+import { tvContext } from "./tvIndicator";
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import {
@@ -225,7 +226,7 @@ function writeCache(c: Record<string, JevAnswer>, w: Where) {
 function readFlipCache(w: Where): Record<string, number> {
   try {
     return JSON.parse(
-      localStorage.getItem(tfKey("gold.flipcheck.v2", w)) ?? "{}",
+      localStorage.getItem(tfKey("gold.flipcheck.v3", w)) ?? "{}",
     );
   } catch {
     return {};
@@ -235,7 +236,7 @@ function writeFlipCache(c: Record<string, number>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
     localStorage.setItem(
-      tfKey("gold.flipcheck.v2", w),
+      tfKey("gold.flipcheck.v3", w),
       JSON.stringify(
         Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]])),
       ),
@@ -571,8 +572,10 @@ export function useGold(
       elapsed: number,
       closed: Candle[],
       atrMap?: Map<number, number>,
+      priceNow: number | null = null,
     ) => {
       if (!features.includes("flip-context")) return {};
+      const tv = tvContext(closed, t, TF_SECONDS, priceNow);
       const atr =
         (
           atrMap ?? atrByTime(closed.slice(Math.max(0, closed.length - 700)))
@@ -599,6 +602,7 @@ export function useGold(
         ...(ctx ? { market_context: ctx } : {}),
         ...(recent ? { order_flow_recent_candles: recent } : {}),
         ...(now ? { order_flow_this_candle_so_far: now } : {}),
+        ...(tv ? { tv_indicator: tv } : {}),
       };
     };
 
@@ -623,16 +627,24 @@ export function useGold(
             atrs.get(forTime - TF_SECONDS) ?? null,
           )
         : null;
-      return ctx || flow
+      const tv = tvContext(closed, forTime, TF_SECONDS, null);
+      return ctx || flow || tv
         ? {
             ...s,
             data: {
               ...s.data,
               ...(ctx ?? {}),
               ...(flow ? { order_flow: flow } : {}),
+              ...(tv ? { tv_indicator: tv } : {}),
             },
           }
         : s;
+    };
+
+    /** A past candle's price at a read: its open plus the move so far. */
+    const openOf = (list: Candle[], t: number, move: number) => {
+      const c = list.find((x) => x.time === t);
+      return c ? c.open + move : null;
     };
 
     /** Ask Jev about the pending candle and fold its answers in. */
@@ -839,7 +851,7 @@ export function useGold(
       if (!state) return;
       const fullState = {
         ...state,
-        ...flipExtra(c.time, now - c.time, poolHistory),
+        ...flipExtra(c.time, now - c.time, poolHistory, undefined, c.close),
       };
       // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
       // again (re-ask at least every 15 s, since the time left still matters).
@@ -944,9 +956,15 @@ export function useGold(
                     askFlip(
                       {
                         ...sn.state,
-                        ...flipExtra(sn.time, sn.seconds, history, atrs),
+                        ...flipExtra(
+                          sn.time,
+                          sn.seconds,
+                          history,
+                          atrs,
+                          openOf(history, sn.time, sn.move),
+                        ),
                       },
-                      `past:v2:${sn.time}`,
+                      `past:v3:${sn.time}`,
                       tfMin,
                       market,
                     ),
@@ -1245,10 +1263,7 @@ export function useGold(
         const list = loadStored(m).filter((x) => x.time !== r.time);
         list.push(r);
         list.sort((a, b) => a.time - b.time);
-        localStorage.setItem(
-          liveStoreKey(m),
-          JSON.stringify(list.slice(-500)),
-        );
+        localStorage.setItem(liveStoreKey(m), JSON.stringify(list.slice(-500)));
       } catch {
         // kept for this session only
       }
@@ -1257,7 +1272,7 @@ export function useGold(
       !cancelled &&
       setState((s) => ({ ...s, minute: { ...s.minute, ...patch } }));
     const minuteCacheKey = (m: number) =>
-      `${tfKey("gold.minutecall.v2", where)}.m${m}`;
+      `${tfKey("gold.minutecall.v3", where)}.m${m}`;
 
     const runMinute = async (m: number | null) => {
       const run = ++minuteRun;
@@ -1358,9 +1373,15 @@ export function useGold(
                     askFlip(
                       {
                         ...sn.state,
-                        ...flipExtra(sn.time, sn.seconds, hist, atrs),
+                        ...flipExtra(
+                          sn.time,
+                          sn.seconds,
+                          hist,
+                          atrs,
+                          openOf(hist, sn.time, sn.move),
+                        ),
                       },
-                      `past:v2:m${m}:${sn.time}`,
+                      `past:v3:m${m}:${sn.time}`,
                       tfMin,
                       market,
                     ),
@@ -1453,7 +1474,10 @@ export function useGold(
       try {
         const a = await withTimeout(
           askFlip(
-            { ...state, ...flipExtra(c.time, elapsed, poolHistory) },
+            {
+              ...state,
+              ...flipExtra(c.time, elapsed, poolHistory, undefined, c.close),
+            },
             `v2:m${m}:${c.time}`,
             tfMin,
             market,

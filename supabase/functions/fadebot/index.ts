@@ -46,16 +46,19 @@ import {
   niceStep,
   type Footprint,
 } from "../_shared/jevContext.ts";
-import { runTvIndicator } from "../_shared/tvIndicator.ts";
+import { runTvIndicator, tvContext } from "../_shared/tvIndicator.ts";
 
 const TF = 300; //        5-minute windows
-// Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 30, 60, 120 or 180 (default 30). The page's
-// "Jev at …" choices are the same, so the two share one answer.
+// Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 3, 5, 15, 30, 60, 120 or 180 (default 30). The
+// page's "Jev at …" choices are the same, so the two share one answer.
 const READ_AT = (() => {
   const v = Number(Deno.env.get("FADEBOT_READ_SEC") || (Number(Deno.env.get("FADEBOT_READ_MIN")) * 60 || 30));
-  return [30, 60, 120, 180].includes(v) ? v : 30;
+  return [3, 5, 15, 30, 60, 120, 180].includes(v) ? v : 30;
 })();
 const READ_MIN = Math.ceil(READ_AT / 60); // minutes of BRTI to record before the read
+// Reads in the first few seconds can't wait for the window's own scheduled run (it starts a few seconds late), so
+// the previous window's last run keeps recording past the open and makes the call.
+const EARLY = READ_AT <= 15;
 const env = (k: string) => Deno.env.get(k) ?? "";
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -867,6 +870,9 @@ async function decideWindow(start: number) {
     ...(recentFlow ? { order_flow_recent_candles: recentFlow } : {}),
     ...(nowFlow ? { order_flow_this_candle_so_far: nowFlow } : {}),
   };
+  // The TV indicator, as the website sends it (EMAs live at the current price).
+  const tvc = tvContext(closed, start, TF, forming.close);
+  if (tvc) (extras as Record<string, unknown>).tv_indicator = tvc;
   // Same request key as the website's "Jev at minute N": if both ask within a minute, they share one answer.
   const { pFlip } = await gold<{ pFlip: number }>({
     action: "flip",
@@ -1026,11 +1032,22 @@ async function run() {
   if (m === 4) {
     // The last minute of this window = the next window's price to beat (and this window's settlement minute).
     const from = start + 240;
-    const { ticks, source } = await record(from + 58);
-    await savePeriod(from, from + 60, ticks, source);
-    done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
-    await updateFlow(Date.now() / 1000, null).catch(() => {});
-  } else if (m < READ_MIN) {
+    const next = start + TF;
+    if (EARLY) {
+      // Keep recording into the next window up to the read, then make the next window's call from here.
+      const { ticks, source } = await record(next + READ_AT);
+      await savePeriod(from, from + 60, ticks.filter((t) => t.t < next), source);
+      await savePeriod(next, next + 60, ticks.filter((t) => t.t >= next), source);
+      done.push(`recorded the price to beat and the next window's first ${READ_AT} s (${ticks.length} ticks from ${source})`);
+      await decideWindow(next).catch((e) => skip(next, `error: ${(e as Error).message}`.slice(0, 300)));
+      done.push("decided the next window");
+    } else {
+      const { ticks, source } = await record(from + 58);
+      await savePeriod(from, from + 60, ticks, source);
+      done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
+      await updateFlow(Date.now() / 1000, null).catch(() => {});
+    }
+  } else if (!EARLY && m < READ_MIN) {
     // The minutes before the read, then (READ_AT seconds in) Jev's read and the bet.
     const from = start + m * 60;
     const last = m === READ_MIN - 1;

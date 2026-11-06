@@ -222,3 +222,38 @@ export function runTvIndicator(
         : "NO CALL";
   return { bars, live, pShow, dirTxt, calls, hits, bars_: nBars, greens };
 }
+
+/**
+ * What Jev is shown about the TV indicator for the candle opening at `forTime`: the indicator run over the last
+ * 2,000 candles closed before it, with the EMAs moved by the price now (as the chart draws them live) when known.
+ */
+export function tvContext(
+  closed: Candle[],
+  forTime: number,
+  tfSeconds: number,
+  priceNow: number | null,
+): Record<string, unknown> | null {
+  let end = closed.length;
+  while (end > 0 && closed[end - 1].time + tfSeconds > forTime) end -= 1;
+  const before = closed.slice(Math.max(0, end - 2000), end);
+  if (before.length < 30) return null;
+  const forming = priceNow === null ? null : { time: forTime, open: priceNow, high: priceNow, low: priceNow, close: priceNow };
+  const r = runTvIndicator(before, forming);
+  const last = r.bars[r.bars.length - 1];
+  const fast = r.live?.emaFast ?? last.emaFast;
+  const slow = r.live?.emaSlow ?? last.emaSlow;
+  const r2 = (x: number | null) => (x === null ? null : Number(x.toFixed(2)));
+  return {
+    what: "TradingView-style indicator on this chart: EMA 9/21, RSI 14, ATR 14 scored into a next-candle chance (55% edge to call)",
+    ema_fast_9: r2(fast),
+    ema_slow_21: r2(slow),
+    fast_ema_above_slow: fast === null || slow === null ? null : fast > slow,
+    ema_values_are: priceNow === null ? "at the last close" : "live, at the current price",
+    indicator_call_for_this_candle: r.dirTxt,
+    indicator_chance_green_pct: r.pShow === null ? null : Math.round(r.pShow * 100),
+    indicator_hit_rate_pct: r.calls ? Number(((r.hits * 100) / r.calls).toFixed(1)) : null,
+    indicator_calls_counted: r.calls,
+    green_candles_pct: r.bars_ ? Number(((r.greens * 100) / r.bars_).toFixed(1)) : null,
+    candles_counted: r.bars_,
+  };
+}
