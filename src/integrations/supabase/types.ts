@@ -40,6 +40,7 @@ export type Database = {
           stake: number | null
           status: string | null
           step: number | null
+          tv15: string | null
           window_start: number
         }
         Insert: {
@@ -67,6 +68,7 @@ export type Database = {
           stake?: number | null
           status?: string | null
           step?: number | null
+          tv15?: string | null
           window_start: number
         }
         Update: {
@@ -94,6 +96,7 @@ export type Database = {
           stake?: number | null
           status?: string | null
           step?: number | null
+          tv15?: string | null
           window_start?: number
         }
         Relationships: []
@@ -110,6 +113,48 @@ export type Database = {
         Update: {
           fp?: Json
           time?: number
+        }
+        Relationships: []
+      }
+      fadebot_pmhist: {
+        Row: {
+          down_low: number | null
+          down_read: number | null
+          error: string | null
+          fetched_at: string | null
+          long_is: string | null
+          n_points: number | null
+          sample: string | null
+          slug: string | null
+          up_low: number | null
+          up_read: number | null
+          window_start: number
+        }
+        Insert: {
+          down_low?: number | null
+          down_read?: number | null
+          error?: string | null
+          fetched_at?: string | null
+          long_is?: string | null
+          n_points?: number | null
+          sample?: string | null
+          slug?: string | null
+          up_low?: number | null
+          up_read?: number | null
+          window_start: number
+        }
+        Update: {
+          down_low?: number | null
+          down_read?: number | null
+          error?: string | null
+          fetched_at?: string | null
+          long_is?: string | null
+          n_points?: number | null
+          sample?: string | null
+          slug?: string | null
+          up_low?: number | null
+          up_read?: number | null
+          window_start?: number
         }
         Relationships: []
       }
