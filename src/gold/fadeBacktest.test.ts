@@ -123,16 +123,25 @@ describe("EMA-rule backtest", () => {
     expect(r.skippedFlipsRegime).toBe(2);
   });
 
-  it("EMAs close: bets against a hold that matches the last candle; skips flips and other holds", () => {
+  it("EMAs close: bets against a hold that matches the last candle, only when the EMAs point against Jev", () => {
     // close EMAs ($20 apart, need $60)
+    // slow above fast (EMAs down), Jev holds up, last candle green → bet down
     expect(bot.emaRuleDecision(0.7, 2, 100, 120, 60, "up")).toMatchObject({
       side: "down",
       kind: "hold-fade-chop",
     });
+    // fast above slow (EMAs up), Jev holds down, last candle red → bet up
     expect(bot.emaRuleDecision(0.3, -2, 120, 100, 60, "down")).toMatchObject({
       side: "up",
       kind: "hold-fade-chop",
     });
+    // EMAs point the same way as Jev → no bet
+    expect("skip" in bot.emaRuleDecision(0.7, 2, 120, 100, 60, "up")).toBe(
+      true,
+    );
+    expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 100, 60, "up")).toBe(
+      true,
+    ); // level EMAs
     expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 120, 60, "down")).toBe(
       true,
     ); // last candle red
@@ -148,19 +157,21 @@ describe("EMA-rule backtest", () => {
       kind: "hold-ema",
     });
 
-    const candles = Array.from({ length: 60 }, (_, i) => ({
+    // falling candles → fast below slow (EMAs down)
+    const down = Array.from({ length: 60 }, (_, i) => ({
       time: i * 300,
-      close: 100 + i,
+      close: 200 - i,
     }));
     const reads: Read[] = [
-      { time: 40 * 300, open: 139, move: 2, pJev: 0.7, y: 0, last: 1 }, // hold green, last green → bet red → win
-      { time: 41 * 300, open: 140, move: 2, pJev: 0.7, y: 1, last: 0 }, // last red → skip
-      { time: 42 * 300, open: 141, move: -2, pJev: 0.7, y: 1, last: 1 }, // flip → skip
+      { time: 40 * 300, open: 161, move: 2, pJev: 0.7, y: 0, last: 1 }, // hold green, last green, EMAs down → bet red → win
+      { time: 41 * 300, open: 160, move: 2, pJev: 0.7, y: 1, last: 0 }, // last red → skip
+      { time: 42 * 300, open: 159, move: -2, pJev: 0.7, y: 1, last: 1 }, // flip → skip
+      { time: 43 * 300, open: 158, move: -2, pJev: 0.3, y: 1, last: 0 }, // hold red, last red, but EMAs down too → skip
     ];
-    const r = backtest(reads, emasAtReads(candles, reads), 60);
+    const r = backtest(reads, emasAtReads(down, reads), 60);
     expect(r.chop).toEqual({ n: 1, wins: 1 });
     expect(r.bot).toEqual({ n: 1, wins: 1 });
-    expect(r.skippedHolds).toBe(1);
+    expect(r.skippedHolds).toBe(2);
     expect(r.skippedFlips).toBe(1);
   });
 });
