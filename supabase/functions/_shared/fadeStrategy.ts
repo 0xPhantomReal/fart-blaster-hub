@@ -121,9 +121,9 @@ export function fadeCallDecision(
  * The EMA rule (Jev's read + the chart's fast/slow EMAs).
  * EMAs at least `minGap` apart (a trend):
  *   bet WITH Jev's call (hold or flip) when the EMAs agree: up with fast > slow, down with fast < slow; else no bet
- * EMAs closer than `minGap` (no clear trend): bet WITH Jev only when the EMAs point Jev's way —
- *   a HOLD call: nothing more needed
- *   a FLIP call: the last closed candle must also be the opposite color of Jev's call
+ * EMAs closer than `minGap` (no clear trend):
+ *   a HOLD call the same color as the last closed candle, with the EMAs pointing against Jev → bet AGAINST Jev
+ *   a FLIP call with the EMAs pointing Jev's way and the last candle the other color from the call → bet WITH Jev
  *   anything else → no bet
  * Always no bet on a 50% read or a candle exactly at its open.
  */
@@ -138,7 +138,7 @@ export function emaRuleDecision(
   | {
       side: Side;
       sure: number;
-      kind: "flip-ema" | "hold-ema" | "hold-with-chop" | "flip-with-chop";
+      kind: "flip-ema" | "hold-ema" | "hold-fade-chop" | "flip-with-chop";
     }
   | { skip: string } {
   if (pGreen === 0.5) return { skip: "no call (50%)" };
@@ -155,24 +155,32 @@ export function emaRuleDecision(
   const gap = Math.abs(emaFast - emaSlow);
   if (gap < minGap - 1e-9) {
     const close = `EMAs only $${gap.toFixed(2)} apart (under $${minGap})`;
-    // Bet WITH Jev only when the EMAs point Jev's way. A hold needs nothing more; a flip also needs the last closed
-    // candle to be the opposite color of Jev's call.
     const emaSide: Side | null =
       emaFast > emaSlow ? "up" : emaFast < emaSlow ? "down" : null;
+    const opp: Side = jev === "up" ? "down" : "up";
+    const emas = emaSide === null ? "are level" : `point ${emaSide}`;
+    if (kind === "hold-ema") {
+      // HOLD: the last candle is Jev's color AND the EMAs point against Jev → bet AGAINST Jev (the EMAs' side).
+      if (lastColor !== jev)
+        return {
+          skip: `hold ${color(jev)} with ${close}, but the last candle was ${color(lastColor)} (needs ${color(jev)})`,
+        };
+      if (emaSide !== opp)
+        return {
+          skip: `hold ${color(jev)} with ${close}, but the EMAs ${emas} (need ${opp})`,
+        };
+      return { side: opp, sure, kind: "hold-fade-chop" };
+    }
+    // FLIP: the EMAs point Jev's way AND the last candle is the other color from Jev's call → bet WITH Jev.
     if (emaSide !== jev)
       return {
-        skip: `${call} ${color(jev)} with ${close}, but the EMAs ${emaSide === null ? "are level" : `point ${emaSide}`}`,
+        skip: `flip ${color(jev)} with ${close}, but the EMAs ${emas} (need ${jev})`,
       };
-    const opp: Side = jev === "up" ? "down" : "up";
-    if (kind === "flip-ema" && lastColor !== opp)
+    if (lastColor !== opp)
       return {
         skip: `flip ${color(jev)} with ${close}, but the last candle was ${color(lastColor)} (needs ${color(opp)})`,
       };
-    return {
-      side: jev,
-      sure,
-      kind: kind === "flip-ema" ? "flip-with-chop" : "hold-with-chop",
-    };
+    return { side: jev, sure, kind: "flip-with-chop" };
   }
 
   if (

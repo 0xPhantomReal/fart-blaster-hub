@@ -51,32 +51,17 @@ describe("EMA-rule backtest", () => {
   });
 
   it("the $60 line switches from the trend rule to the close-EMAs rule", () => {
-    const candles = Array.from({ length: 60 }, (_, i) => ({
-      time: i * 300,
-      close: 100 + i,
-    }));
-    const e = emasAtReads(candles, [
-      { time: 40 * 300, open: 139, move: 2, pJev: 0.7, y: 1 },
-    ]).get(40 * 300)!;
-    const gap = e.fast - e.slow; // a few dollars on this series
-    expect(
-      bot.emaRuleDecision(0.7, 2, e.fast, e.slow, gap - 0.5),
-    ).toMatchObject({ side: "up", kind: "hold-ema" });
-    expect(
-      bot.emaRuleDecision(0.7, 2, e.fast, e.slow, gap + 0.5),
-    ).toMatchObject({ side: "up", kind: "hold-with-chop" });
     expect(bot.emaRuleDecision(0.3, -2, 100, 160, 60)).toMatchObject({
       side: "down",
       kind: "hold-ema",
     }); // exactly $60
-    expect(bot.emaRuleDecision(0.3, -2, 100, 159.9, 60)).toMatchObject({
-      side: "down",
-      kind: "hold-with-chop",
-    }); // $59.90
-    // a flip just under the line needs the last candle the other color
-    expect("skip" in bot.emaRuleDecision(0.3, 2, 100, 159.9, 60, "down")).toBe(
+    expect("skip" in bot.emaRuleDecision(0.3, -2, 100, 159.9, 60, "down")).toBe(
       true,
-    );
+    ); // $59.90: EMAs agree → none
+    expect(bot.emaRuleDecision(0.3, -2, 159.9, 100, 60, "down")).toMatchObject({
+      side: "up",
+      kind: "hold-fade-chop",
+    });
     expect(bot.emaRuleDecision(0.3, 2, 100, 159.9, 60, "up")).toMatchObject({
       side: "down",
       kind: "flip-with-chop",
@@ -135,43 +120,46 @@ describe("EMA-rule backtest", () => {
     expect(r.skippedFlipsRegime).toBe(2);
   });
 
-  it("EMAs close: with Jev when the EMAs agree; flips also need the last candle the other color (your answers)", () => {
-    // holds — EMAs agree with Jev → with Jev, whatever the last candle
-    expect(bot.emaRuleDecision(0.7, 2, 120, 100, 60, "up")).toMatchObject({
+  it("EMAs close: holds = last candle + EMAs against → against Jev; flips with EMAs + last other color → with Jev", () => {
+    // HOLD green after green, EMAs down (against Jev) → bet Down
+    expect(bot.emaRuleDecision(0.7, 2, 100, 115, 60, "up")).toMatchObject({
+      side: "down",
+      kind: "hold-fade-chop",
+    });
+    // HOLD red after red, EMAs up (against Jev) → bet Up
+    expect(bot.emaRuleDecision(0.3, -2, 115, 100, 60, "down")).toMatchObject({
       side: "up",
-      kind: "hold-with-chop",
-    }); // case 1
-    expect(
-      bot.emaRuleDecision(0.62, 2, 75899.08, 75845.23, 60, "down"),
-    ).toMatchObject({
-      side: "up",
-      kind: "hold-with-chop",
-    }); // case 2 (your 17:44 example)
-    // holds — EMAs against Jev → no bet, whatever the last candle
-    expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 115, 60, "up")).toBe(
+      kind: "hold-fade-chop",
+    });
+    // HOLD after the other color → no bet (your answer), whatever the EMAs
+    expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 115, 60, "down")).toBe(
       true,
-    ); // case 3
+    );
     expect(
-      "skip" in bot.emaRuleDecision(0.44, -2, 75846.13, 75843.84, 60, "up"),
-    ).toBe(true); // case 4 (19:10)
-    // flips — EMAs agree and last candle the other color from the call → with Jev (your 19:08 example)
+      "skip" in bot.emaRuleDecision(0.62, 2, 75899.08, 75845.23, 60, "down"),
+    ).toBe(true); // 17:44
+    // HOLD after the same color but EMAs agree with Jev → no bet
+    expect("skip" in bot.emaRuleDecision(0.7, 2, 115, 100, 60, "up")).toBe(
+      true,
+    );
+    // FLIP red (candle green), EMAs down, last green → bet Down (your 19:08 example)
     expect(
       bot.emaRuleDecision(0.28, 2, 75818.8, 75830.83, 60, "up"),
     ).toMatchObject({
       side: "down",
       kind: "flip-with-chop",
     });
-    // flips — EMAs agree but last candle the same color as the call (17:47) → no bet
+    // FLIP with the EMAs but last candle the same color as the call (17:47) → no bet
     expect(
       "skip" in bot.emaRuleDecision(0.62, -2, 75911.33, 75860.81, 60, "up"),
     ).toBe(true);
-    // flips — EMAs against → no bet
+    // FLIP against the EMAs → no bet; level EMAs → no bet
     expect("skip" in bot.emaRuleDecision(0.7, -2, 100, 120, 60, "down")).toBe(
       true,
     );
-    expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 100, 60, "down")).toBe(
+    expect("skip" in bot.emaRuleDecision(0.7, 2, 100, 100, 60, "up")).toBe(
       true,
-    ); // level EMAs
+    );
     // far apart: the trend rule
     expect(bot.emaRuleDecision(0.7, 2, 200, 100, 60, "up")).toMatchObject({
       side: "up",
@@ -184,16 +172,17 @@ describe("EMA-rule backtest", () => {
       close: 200 - i,
     }));
     const reads: Read[] = [
-      { time: 40 * 300, open: 161, move: -2, pJev: 0.3, y: 0, last: 0 }, // hold red, EMAs down → bet red → win
-      { time: 41 * 300, open: 160, move: 2, pJev: 0.7, y: 0, last: 1 }, // hold green, EMAs against → skip
-      { time: 42 * 300, open: 159, move: 2, pJev: 0.3, y: 1, last: 1 }, // flip red, last green → bet red → loss
-      { time: 43 * 300, open: 158, move: 2, pJev: 0.3, y: 1, last: 0 }, // flip red, last red → skip
+      { time: 40 * 300, open: 161, move: 2, pJev: 0.7, y: 0, last: 1 }, // hold green after green, EMAs down → bet red → win
+      { time: 41 * 300, open: 160, move: 2, pJev: 0.7, y: 0, last: 0 }, // hold green after red → skip
+      { time: 42 * 300, open: 159, move: -2, pJev: 0.3, y: 0, last: 0 }, // hold red after red, EMAs agree → skip
+      { time: 43 * 300, open: 158, move: 2, pJev: 0.3, y: 1, last: 1 }, // flip red, last green → bet red → loss
+      { time: 44 * 300, open: 157, move: 2, pJev: 0.3, y: 1, last: 0 }, // flip red, last red → skip
     ];
     const r = backtest(reads, emasAtReads(down, reads), 60);
     expect(r.chop).toEqual({ n: 1, wins: 1 });
     expect(r.chopFlips).toEqual({ n: 1, wins: 0 });
     expect(r.bot).toEqual({ n: 2, wins: 1 });
-    expect(r.skippedHolds).toBe(1);
+    expect(r.skippedHolds).toBe(2);
     expect(r.skippedFlips).toBe(1);
   });
 });

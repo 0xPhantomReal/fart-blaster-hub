@@ -84,9 +84,10 @@ export function FadeBotPanel({
         {cfg.flipNeedsRegime
           ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
           : " "}
-        When the EMAs are closer than ${cfg.emaGap ?? 60}, it still bets with
-        Jev when the EMAs agree, but a flip call also needs the last candle to
-        be the opposite color of the call. Otherwise no bet. Each bet is a limit
+        When the EMAs are closer than ${cfg.emaGap ?? 60}, it bets against a
+        hold call that's the same color as the last candle when the EMAs point
+        against Jev, and with a flip call when the EMAs agree and the last
+        candle was the opposite color. Otherwise no bet. Each bet is a limit
         order for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}
         ¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until

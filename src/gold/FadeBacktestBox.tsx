@@ -127,7 +127,10 @@ export function FadeBacktestBox({
               {row("Bot rule (all bets)", r.bot, true)}
               {row("· flip calls with the EMAs", r.flips)}
               {row("· hold calls with the EMAs", r.holdsEma)}
-              {row(`· EMAs under $${emaGap}: hold with the EMAs`, r.chop)}
+              {row(
+                `· EMAs under $${emaGap}: hold = last candle, EMAs against → against Jev`,
+                r.chop,
+              )}
               {row(
                 `· EMAs under $${emaGap}: flip with the EMAs, last candle opposite`,
                 r.chopFlips,
