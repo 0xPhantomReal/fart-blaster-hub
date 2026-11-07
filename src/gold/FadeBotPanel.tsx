@@ -50,6 +50,7 @@ export function FadeBotPanel({
       emaTf={emaTf}
       emaGap={emaGap}
       flipNeedsRegime={flipNeedsRegime}
+      pmPoints={s?.pmPoints}
     />
   );
   if (s === undefined) return null;

@@ -186,3 +186,22 @@ describe("EMA-rule backtest", () => {
     expect(r.skippedFlips).toBe(1);
   });
 });
+
+describe("backtest bets list", () => {
+  it("lists each bet with its rows, for the fill check", () => {
+    const reads = [
+      { time: 600, open: 100, move: 5, pJev: 0.7, y: 1 as const, last: 1 as const },
+      { time: 900, open: 100, move: 5, pJev: 0.3, y: 1 as const, last: 1 as const },
+    ];
+    const emas = new Map([
+      [600, { fast: 200, slow: 100 }],
+      [900, { fast: 200, slow: 100 }],
+    ]);
+    const r = backtest(reads, emas, 30);
+    const b600 = r.bets.find((b) => b.time === 600)!;
+    expect(b600).toMatchObject({ up: true, win: true });
+    expect(b600.cats.sort()).toEqual(["bot", "holdsAll", "holdsEma"].sort());
+    const b900 = r.bets.filter((b) => b.time === 900);
+    expect(b900.map((b) => b.cats)).toEqual([["flipsAll"]]);
+  });
+});

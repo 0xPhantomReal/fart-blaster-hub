@@ -777,6 +777,8 @@ export interface FadeBotStatus {
   nextStake: number;
   bets: FadeBotBet[];
   /** Polymarket's own prices per 5-minute window (last 6 hours), from its price history (about one point a minute). */
+  /** Polymarket price points per window (last 24 h): [seconds into the window, Up cost, Down cost]. */
+  pmPoints?: { window_start: number | string; pts: [number, number | null, number | null][] }[];
   pmHistory?: {
     window_start: string | number;
     up_low: number | null;

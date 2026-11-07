@@ -21,7 +21,17 @@ export interface Tally {
   n: number;
   wins: number;
 }
+export type Cat = "flips" | "holdsEma" | "chop" | "chopFlips" | "holdsAll" | "flipsAll";
+/** One bet the backtest made: the candle, the side, whether it won, and which rows it counts in. */
+export interface Bet {
+  time: number;
+  up: boolean;
+  win: boolean;
+  cats: (Cat | "bot")[];
+}
+
 export interface Backtest {
+  bets: Bet[];
   bot: Tally; //       every bet the rule makes
   flips: Tally; //     of which: flip calls that agreed with the EMAs
   holdsEma: Tally; //  of which: hold calls that agreed with the EMAs
@@ -69,6 +79,7 @@ export function backtest(
 ): Backtest {
   const t = (): Tally => ({ n: 0, wins: 0 });
   const out: Backtest = {
+    bets: [],
     bot: t(),
     flips: t(),
     holdsEma: t(),
@@ -80,11 +91,17 @@ export function backtest(
     skippedFlips: 0,
     skippedFlipsRegime: 0,
   };
+  let cur: Read | null = null;
   const add = (x: Tally, up: boolean, y: 0 | 1) => {
     x.n += 1;
     if (up === (y === 1)) x.wins += 1;
+    const cat = (Object.keys(out) as (keyof Backtest)[]).find((k) => out[k] === x) as Cat | "bot";
+    const b = out.bets.find((z) => z.time === cur!.time && z.up === up);
+    if (b) b.cats.push(cat);
+    else out.bets.push({ time: cur!.time, up, win: up === (y === 1), cats: [cat] });
   };
   for (const r of reads) {
+    cur = r;
     if (r.y === null || r.pJev === 0.5 || r.move === 0) continue;
     const e = emas.get(r.time);
     if (!e) continue; // no EMA for that candle: leave it out of every row

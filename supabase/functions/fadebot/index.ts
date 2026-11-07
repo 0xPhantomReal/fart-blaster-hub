@@ -173,6 +173,9 @@ async function setup() {
     up_read double precision, down_read double precision, n_points int, error text, sample text,
     fetched_at timestamptz default now())`;
   await sql`alter table fadebot_pmhist enable row level security`;
+  // Every price point inside the window, [seconds into the window, Up price, Down price], so the page can check
+  // whether a limit order placed at any second would have filled.
+  await sql`alter table fadebot_pmhist add column if not exists pts jsonb`;
   // Only this function (through the database connection) reads and writes these tables.
   await sql`alter table fadebot_prices enable row level security`;
   await sql`alter table fadebot_bets5 enable row level security`;
@@ -776,17 +779,18 @@ async function priceHistory(slug: string): Promise<{ pts: ReturnType<typeof hist
   return { pts: [], sample: last };
 }
 
-/** Fill in the price history for finished windows (the scheduled run, a batch at a time, last 6 hours). */
+/** Fill in the price history for finished windows (the scheduled run, a batch at a time, last 24 hours). */
 async function updatePmHistory(now: number) {
   const sql = db();
   const last = Math.floor(now / TF) * TF - TF; // the newest finished window (ended at least a few seconds ago)
   const done = new Set(
-    (await sql`select window_start from fadebot_pmhist where window_start > ${last - 72 * TF} and (n_points > 0 or fetched_at > now() - interval '30 minutes')`).map(
+    (await sql`select window_start from fadebot_pmhist where window_start > ${last - 288 * TF}
+      and ((n_points > 0 and pts is not null) or fetched_at > now() - interval '30 minutes')`).map(
       (r) => Number(r.window_start),
     ),
   );
-  let budget = 24;
-  for (let ws = last - TF; ws > last - 72 * TF && budget > 0; ws -= TF) {
+  let budget = 30;
+  for (let ws = last - TF; ws > last - 288 * TF && budget > 0; ws -= TF) {
     // (the window that just ended is left for the next run, so its last minute is in the history)
     if (done.has(ws)) continue;
     budget -= 1;
@@ -821,6 +825,7 @@ async function updatePmHistory(now: number) {
           n_points: inWin.length,
           error: inWin.length ? null : pts.length ? "no points inside the window" : "no price history",
           sample: inWin.length ? null : sample,
+          pts: sql.json(inWin.map((p) => [p.t - ws, up(p), down(p)])),
         };
       }
     } catch (e) {
@@ -829,9 +834,9 @@ async function updatePmHistory(now: number) {
     await sql`insert into fadebot_pmhist ${sql(row)} on conflict (window_start) do update set
       slug = excluded.slug, long_is = excluded.long_is, up_low = excluded.up_low, down_low = excluded.down_low,
       up_read = excluded.up_read, down_read = excluded.down_read, n_points = excluded.n_points,
-      error = excluded.error, sample = excluded.sample, fetched_at = now()`;
+      error = excluded.error, sample = excluded.sample, pts = excluded.pts, fetched_at = now()`;
   }
-  await sql`delete from fadebot_pmhist where window_start < ${Math.floor(now - 3 * 86400)}`;
+  await sql`delete from fadebot_pmhist where window_start < ${Math.floor(now - 7 * 86400)}`;
 }
 
 // ── The TradingView indicator on 15-minute candles ───────────────────
@@ -1428,6 +1433,9 @@ async function status() {
     pmHistory: await db()`select h.window_start, h.up_low, h.down_low, h.up_read, h.down_read, h.n_points, h.long_is,
         h.error, h.sample, r.outcome from fadebot_pmhist h left join fadebot_reads5 r on r.window_start = h.window_start
         where h.window_start > ${now - 6 * 3600} order by h.window_start desc`.catch(() => []),
+    // Price points per window (last 24 hours) for the backtest's fill check.
+    pmPoints: await db()`select window_start, pts from fadebot_pmhist where window_start > ${now - 86400}
+        and pts is not null and n_points > 0`.catch(() => []),
   };
 }
 

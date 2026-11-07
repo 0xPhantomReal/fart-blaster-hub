@@ -1,5 +1,12 @@
 import { useMemo } from "react";
-import { backtest, emasAtReads, type Read, type Tally } from "./fadeBacktest";
+import {
+  backtest,
+  emasAtReads,
+  type Bet,
+  type Cat,
+  type Read,
+  type Tally,
+} from "./fadeBacktest";
 import type { ClosedBar } from "./useGold";
 
 const MUTED = "text-[#8b949e]";
@@ -20,6 +27,7 @@ export function FadeBacktestBox({
   emaTf,
   emaGap,
   flipNeedsRegime,
+  pmPoints,
 }: {
   bars: ClosedBar[];
   readSec: number | null; // the "Jev at …" read the chart is showing (null = not a minute read)
@@ -31,6 +39,10 @@ export function FadeBacktestBox({
   emaTf: number;
   emaGap: number;
   flipNeedsRegime: boolean;
+  pmPoints?: {
+    window_start: number | string;
+    pts: [number, number | null, number | null][];
+  }[];
 }) {
   const reads = useMemo((): Read[] => {
     const colorAt = new Map(
@@ -76,13 +88,50 @@ export function FadeBacktestBox({
       flipNeedsRegime,
     );
   }, [bars, reads, readSec, emaGap, flipNeedsRegime]);
+  // Would the limit order have filled? Polymarket's price history (the cost to buy each side, about one point a
+  // minute) after the read: filled if that side cost the limit price or less at any point before the window ended.
+  const tfSec =
+    bars.length > 1
+      ? bars[bars.length - 1].candle.time - bars[bars.length - 2].candle.time
+      : 300;
+  const ptsBy = useMemo(
+    () => new Map((pmPoints ?? []).map((w) => [Number(w.window_start), w.pts])),
+    [pmPoints],
+  );
+  const lowAfterRead = (b: Bet): number | null => {
+    const pts = ptsBy.get(b.time);
+    if (!pts || readSec === null) return null;
+    const after = pts
+      .filter(([t]) => t >= readSec && t < tfSec)
+      .map(([, up, down]) => (b.up ? up : down))
+      .filter((x): x is number => typeof x === "number");
+    return after.length ? Math.min(...after) : null;
+  };
+  const fills = (cat: Cat | "bot") => {
+    const bets = (r?.bets ?? []).filter((b) => b.cats.includes(cat));
+    let checked = 0;
+    let filled = 0;
+    let wins = 0;
+    for (const b of bets) {
+      const low = lowAfterRead(b);
+      if (low === null) continue;
+      checked += 1;
+      if (low <= limitPrice + 1e-9) {
+        filled += 1;
+        if (b.win) wins += 1;
+      }
+    }
+    return { checked, filled, wins };
+  };
   const fmtRead = (s: number) => (s < 60 ? `${s}s` : `${s / 60} min`);
   // P&L per filled order: a win pays (1 − price) a share, a loss costs the price.
   const pnl = (x: Tally) =>
     (x.wins * (1 - limitPrice) - (x.n - x.wins) * limitPrice) * limitShares;
-  const row = (label: string, x: Tally, strong = false) => {
+  const row = (label: string, x: Tally, cat: Cat | "bot", strong = false) => {
     const p = x.n ? x.wins / x.n : null;
     const v = pnl(x);
+    const f = fills(cat);
+    const fv = pnl({ n: f.filled, wins: f.wins });
     return (
       <tr>
         <td className="py-0.5">{label}</td>
@@ -96,6 +145,28 @@ export function FadeBacktestBox({
           className={`py-0.5 text-right ${x.n === 0 ? MUTED : v >= 0 ? GREEN : RED}`}
         >
           {x.n ? `${v >= 0 ? "+" : "−"}$${Math.abs(v).toFixed(2)}` : "—"}
+        </td>
+        <td
+          className={`py-0.5 text-right ${MUTED}`}
+          title={
+            f.checked
+              ? `${f.filled} of ${f.checked} bets with Polymarket prices got down to ${Math.round(limitPrice * 100)}¢`
+              : "no Polymarket prices for these candles"
+          }
+        >
+          {f.checked ? `${f.filled}/${f.checked}` : "—"}
+        </td>
+        <td
+          className={`py-0.5 text-right ${f.filled === 0 ? MUTED : f.wins / f.filled > limitPrice ? GREEN : RED}`}
+        >
+          {f.filled ? `${((f.wins / f.filled) * 100).toFixed(1)}%` : "—"}
+        </td>
+        <td
+          className={`py-0.5 text-right ${f.filled === 0 ? MUTED : fv >= 0 ? GREEN : RED}`}
+        >
+          {f.checked
+            ? `${fv >= 0 ? "+" : "−"}$${Math.abs(fv).toFixed(2)}`
+            : "—"}
         </td>
       </tr>
     );
@@ -121,22 +192,32 @@ export function FadeBacktestBox({
                 <th className="pb-1 text-right font-medium">Won</th>
                 <th className="pb-1 text-right font-medium">Bets</th>
                 <th className="pb-1 text-right font-medium">If all filled</th>
+                <th
+                  className="pb-1 text-right font-medium"
+                  title="Bets whose side got down to the limit price after the read / bets with Polymarket prices"
+                >
+                  Filled
+                </th>
+                <th className="pb-1 text-right font-medium">Won (filled)</th>
+                <th className="pb-1 text-right font-medium">Real P&amp;L</th>
               </tr>
             </thead>
             <tbody>
-              {row("Bot rule (all bets)", r.bot, true)}
-              {row("· flip calls with the EMAs", r.flips)}
-              {row("· hold calls with the EMAs", r.holdsEma)}
+              {row("Bot rule (all bets)", r.bot, "bot", true)}
+              {row("· flip calls with the EMAs", r.flips, "flips")}
+              {row("· hold calls with the EMAs", r.holdsEma, "holdsEma")}
               {row(
                 `· EMAs under $${emaGap}: hold = last candle, EMAs against → against Jev`,
                 r.chop,
+                "chop",
               )}
               {row(
                 `· EMAs under $${emaGap}: flip with the EMAs, last candle opposite`,
                 r.chopFlips,
+                "chopFlips",
               )}
-              {row("Every flip call, no EMA check", r.flipsAll)}
-              {row("Every hold call, no EMA check", r.holdsAll)}
+              {row("Every flip call, no EMA check", r.flipsAll, "flipsAll")}
+              {row("Every hold call, no EMA check", r.holdsAll, "holdsAll")}
             </tbody>
           </table>
           <p className={`mt-1 ${MUTED}`}>
@@ -156,7 +237,14 @@ export function FadeBacktestBox({
             {Math.round(limitPrice * 100)}¢, so it needs to win more than{" "}
             {Math.round(limitPrice * 100)}% of filled orders. A limit order only
             fills if the side gets that cheap, which happens most on the bets
-            that end up losing, so "If all filled" is the best case.
+            that end up losing, so "If all filled" is the best case. "Filled"
+            checks Polymarket's own price history: a bet counts as filled if its
+            side cost {Math.round(limitPrice * 100)}¢ or less at any point after
+            the read and before the window ended; "Won (filled)" and "Real
+            P&amp;L" count only those. Polymarket keeps about one price a
+            minute, so a quick dip between points is missed (fills are, if
+            anything, undercounted), and price history only covers the last 24
+            hours the bot has collected ({ptsBy.size} windows so far).
             {readSec !== botReadSec
               ? ` The bot reads at ${fmtRead(botReadSec)}, so this is a stand-in.`
               : ""}
