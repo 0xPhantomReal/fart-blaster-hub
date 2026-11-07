@@ -1,9 +1,16 @@
 // Polymarket US bot for "BTC Up or Down: 5 min", run by a schedule every minute (pg_cron).
 //
+// FADEBOT_STRATEGY = lightspeed (the default): the Lightspeed fade. Minutes 0–1 of each window, the bot watches every
+//   BRTI tick; when the candle's move so far (from the website's candle open) gets bigger than Lightspeed's typical move
+//   in the time left (FADEBOT_LS_WINDOW_SEC, default the first 120 s), it market-buys $1 (FADEBOT_LS_BET) of the
+//   opposite side. Every run then checks the bid every 2 s and market-sells the whole position once it's worth
+//   FADEBOT_TAKE_PROFIT × the buy price (default 2 = 100% profit); otherwise it's held to settlement. Jev isn't asked.
+//   FADEBOT_STRATEGY = jev-ema: the older rule below.
+//
 // Each 5-minute window [S, S+300):
 //   minute 4 of the previous window (S−60 … S): record BRTI → the "price to beat" (60-second average)
 //   S … S+READ: record BRTI, then (FADEBOT_READ_SEC: 30, 60, 120 or 180 seconds in, default 30) ask Jev whether the candle ends green or red, with
-//     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 15 candles,
+//     exactly the website's "Jev at minute N" question: the candle as the website builds it, the last 40 candles,
 //     market context and Coinbase order flow (kept current every minute), and the same request key, so the two
 //     share one answer when they ask within a minute.
 //     The EMA rule, at that read:
@@ -32,6 +39,8 @@ import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
+  lightspeedFadeDecision,
+  takeProfitPrice,
   pnl,
   regimeOf,
   REGIME_N,
@@ -87,6 +96,14 @@ const settings = () => ({
   // Flip trades only in the "Jev right" regime (Jev right on more than half of its last 12 reads); off = any regime.
   flipNeedsRegime: env("FADEBOT_FLIP_REGIME") !== "off",
   readAt: READ_AT,
+  // Which rule bets: "lightspeed" (default) = the Lightspeed fade with market orders; "jev-ema" = the old Jev + EMA
+  // limit orders.
+  strategy: env("FADEBOT_STRATEGY") === "jev-ema" ? "jev-ema" : "lightspeed",
+  // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
+  // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
+  lsBet: Number(env("FADEBOT_LS_BET") || 1),
+  lsWindowSec: Number(env("FADEBOT_LS_WINDOW_SEC") || 120),
+  takeProfit: Number(env("FADEBOT_TAKE_PROFIT") || 2),
 });
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -129,6 +146,11 @@ async function setup() {
   await sql`alter table fadebot_bets5 add column if not exists regime text`;
   await sql`alter table fadebot_bets5 add column if not exists kind text`;
   await sql`alter table fadebot_bets5 add column if not exists tv15 text`;
+  // Lightspeed fade: the take-profit target and the sale.
+  await sql`alter table fadebot_bets5 add column if not exists target_price double precision`;
+  await sql`alter table fadebot_bets5 add column if not exists exit_price double precision`;
+  await sql`alter table fadebot_bets5 add column if not exists exit_order_id text`;
+  await sql`alter table fadebot_bets5 add column if not exists exit_at timestamptz`;
   // Polymarket's own price history per 5-minute market: the lowest Up and Down prices during the window.
   await sql`create table if not exists fadebot_pmhist (
     window_start bigint primary key, slug text, long_is text, up_low double precision, down_low double precision,
@@ -160,7 +182,10 @@ async function gold<T>(body: Record<string, unknown>): Promise<T> {
 }
 
 /** BTC ticks until `until` (unix s), from the BRTI stream (Pyth if BRTI isn't available). */
-async function record(until: number): Promise<{ ticks: { t: number; p: number }[]; source: string }> {
+async function record(
+  until: number,
+  onTick?: (t: number, p: number) => void,
+): Promise<{ ticks: { t: number; p: number }[]; source: string }> {
   const ticks: { t: number; p: number }[] = [];
   let source = "?";
   while (Date.now() / 1000 < until - 0.5) {
@@ -187,7 +212,10 @@ async function record(until: number): Promise<{ ticks: { t: number; p: number }[
           if (!line) continue;
           const m = JSON.parse(line);
           if (m.source) source = m.source;
-          else if (typeof m.t === "number" && typeof m.p === "number") ticks.push({ t: m.t, p: m.p });
+          else if (typeof m.t === "number" && typeof m.p === "number") {
+            ticks.push({ t: m.t, p: m.p });
+            onTick?.(m.t, m.p);
+          }
         }
       }
     } catch {
@@ -531,6 +559,38 @@ async function limitBuy(m: WindowMarket, side: Side, price: number, shares: numb
   return r.id;
 }
 
+/** What one share of `side` sells for now (0–1): YES sells at the best YES bid; NO at 1 − the best YES ask. */
+async function sellPriceFor(m: WindowMarket, side: Side): Promise<number | null> {
+  const b = await pm().markets.bbo(m.slug);
+  if (side === m.longIs) return b.bestBid ? Number(b.bestBid.value) : null;
+  return b.bestAsk ? Number((1 - Number(b.bestAsk.value)).toFixed(4)) : null;
+}
+
+/** Market-sell the whole position in this market. Returns the average price per share for our side. */
+async function marketSellAll(m: WindowMarket, side: Side, expect: number) {
+  const r = await pm().orders.closePosition({
+    marketSlug: m.slug,
+    manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+    synchronousExecution: true,
+    maxBlockTime: "5",
+  });
+  let shares = 0;
+  let notional = 0;
+  let fees = 0;
+  for (const x of r.executions ?? []) {
+    const q = Number(x.lastShares ?? 0);
+    if (q > 0) {
+      shares += q;
+      notional += q * Number(x.lastPx?.value ?? 0);
+    }
+    fees += Number(x.commissionNotionalCollected?.value ?? 0);
+  }
+  let price = shares ? notional / shares : 0;
+  // Fills may be reported in YES prices: for the NO side take whichever is closer to the price we saw.
+  if (shares && side !== m.longIs && Math.abs(1 - price - expect) < Math.abs(price - expect)) price = 1 - price;
+  return { id: r.id, shares, price, fees };
+}
+
 async function filledQty(orderId: string): Promise<number> {
   const r = await pm().orders.retrieve(orderId);
   return Number(r.order?.cumQuantity ?? 0);
@@ -855,7 +915,7 @@ async function decideWindow(start: number) {
   const atr = atrs.get(start - TF) ?? null;
   const sd = bodySd(closed);
   if (!atr || !sd) return skip(start, "not enough candle history");
-  const state = flipState({ forming, secondsLeft: TF - READ_AT, tfSeconds: TF, atr, sd, previous: closed.slice(-15) });
+  const state = flipState({ forming, secondsLeft: TF - READ_AT, tfSeconds: TF, atr, sd, previous: closed.slice(-40) });
   if (!state) return skip(start, "price exactly at the candle's open");
   // The website's extras: market context, recent order flow, and this candle's order flow so far.
   await updateFlow(Date.now() / 1000, atr).catch((e) => console.error("order flow:", (e as Error).message));
@@ -1044,6 +1104,169 @@ async function settle() {
   }
 }
 
+// ── Lightspeed fade (FADEBOT_STRATEGY = lightspeed, the default) ───────
+
+/** Book a closed trade's P&L into the running totals. */
+async function bookResult(start: number, result: string, p: number, extra: { exit?: number; exitId?: string | null } = {}) {
+  await db().begin(async (tx) => {
+    const upd = await tx`update fadebot_bets5 set status = 'settled', result = ${result}, pnl = ${p}, settled_at = now(),
+        exit_price = coalesce(${extra.exit ?? null}, exit_price), exit_order_id = coalesce(${extra.exitId ?? null}, exit_order_id),
+        exit_at = case when ${extra.exit ?? null}::double precision is null then exit_at else now() end
+      where window_start = ${start} and status = 'open' returning 1`;
+    if (!upd.length) return;
+    const st = (await tx`select * from fadebot_state5 where id = 1 for update`)[0];
+    const total = st.total_pnl + p;
+    const peak = Math.max(st.peak, total);
+    await tx`update fadebot_state5 set step = 0, total_pnl = ${total}, peak = ${peak},
+      worst_drawdown = ${Math.max(st.worst_drawdown, peak - total)}, trades = ${st.trades + 1},
+      wins = ${st.wins + (p > 0 ? 1 : 0)} where id = 1`;
+  });
+}
+
+/** Until `until`: every 2 s, market-sell any open Lightspeed bet whose shares are now worth its take-profit target. */
+async function watchExits(until: number) {
+  const sql = db();
+  while (Date.now() / 1000 < until) {
+    const now = Math.floor(Date.now() / 1000);
+    const open = await sql`select * from fadebot_bets5 where status = 'open' and kind = 'ls-fade' and target_price is not null
+      and shares > 0 and window_start + ${TF} > ${now}`.catch(() => []);
+    if (!open.length) {
+      // Nothing to watch yet: look again shortly (a bet may be placed by another run).
+      await new Promise((r) => setTimeout(r, 2000));
+      continue;
+    }
+    for (const b of open) {
+      const m = { slug: b.market_slug, longIs: b.long_is } as WindowMarket;
+      const px = await sellPriceFor(m, b.side).catch(() => null);
+      if (px === null || px < b.target_price) continue;
+      const start = Number(b.window_start);
+      try {
+        let exit = px;
+        let fees = Number(b.fees ?? 0);
+        let exitId: string | null = null;
+        let sold = Number(b.shares);
+        if (b.mode === "live") {
+          const f = await marketSellAll(m, b.side, px);
+          if (!f.shares) continue; // nothing sold (no bids): try again
+          exit = f.price;
+          fees += f.fees;
+          exitId = f.id;
+          sold = Math.min(sold, f.shares);
+        }
+        const p = sold * (exit - Number(b.price)) - fees;
+        await bookResult(start, "sold", p, { exit, exitId });
+      } catch (e) {
+        console.error("take-profit sale failed:", (e as Error).message);
+        await sql`update fadebot_bets5 set reason = ${`take-profit sale failed: ${(e as Error).message}`.slice(0, 300)}
+          where window_start = ${start}`;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+/** Watch window `start` until `until` for the Lightspeed fade, recording this minute's BRTI as it goes. */
+async function lightspeedWatch(start: number, minute: number, until: number) {
+  const sql = db();
+  const cfg = settings();
+  const from = start + minute * 60;
+  const before = await period(start - 60);
+  const already = async () => (await sql`select 1 from fadebot_bets5 where window_start = ${start}`).length > 0;
+  let done = await already();
+  // The candle so far, built as the website builds it: open = the last price before the window.
+  const forming: Candle | null = before
+    ? { time: start, open: before.last, high: before.last, low: before.last, close: before.last }
+    : null;
+  for (let k = 0; forming && k < minute; k++) {
+    const pm0 = await period(start + k * 60);
+    if (pm0) {
+      forming.high = Math.max(forming.high, pm0.high);
+      forming.low = Math.min(forming.low, pm0.low);
+      forming.close = pm0.last;
+    }
+  }
+  const closed = done || !forming ? [] : await closedCandles(start, 4).catch(() => []);
+  const market = done || !forming ? null : await findMarket(start).catch(() => null);
+  const chk = market ? await checkLong(start, market.longIs).catch((e) => ({ ok: null, note: (e as Error).message })) : null;
+  let best = { ratio: 0, move: 0, typical: 0, at: 0 };
+  let busy = false;
+  let lastEval = 0;
+
+  const enter = async (d: { side: Side; move: number; typical: number }, elapsed: number) => {
+    if (await already()) return;
+    const why = `Lightspeed: move ${d.move > 0 ? "+" : ""}${d.move.toFixed(2)} $ beat the typical move ±${d.typical.toFixed(2)} $ at ${
+      Math.round(elapsed)
+    } s → ${d.side}`;
+    if (!market) return skip(start, `${why}, but no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 700));
+    if (chk?.ok === false) return skip(start, `${why}; market ${market.slug} (YES = ${market.longIs}) but ${chk.note}`.slice(0, 700));
+    let price: number | null = await priceFor(market, d.side).catch(() => null);
+    let shares = 0;
+    let fees = 0;
+    let orderId: string | null = null;
+    if (cfg.mode === "live") {
+      try {
+        const f = await marketBuy(market, d.side, cfg.lsBet);
+        orderId = f.id;
+        shares = f.shares;
+        fees = f.fees;
+        if (shares > 0) price = f.price;
+      } catch (e) {
+        return skip(start, `${why}; market order failed: ${(e as Error).message}`.slice(0, 500));
+      }
+      if (!shares) return skip(start, `${why}; market order filled nothing`);
+    } else if (price && price > 0) shares = cfg.lsBet / price;
+    else return skip(start, `${why}; no price for ${d.side}`);
+    const target = takeProfitPrice(price ?? 0, cfg.takeProfit);
+    await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, side, step, stake, price, shares, fees,
+        limit_shares, limit_filled, open_ref, order_id, kind, reason, target_price)
+      values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.side}, 0, ${cfg.lsBet}, ${price ?? 0},
+        ${shares}, ${fees}, 0, 0, ${before?.avg ?? null}, ${orderId}, 'ls-fade',
+        ${`${why}${target === null ? "; double the price is $1 or more, so held to settlement" : ""}${
+          chk?.ok ? "" : `; YES = ${market.longIs} from the ${lastHow}`
+        }`.slice(0, 700)}, ${target})
+      on conflict (window_start) do nothing`;
+  };
+
+  const onTick = (t: number, p: number) => {
+    if (done || busy || !forming || t < start) return;
+    forming.high = Math.max(forming.high, p);
+    forming.low = Math.min(forming.low, p);
+    forming.close = p;
+    if (Date.now() - lastEval < 200) return;
+    lastEval = Date.now();
+    const elapsed = t - start;
+    const ls = lightspeedCore(closed, start, TF, elapsed, forming);
+    const d = lightspeedFadeDecision(ls, elapsed, cfg.lsWindowSec);
+    const fp = ls?.finish_probability as { move_dollars?: number; typical_move_in_time_left_dollars?: number } | undefined;
+    if (fp?.typical_move_in_time_left_dollars) {
+      const ratio = Math.abs(fp.move_dollars ?? 0) / fp.typical_move_in_time_left_dollars;
+      if (ratio > best.ratio) best = { ratio, move: fp.move_dollars ?? 0, typical: fp.typical_move_in_time_left_dollars, at: elapsed };
+    }
+    if ("skip" in d) return;
+    busy = true;
+    done = true;
+    enter(d, elapsed)
+      .catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)))
+      .finally(() => (busy = false));
+  };
+
+  const [{ ticks, source }] = await Promise.all([record(until, onTick), watchExits(until)]);
+  await savePeriod(from, from + 60, ticks, source);
+  while (busy) await new Promise((r) => setTimeout(r, 200));
+  // The end of the watch: say why there was no bet (shown on the page).
+  if (!done && (minute + 1) * 60 >= cfg.lsWindowSec) {
+    const why = !before
+      ? "no candle open (the minute before the window wasn't recorded)"
+      : closed.length < 60
+        ? "not enough candle history"
+        : `the move never beat the typical move in the first ${cfg.lsWindowSec} s (closest: ${
+          best.move > 0 ? "+" : ""
+        }${best.move.toFixed(2)} $ vs ±${best.typical.toFixed(2)} $ at ${Math.round(best.at)} s)`;
+    await skip(start, `Lightspeed: ${why}: no bet`);
+  }
+  return `watched minute ${minute + 1} (${ticks.length} ticks from ${source})`;
+}
+
 async function run() {
   await setup();
   const now = Date.now() / 1000;
@@ -1051,6 +1274,25 @@ async function run() {
   const m = Math.floor((now - start) / 60);
   const done: string[] = [];
   await dryLimitCheck().catch(() => {});
+  if (settings().strategy === "lightspeed") {
+    const watchMins = Math.ceil(settings().lsWindowSec / 60);
+    if (m === 4) {
+      // The price to beat (and next window's candle open), while watching this window's take-profit.
+      const from = start + 240;
+      const [{ ticks, source }] = await Promise.all([record(from + 58), watchExits(from + 58)]);
+      await savePeriod(from, from + 60, ticks, source);
+      done.push(`recorded the price to beat (${ticks.length} ticks from ${source})`);
+    } else if (m < watchMins) {
+      done.push(await lightspeedWatch(start, m, start + m * 60 + 59));
+    } else {
+      await watchExits(start + m * 60 + 58);
+      done.push("watched take-profit");
+    }
+    await settle();
+    await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
+    if (m === 3) await updatePmHistory(Date.now() / 1000).catch((e) => console.error("price history:", (e as Error).message));
+    return done;
+  }
   if (m === 4) {
     // The last minute of this window = the next window's price to beat (and this window's settlement minute).
     const from = start + 240;
@@ -1159,6 +1401,23 @@ Deno.serve(async (req) => {
       await setup();
       await updatePmHistory(Date.now() / 1000);
       return json(await status());
+    }
+    if (body?.action === "test-ls" && env("FADEBOT_ALLOW_TEST") === "1") {
+      // Give the current window this candle open, then watch it for a few seconds.
+      await setup();
+      const now = Date.now() / 1000;
+      const start = Math.floor(now / TF) * TF; // the real window (call it in its first 2 minutes)
+      await db()`delete from fadebot_bets5 where window_start = ${start}`;
+      const open = Number(body.open);
+      await savePeriod(start - 60, start, Array.from({ length: 30 }, (_, i) => ({ t: start - 30 + i, p: open })), "test");
+      const msg = await lightspeedWatch(start, Number(body.minute ?? 0), now + Number(body.watch ?? 6));
+      return json({ msg, start, bet: (await db()`select * from fadebot_bets5 where window_start = ${start}`)[0] ?? null });
+    }
+    if (body?.action === "test-exits" && env("FADEBOT_ALLOW_TEST") === "1") {
+      await setup();
+      await watchExits(Date.now() / 1000 + Number(body.watch ?? 5));
+      const r = await db()`select * from fadebot_bets5 where window_start = ${Number(body.start)}`;
+      return json({ bet: r[0] ?? null, state: (await db()`select * from fadebot_state5 where id = 1`)[0] });
     }
     if (body?.action === "test-decide" && env("FADEBOT_ALLOW_TEST") === "1") {
       await setup();

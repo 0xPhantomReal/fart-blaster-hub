@@ -230,7 +230,7 @@ function writeCache(c: Record<string, JevAnswer>, w: Where) {
 function readFlipCache(w: Where): Record<string, number> {
   try {
     return JSON.parse(
-      localStorage.getItem(tfKey("gold.flipcheck.v3", w)) ?? "{}",
+      localStorage.getItem(tfKey("gold.flipcheck.v4", w)) ?? "{}",
     );
   } catch {
     return {};
@@ -240,7 +240,7 @@ function writeFlipCache(c: Record<string, number>, w: Where) {
   try {
     const keys = Object.keys(c).sort();
     localStorage.setItem(
-      tfKey("gold.flipcheck.v3", w),
+      tfKey("gold.flipcheck.v4", w),
       JSON.stringify(
         Object.fromEntries(keys.slice(-500).map((k) => [k, c[k]])),
       ),
@@ -857,7 +857,7 @@ export function useGold(
         tfSeconds: TF_SECONDS,
         atr,
         sd,
-        previous: bars.slice(-15).map((b) => b.candle),
+        previous: bars.slice(-40).map((b) => b.candle),
       });
       if (!state) return;
       const fullState = {
@@ -976,7 +976,7 @@ export function useGold(
                           sn.forming,
                         ),
                       },
-                      `past:v3:${sn.time}`,
+                      `past:v4:${sn.time}`,
                       tfMin,
                       market,
                     ),
@@ -1285,7 +1285,7 @@ export function useGold(
       !cancelled &&
       setState((s) => ({ ...s, minute: { ...s.minute, ...patch } }));
     const minuteCacheKey = (m: number) =>
-      `${tfKey("gold.minutecall.v3", where)}.m${m}`;
+      `${tfKey("gold.minutecall.v4", where)}.m${m}`;
 
     const runMinute = async (m: number | null) => {
       const run = ++minuteRun;
@@ -1395,7 +1395,7 @@ export function useGold(
                           sn.forming,
                         ),
                       },
-                      `past:v3:m${m}:${sn.time}`,
+                      `past:v4:m${m}:${sn.time}`,
                       tfMin,
                       market,
                     ),
@@ -1481,7 +1481,7 @@ export function useGold(
         tfSeconds: TF_SECONDS,
         atr,
         sd,
-        previous: bars.slice(-15).map((b) => b.candle),
+        previous: bars.slice(-40).map((b) => b.candle),
       });
       if (!state) return;
       minuteAsking = true;

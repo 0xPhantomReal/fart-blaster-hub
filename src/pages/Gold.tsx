@@ -986,7 +986,7 @@ export default function Gold() {
                     ? `${Math.round(callMinute! * 60)} seconds`
                     : `${callMinute} minute${callMinute === 1 ? "" : "s"}`}{" "}
                   after it opens (its move, high/low, pullback and time left;
-                  the last 15 candles; trend, key levels and longer timeframes;
+                  the last 40 candles; trend, key levels and longer timeframes;
                   and for crypto, order flow including the trades since the
                   candle opened) and calls its final color.
                   {mn.past &&
@@ -1159,7 +1159,7 @@ export default function Gold() {
             </p>
             <p className={`mt-1 text-xs ${MUTED}`}>
               While a candle forms, Jev sees how far it has moved, its high/low,
-              how much it has pulled back, the time left, the last 15 candles,
+              how much it has pulled back, the time left, the last 40 candles,
               the bigger trend and key levels, longer timeframes and (crypto)
               order flow, including who has been aggressive since the candle
               opened (sizes only, no prices) and answers one question: does it

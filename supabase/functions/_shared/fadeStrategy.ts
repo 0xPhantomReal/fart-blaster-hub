@@ -202,3 +202,28 @@ export function winner(openRef: number, closeRef: number): Side {
 export function pnl(shares: number, price: number, won: boolean): number {
   return won ? shares * (1 - price) : -shares * price;
 }
+
+/**
+ * The Lightspeed fade: in the first `windowSec` seconds of the candle, when the move so far is bigger than
+ * Lightspeed's typical move in the time left, bet the opposite side (move up → Down, move down → Up).
+ * `ls` is lightspeedCore(...) for the forming candle.
+ */
+export function lightspeedFadeDecision(
+  ls: Record<string, unknown> | null,
+  elapsed: number,
+  windowSec = 120,
+): { side: Side; move: number; typical: number } | { skip: string } {
+  if (elapsed >= windowSec) return { skip: `past ${windowSec} s` };
+  const fp = ls?.finish_probability as { move_dollars?: number; typical_move_in_time_left_dollars?: number } | undefined;
+  const move = fp?.move_dollars;
+  const typical = fp?.typical_move_in_time_left_dollars;
+  if (typeof move !== "number" || typeof typical !== "number" || !(typical > 0)) return { skip: "no Lightspeed numbers" };
+  if (Math.abs(move) <= typical) return { skip: "move within the typical move" };
+  return { side: move > 0 ? "down" : "up", move, typical };
+}
+
+/** Take-profit price for a buy at `price` (our side's price): `mult` × price, or null when that can't happen (≥ $1). */
+export function takeProfitPrice(price: number, mult = 2): number | null {
+  const t = Number((price * mult).toFixed(4));
+  return price > 0 && t < 1 ? t : null;
+}

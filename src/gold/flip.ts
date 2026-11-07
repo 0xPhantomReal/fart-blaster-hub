@@ -67,7 +67,7 @@ export interface FlipInput {
   tfSeconds: number;
   atr: number; //        recent average true range, dollars
   sd: number; //         typical candle body spread, dollars
-  previous: Candle[]; // closed candles before it, oldest first (the last 15 are used)
+  previous: Candle[]; // closed candles before it, oldest first (the last 40 are used)
 }
 
 /** What Jev sees: only the candle so far and its immediate context, in ATR units. No prices, no dates, no math. */
@@ -89,7 +89,7 @@ export function flipState(x: FlipInput): Record<string, unknown> | null {
     ),
     seconds_left: Math.round(x.secondsLeft),
     typical_move_in_time_left: r2((x.sd * Math.sqrt(frac)) / x.atr),
-    last_15_candles: x.previous.slice(-15).map((c) => ({
+    last_40_candles: x.previous.slice(-40).map((c) => ({
       c: c.close > c.open ? "G" : c.close < c.open ? "R" : "D",
       body: r2((c.close - c.open) / x.atr),
       range: r2((c.high - c.low) / x.atr),

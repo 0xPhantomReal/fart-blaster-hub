@@ -63,7 +63,7 @@ export function flipState(x: FlipInput): Record<string, unknown> | null {
     pulled_back_from_extreme: r2((move > 0 ? f.high - f.close : f.close - f.low) / x.atr),
     seconds_left: Math.round(x.secondsLeft),
     typical_move_in_time_left: r2((x.sd * Math.sqrt(frac)) / x.atr),
-    last_15_candles: x.previous.slice(-15).map((c) => ({
+    last_40_candles: x.previous.slice(-40).map((c) => ({
       c: c.close > c.open ? "G" : c.close < c.open ? "R" : "D",
       body: r2((c.close - c.open) / x.atr),
       range: r2((c.high - c.low) / x.atr),

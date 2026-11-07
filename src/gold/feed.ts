@@ -740,6 +740,8 @@ export interface FadeBotBet {
   regime?: string | null; // e.g. "Jev backwards (4/12)"
   kind?: string | null; //   hold | fade-hold | fade-flip
   tv15?: string | null; //   the EMAs at the bet, e.g. "5m EMA fast 100012.40 > slow 99980.10"
+  target_price?: number | null; // Lightspeed fade: take-profit price for our side
+  exit_price?: number | null; //   …and what it sold for
 }
 export interface FadeBotStatus {
   settings: {
@@ -754,6 +756,10 @@ export interface FadeBotStatus {
     flipNeedsRegime?: boolean;
     fadeMax?: number;
     readAt?: number;
+    strategy?: string; //     "lightspeed" | "jev-ema"
+    lsBet?: number;
+    lsWindowSec?: number;
+    takeProfit?: number;
   };
   state: {
     step: number;

@@ -893,7 +893,7 @@ async function flip(m: Market, state: Record<string, unknown>, tf: number) {
       instructions:
         `This ${tf}-minute candle is still forming (see candle_so_far, current_color). Will it HOLD its current color ` +
         "until it closes, or FLIP to the other color? Compare move_so_far with typical_move_in_time_left, and weigh " +
-        "how far it has already pulled back from its extreme and the last 15 candles. When given, also use market_context " +
+        "how far it has already pulled back from its extreme and the last 40 candles (last_40_candles). When given, also use market_context " +
         "(trend, key levels, volatility, hourly/4-hour candles, volume), order_flow_recent_candles and " +
         "order_flow_this_candle_so_far (who has been aggressive since this candle opened). " +
         LIGHTSPEED_GUIDE,

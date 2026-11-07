@@ -67,33 +67,49 @@ export function FadeBotPanel({
   const cfg = s.settings;
   return (
     <div className="text-sm">
-      <p className={`mb-2 text-xs ${MUTED}`}>
-        BTC 5-minute market on Polymarket US. Jev reads each candle{" "}
-        {!cfg.readAt
-          ? "30 seconds"
-          : cfg.readAt < 60
-            ? `${cfg.readAt} seconds`
-            : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
-        in. The bot bets with Jev's call, hold or flip, only when the{" "}
-        {cfg.emaTf ?? 5}m EMAs agree: up when the fast EMA is above the slow
-        one, down when it's below
-        {cfg.emaGap
-          ? `, and only when they're at least $${cfg.emaGap} apart`
-          : ""}
-        .{" "}
-        {cfg.flipNeedsRegime
-          ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
-          : " "}
-        When the EMAs are closer than ${cfg.emaGap ?? 30}, it bets against a
-        hold call that's the same color as the last candle when the EMAs point
-        against Jev, and with a flip call when the EMAs agree and the last
-        candle was the opposite color. Otherwise no bet. Each bet is a limit
-        order for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}
-        ¢ ($
-        {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
-        the window closes
-        {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
-      </p>
+      {cfg.strategy === "lightspeed" ? (
+        <p className={`mb-2 text-xs ${MUTED}`}>
+          BTC 5-minute market on Polymarket US. Lightspeed fade: in the first{" "}
+          {(cfg.lsWindowSec ?? 120) % 60
+            ? `${cfg.lsWindowSec} seconds`
+            : `${(cfg.lsWindowSec ?? 120) / 60} minutes`}{" "}
+          of each candle, when the move so far gets bigger than Lightspeed's
+          typical move, the bot market-buys ${cfg.lsBet ?? 1} of the opposite
+          side (up move → Down, down move → Up). It market-sells once the shares
+          are worth {cfg.takeProfit ?? 2}× what they cost (
+          {Math.round(((cfg.takeProfit ?? 2) - 1) * 100)}% profit); if that
+          never happens, it holds to settlement. At most one bet per window. Jev
+          isn't asked.
+        </p>
+      ) : (
+        <p className={`mb-2 text-xs ${MUTED}`}>
+          BTC 5-minute market on Polymarket US. Jev reads each candle{" "}
+          {!cfg.readAt
+            ? "30 seconds"
+            : cfg.readAt < 60
+              ? `${cfg.readAt} seconds`
+              : `${cfg.readAt / 60} minute${cfg.readAt === 60 ? "" : "s"}`}{" "}
+          in. The bot bets with Jev's call, hold or flip, only when the{" "}
+          {cfg.emaTf ?? 5}m EMAs agree: up when the fast EMA is above the slow
+          one, down when it's below
+          {cfg.emaGap
+            ? `, and only when they're at least $${cfg.emaGap} apart`
+            : ""}
+          .{" "}
+          {cfg.flipNeedsRegime
+            ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
+            : " "}
+          When the EMAs are closer than ${cfg.emaGap ?? 30}, it bets against a
+          hold call that's the same color as the last candle when the EMAs point
+          against Jev, and with a flip call when the EMAs agree and the last
+          candle was the opposite color. Otherwise no bet. Each bet is a limit
+          order for {cfg.limitShares} shares at{" "}
+          {Math.round(cfg.limitPrice * 100)}¢ ($
+          {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good
+          until the window closes
+          {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
+        </p>
+      )}
       {s.regime && (
         <p className={`mb-2 text-xs ${MUTED}`}>
           For reference: Jev was right on {s.regime.right} of its last{" "}
@@ -177,22 +193,25 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "hold-with-chop" || b.kind === "flip-with-chop"
-                      ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
-                      : b.kind === "hold-fade-chop" ||
-                          b.kind === "flip-fade-chop"
-                        ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
-                        : b.kind === "flip-ema" || b.kind === "hold-ema"
-                          ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
-                          : b.kind === "flip-follow"
-                            ? "flip → with Jev"
-                            : b.kind === "flip-fade"
-                              ? "flip → other side"
-                              : b.kind === "fade-hold"
-                                ? "holds (faded)"
-                                : b.kind === "fade-flip"
-                                  ? "flip (faded)"
-                                  : "holds"}{" "}
+                    {b.kind === "ls-fade"
+                      ? `Lightspeed: fade the ${b.side === "up" ? "drop" : "jump"}`
+                      : b.kind === "hold-with-chop" ||
+                          b.kind === "flip-with-chop"
+                        ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
+                        : b.kind === "hold-fade-chop" ||
+                            b.kind === "flip-fade-chop"
+                          ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
+                          : b.kind === "flip-ema" || b.kind === "hold-ema"
+                            ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
+                            : b.kind === "flip-follow"
+                              ? "flip → with Jev"
+                              : b.kind === "flip-fade"
+                                ? "flip → other side"
+                                : b.kind === "fade-hold"
+                                  ? "holds (faded)"
+                                  : b.kind === "fade-flip"
+                                    ? "flip (faded)"
+                                    : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
@@ -207,6 +226,16 @@ export function FadeBotPanel({
                       : b.stake
                         ? ` $${b.stake.toFixed(0)} (no fill)`
                         : ""}
+                    {b.kind === "ls-fade" && b.shares ? (
+                      <span className={MUTED}>
+                        {" "}
+                        {b.exit_price != null
+                          ? `→ sold @ ${b.exit_price.toFixed(2)}`
+                          : b.target_price != null
+                            ? `→ sell @ ${b.target_price.toFixed(2)}${b.status === "open" ? "" : " (not reached)"}`
+                            : "→ held"}
+                      </span>
+                    ) : null}
                     {b.limit_shares ? (
                       <span className={MUTED}>
                         {" "}
@@ -222,7 +251,7 @@ export function FadeBotPanel({
                     {b.reason ? <span className={MUTED}> ⓘ</span> : null}
                   </td>
                   <td
-                    className={`py-1 text-right ${b.result === "win" ? "text-[#26a69a]" : b.result === "loss" ? "text-[#ef5350]" : MUTED}`}
+                    className={`py-1 text-right ${b.result === "win" || (b.result === "sold" && (b.pnl ?? 0) > 0) ? "text-[#26a69a]" : b.result === "loss" ? "text-[#ef5350]" : MUTED}`}
                   >
                     {b.status === "open"
                       ? "open"
