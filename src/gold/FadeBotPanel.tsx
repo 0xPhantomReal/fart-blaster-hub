@@ -84,11 +84,11 @@ export function FadeBotPanel({
         {cfg.flipNeedsRegime
           ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
           : " "}
-        When the EMAs are closer than ${cfg.emaGap ?? 60}, it bets against a
-        hold call the same color as the last candle, or a flip call the opposite
-        color, when the EMAs point against Jev. Otherwise no bet. Each bet is a
-        limit order for {cfg.limitShares} shares at{" "}
-        {Math.round(cfg.limitPrice * 100)}¢ ($
+        When the EMAs are closer than ${cfg.emaGap ?? 60}, it still bets with
+        Jev when the EMAs agree, but a flip call also needs the last candle to
+        be the opposite color of the call. Otherwise no bet. Each bet is a limit
+        order for {cfg.limitShares} shares at {Math.round(cfg.limitPrice * 100)}
+        ¢ ($
         {(cfg.limitShares * cfg.limitPrice).toFixed(2)} if it fills), good until
         the window closes
         {cfg.marketBet > 0 ? `, plus a $${cfg.marketBet} market order` : ""}.
@@ -176,19 +176,22 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "hold-fade-chop" || b.kind === "flip-fade-chop"
-                      ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
-                      : b.kind === "flip-ema" || b.kind === "hold-ema"
-                        ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
-                        : b.kind === "flip-follow"
-                          ? "flip → with Jev"
-                          : b.kind === "flip-fade"
-                            ? "flip → other side"
-                            : b.kind === "fade-hold"
-                              ? "holds (faded)"
-                              : b.kind === "fade-flip"
-                                ? "flip (faded)"
-                                : "holds"}{" "}
+                    {b.kind === "hold-with-chop" || b.kind === "flip-with-chop"
+                      ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
+                      : b.kind === "hold-fade-chop" ||
+                          b.kind === "flip-fade-chop"
+                        ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
+                        : b.kind === "flip-ema" || b.kind === "hold-ema"
+                          ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
+                          : b.kind === "flip-follow"
+                            ? "flip → with Jev"
+                            : b.kind === "flip-fade"
+                              ? "flip → other side"
+                              : b.kind === "fade-hold"
+                                ? "holds (faded)"
+                                : b.kind === "fade-flip"
+                                  ? "flip (faded)"
+                                  : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
