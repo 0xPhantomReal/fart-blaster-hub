@@ -269,6 +269,30 @@ export type Database = {
         }
         Relationships: []
       }
+      fadebot_strength: {
+        Row: {
+          at_sec: number
+          move: number | null
+          score: number
+          used: string | null
+          window_start: number
+        }
+        Insert: {
+          at_sec: number
+          move?: number | null
+          score: number
+          used?: string | null
+          window_start: number
+        }
+        Update: {
+          at_sec?: number
+          move?: number | null
+          score?: number
+          used?: string | null
+          window_start?: number
+        }
+        Relationships: []
+      }
       jev_shared: {
         Row: {
           body: Json | null
