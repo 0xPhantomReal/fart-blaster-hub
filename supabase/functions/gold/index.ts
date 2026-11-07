@@ -13,10 +13,11 @@
 // POST { action: "version" }                        → { version, features }
 
 import postgres from "npm:postgres@3.4.9";
+import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 
 const PYTH_BASE = "https://pyth.dourolabs.app/v1";
 const PYTH_CHANNEL = "fixed_rate@200ms";
-const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
+const TYPESAFE_URL = Deno.env.get("TYPESAFE_URL") || "https://api.typesafe.ai/v1/systemone";
 const RESOLUTIONS = new Set([1, 2, 5, 15, 30, 60, 120, 240, 360, 720]);
 const MAX_SPAN_SEC = 60 * 60 * 24 * 90; // 90 days per request
 
@@ -824,6 +825,19 @@ async function ask(state: Record<string, unknown>, question: Record<string, unkn
   return a;
 }
 
+// Lightspeed V0.5 (docs/lightspeed-v0.5-research.md): how Jev should read the quant blocks when they are present.
+const LIGHTSPEED_GUIDE =
+  "LIGHTSPEED (when given): lightspeed.finish_probability.random_walk_p_green_pct is the pure-math baseline — the " +
+  "chance the candle finishes green if price just random-walks from here with today's volatility; start from it and " +
+  "only move away for real evidence. lightspeed.serial_dependence shows whether this market has recently been " +
+  "mean-reverting (negative autocorrelation) or trending; volatility, momentum_in_atr, base_rates, levels (round " +
+  "numbers, day high/low) and clock (US open, funding times, turn of the 15-minute candle) add context. " +
+  "lightspeed_live is measured right now: order-book imbalance and micro-price offset on Coinbase/Kraken (positive = " +
+  "buyers heavier, short-lived push up), brti_venues (exchanges the index averages; a venue above the others pulls " +
+  "the index up), coinbase_trade_flow_now (aggressive buying vs selling in the last 10/30/60 s), perpetual futures " +
+  "(premium and funding; futures often move before spot), other_coins (ETH/SOL move since this candle opened) and " +
+  "polymarket_crowd (the betting crowd's odds on this exact window). Weigh fresh flow most when little time is left.";
+
 async function check(m: Market, data: Record<string, unknown>, model: Record<string, unknown>, tf: number) {
   const own = ask(
     { instrument: instrument(m, tf), ...data },
@@ -831,7 +845,8 @@ async function check(m: Market, data: Record<string, unknown>, model: Record<str
       type: "choice",
       instructions:
         `Using the recent candles, signals, bigger trend, key levels (day/24h highs and lows, round numbers), volatility, ` +
-          `hourly and 4-hour candles and (if given) volume: will the NEXT ${tf}-minute candle close above or below its open?`,
+          `hourly and 4-hour candles and (if given) volume: will the NEXT ${tf}-minute candle close above or below its open? ` +
+          LIGHTSPEED_GUIDE,
       criteria: {
         green: "It closes above its open",
         red: "It closes below its open",
@@ -880,7 +895,8 @@ async function flip(m: Market, state: Record<string, unknown>, tf: number) {
         "until it closes, or FLIP to the other color? Compare move_so_far with typical_move_in_time_left, and weigh " +
         "how far it has already pulled back from its extreme and the last 15 candles. When given, also use market_context " +
         "(trend, key levels, volatility, hourly/4-hour candles, volume), order_flow_recent_candles and " +
-        "order_flow_this_candle_so_far (who has been aggressive since this candle opened).",
+        "order_flow_this_candle_so_far (who has been aggressive since this candle opened). " +
+        LIGHTSPEED_GUIDE,
       criteria: {
         holds: "It closes the same color it is now",
         flips: "It reverses and closes the opposite color",
@@ -907,6 +923,19 @@ async function forecast(m: Market, data: Record<string, unknown>, options: Recor
   );
   if (typeof a.choice !== "string" || !(a.choice in options)) throw new Error("unexpected TypeSafe response shape");
   return { choice: a.choice, probabilities: a.probabilities ?? {} };
+}
+
+/** Adds the live Lightspeed block when the candle is the one forming now (or about to open); never fails the call. */
+async function withLive(m: Market, tf: number, forTime: number, data: Record<string, unknown>) {
+  const tfSec = tf * 60;
+  const now = Date.now() / 1000;
+  if (!(forTime > now - tfSec - 5 && forTime < now + 60)) return data;
+  try {
+    const live = await lightspeedLive({ market: m, coinbase: MARKETS[m].coinbase, tfSec, forTime, open: null });
+    return Object.keys(live).length > 1 ? { ...data, lightspeed_live: live } : data;
+  } catch {
+    return data;
+  }
 }
 
 // ── Handler ────────────────────────────────────────────────────────────
@@ -937,8 +966,8 @@ Deno.serve(async (req) => {
     if (body.action === "version") {
       // Lets the page check which backend is deployed (older versions answer "unknown action").
       return json({
-        version: 17,
-        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8", "trades", "flip-context"],
+        version: 18,
+        features: ["stream", "tickcheck", "jev-check", "jev-flip", "timeframes", "jev-forecast", "markets", "volume", "crypto4", "crypto8", "trades", "flip-context", "lightspeed"],
         brti: kalshiConfigured(),
         jev: !!env("TYPESAFE_API_KEY"),
       });
@@ -981,7 +1010,7 @@ Deno.serve(async (req) => {
       if (!snapshot || typeof snapshot.data !== "object" || !snapshot.data || typeof snapshot.model !== "object" || !snapshot.model) {
         return json({ error: "bad snapshot" }, 400);
       }
-      if (JSON.stringify(snapshot).length > 14000) return json({ error: "snapshot too large" }, 400);
+      if (JSON.stringify(snapshot).length > 30000) return json({ error: "snapshot too large" }, 400);
       if (typeof forTime !== "number") return json({ error: "forTime must be a number" }, 400);
 
       const tf = tfOf(body);
@@ -991,7 +1020,10 @@ Deno.serve(async (req) => {
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        run = check(m, snapshot.data as Record<string, unknown>, snapshot.model as Record<string, unknown>, tf).then((r) => {
+        const data = snapshot.data as Record<string, unknown>;
+        run = withLive(m, tf, forTime, data)
+          .then((d) => check(m, d, snapshot.model as Record<string, unknown>, tf))
+          .then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
         });
@@ -1004,7 +1036,7 @@ Deno.serve(async (req) => {
     if (body.action === "flip") {
       if (!env("TYPESAFE_API_KEY")) return json({ error: "TYPESAFE_API_KEY secret is not set" }, 503);
       const { state, slotKey } = body as { state?: unknown; slotKey?: unknown };
-      if (!state || typeof state !== "object" || JSON.stringify(state).length > 14000) return json({ error: "bad state" }, 400);
+      if (!state || typeof state !== "object" || JSON.stringify(state).length > 30000) return json({ error: "bad state" }, 400);
       if (typeof slotKey !== "string" || slotKey.length > 64) return json({ error: "bad slotKey" }, 400);
       // Shared per 30-second slot (live) or per past candle (replay), so viewers and reloads reuse one answer.
       const tf = tfOf(body);
@@ -1014,7 +1046,11 @@ Deno.serve(async (req) => {
       if (hit) return json(hit);
       let run = inflight.get(key);
       if (!run) {
-        const ask = () => flip(m, state as Record<string, unknown>, tf);
+        // Live slots ("v2:m<read>:<candle open>") get the live Lightspeed block, fetched once inside the shared answer.
+        const live = /^v2:m[\d.]+:(\d+)$/.exec(slotKey);
+        const ask = () =>
+          (live ? withLive(m, tf, Number(live[1]), state as Record<string, unknown>) : Promise.resolve(state as Record<string, unknown>))
+            .then((st) => flip(m, st, tf));
         run = (slotKey.startsWith("v2:m") ? sharedAnswer(key, ask) : ask()).then((r) => {
           jevCache.set(key, { at: Date.now(), body: r });
           return r;
@@ -1023,6 +1059,14 @@ Deno.serve(async (req) => {
         run.finally(() => inflight.delete(key)).catch(() => {});
       }
       return json(await run);
+    }
+
+    if (body.action === "lightspeed") {
+      // The live Lightspeed block for the chart panel (same one Jev gets).
+      const tf = tfOf(body);
+      const m = marketOf(body);
+      const forTime = Math.floor(Date.now() / 1000 / (tf * 60)) * tf * 60;
+      return json({ forTime, live: await lightspeedLive({ market: m, coinbase: MARKETS[m].coinbase, tfSec: tf * 60, forTime, open: null }) });
     }
 
     if (body.action === "forecast") {

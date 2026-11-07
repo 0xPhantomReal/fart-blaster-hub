@@ -51,6 +51,7 @@ import {
   type Footprint,
 } from "../_shared/jevContext.ts";
 import { runTvIndicator, tvContext } from "../_shared/tvIndicator.ts";
+import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 
 const TF = 300; //        5-minute windows
 // Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 3, 5, 15, 30, 60, 120 or 180 (default 30). The
@@ -881,6 +882,9 @@ async function decideWindow(start: number) {
   // The TV indicator, as the website sends it (EMAs live at the current price).
   const tvc = tvContext(closed, start, TF, forming.close);
   if (tvc) (extras as Record<string, unknown>).tv_indicator = tvc;
+  // Lightspeed V0.5 quant block, as the website sends it (the live market block is added by the gold function).
+  const ls = lightspeedCore(closed, start, TF, READ_AT, forming);
+  if (ls) (extras as Record<string, unknown>).lightspeed = ls;
   // Same request key as the website's "Jev at minute N": if both ask within a minute, they share one answer.
   const { pFlip } = await gold<{ pFlip: number }>({
     action: "flip",

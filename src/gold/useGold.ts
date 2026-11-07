@@ -1,4 +1,5 @@
 import { tvContext } from "./tvIndicator";
+import { lightspeedCore } from "./lightspeedCore";
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "./indicators";
 import {
@@ -142,6 +143,8 @@ export interface GoldState {
   error: string | null;
   bars: ClosedBar[]; //            last ~3,000 candles, for the chart
   forming: Candle | null;
+  /** What the deployed gold function supports (from its "version" answer). */
+  features: string[];
   prediction: Prediction | null; // for the candle forming now / next (made at its open)
   live: Live | null; //            live chance the forming candle closes green (every tick / second)
   trainedOn: number; //            candles the model has learned from
@@ -304,6 +307,7 @@ export function useGold(
     error: null,
     bars: [],
     forming: null,
+    features: [],
     prediction: null,
     live: null,
     trainedOn: 0,
@@ -575,9 +579,11 @@ export function useGold(
       closed: Candle[],
       atrMap?: Map<number, number>,
       priceNow: number | null = null,
+      forming: Candle | null = null,
     ) => {
       if (!features.includes("flip-context")) return {};
       const tv = tvContext(closed, t, TF_SECONDS, priceNow);
+      const ls = lightspeedCore(closed, t, TF_SECONDS, elapsed, forming);
       const atr =
         (
           atrMap ?? atrByTime(closed.slice(Math.max(0, closed.length - 700)))
@@ -605,6 +611,7 @@ export function useGold(
         ...(recent ? { order_flow_recent_candles: recent } : {}),
         ...(now ? { order_flow_this_candle_so_far: now } : {}),
         ...(tv ? { tv_indicator: tv } : {}),
+        ...(ls ? { lightspeed: ls } : {}),
       };
     };
 
@@ -630,7 +637,8 @@ export function useGold(
           )
         : null;
       const tv = tvContext(closed, forTime, TF_SECONDS, null);
-      return ctx || flow || tv
+      const ls = lightspeedCore(closed, forTime, TF_SECONDS, 0, null);
+      return ctx || flow || tv || ls
         ? {
             ...s,
             data: {
@@ -638,6 +646,7 @@ export function useGold(
               ...(ctx ?? {}),
               ...(flow ? { order_flow: flow } : {}),
               ...(tv ? { tv_indicator: tv } : {}),
+              ...(ls ? { lightspeed: ls } : {}),
             },
           }
         : s;
@@ -853,7 +862,7 @@ export function useGold(
       if (!state) return;
       const fullState = {
         ...state,
-        ...flipExtra(c.time, now - c.time, poolHistory, undefined, c.close),
+        ...flipExtra(c.time, now - c.time, poolHistory, undefined, c.close, c),
       };
       // Only fresh data: if the candle's shape hasn't changed since the last ask, don't pay for the same answer
       // again (re-ask at least every 15 s, since the time left still matters).
@@ -964,6 +973,7 @@ export function useGold(
                           history,
                           atrs,
                           openOf(history, sn.time, sn.move),
+                          sn.forming,
                         ),
                       },
                       `past:v3:${sn.time}`,
@@ -1199,6 +1209,7 @@ export function useGold(
       setJev({ on: true });
       const v = await backendVersion().catch(() => null);
       features = v?.features ?? [];
+      set({ features });
       void pickWithJev();
       if (!v || !v.features.includes("jev-check")) {
         return setJev({
@@ -1381,6 +1392,7 @@ export function useGold(
                           hist,
                           atrs,
                           openOf(hist, sn.time, sn.move),
+                          sn.forming,
                         ),
                       },
                       `past:v3:m${m}:${sn.time}`,
@@ -1478,7 +1490,7 @@ export function useGold(
           askFlip(
             {
               ...state,
-              ...flipExtra(c.time, elapsed, poolHistory, undefined, c.close),
+              ...flipExtra(c.time, m * 60, poolHistory, undefined, c.close, c),
             },
             `v2:m${m}:${c.time}`,
             tfMin,

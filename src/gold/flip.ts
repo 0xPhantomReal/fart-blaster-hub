@@ -221,6 +221,7 @@ export function pastSnapshots(
     state: Record<string, unknown>;
     pMath: number;
     move: number;
+    forming: Candle;
     y: 0 | 1;
   }[] = [];
   const tfMin = Math.round(tfSeconds / 60);
@@ -269,6 +270,7 @@ export function pastSnapshots(
         secondsLeft / tfSeconds,
       ),
       move: forming.close - forming.open,
+      forming,
       y: c.close > c.open ? 1 : 0,
     });
   }

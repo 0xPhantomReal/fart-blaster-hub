@@ -836,3 +836,11 @@ export async function fadeBotFindMarket(): Promise<
     return { error: t.slice(0, 200) };
   }
 }
+
+/** Lightspeed V0.5: the live market block (order books, venues, flow, perps, crowd) Jev gets on each live call. */
+export async function fetchLightspeed(
+  market: Market,
+  timeframeMin: number,
+): Promise<{ forTime: number; live: Record<string, unknown> }> {
+  return callFn({ action: "lightspeed", market, timeframeMin });
+}

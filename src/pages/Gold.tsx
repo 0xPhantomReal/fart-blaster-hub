@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { GoldChart } from "@/gold/GoldChart";
+import { LightspeedPanel } from "@/gold/LightspeedPanel";
 import { ColorCount } from "@/gold/ColorCount";
 import { runTvIndicator, TV_COLORS } from "@/gold/tvIndicator";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
@@ -247,6 +248,7 @@ export default function Gold() {
     usesMinute(arrowMode) ? callMinute : null,
   );
   const mn = g.minute;
+  const lsClosed = useMemo(() => g.bars.slice(-700).map((b) => b.candle), [g.bars]);
   // The TradingView indicator, run over the chart's closed candles (recomputed when a candle closes).
   const tv = useMemo(
     () =>
@@ -639,6 +641,15 @@ export default function Gold() {
             </div>
             <div className="mt-3">
               <ColorCount candles={g.bars.map((b) => b.candle)} tfMin={tfMin} />
+            </div>
+            <div className="mt-3">
+              <LightspeedPanel
+                market={market}
+                tfMin={tfMin}
+                closed={lsClosed}
+                forming={g.forming}
+                enabled={g.features.includes("lightspeed")}
+              />
             </div>
             {p?.jev && p.jev.support !== null && modelDir && (
               <div
