@@ -84,15 +84,19 @@ export function FadeBotPanel({
             market-buys ${cfg.strongBet ?? 5} of that side and holds it to
             settlement.
           </p>
-          <p>
-            <b>Fade:</b> in the first {cfg.lsWindowSec ?? 120} seconds, a move
-            bigger than Lightspeed's typical move that is <i>not</i> strong gets
-            faded: ${cfg.lsBet ?? 1} market buy of the other side, market-sold
-            at {cfg.takeProfit ?? 2}× the price (
-            {Math.round(((cfg.takeProfit ?? 2) - 1) * 100)}% profit) or held to
-            settlement. A big move that is strong is bought with instead (from{" "}
-            {cfg.strongFromSec ?? 60} s). At most one bet per window.
-          </p>
+          {cfg.lsFade ? (
+            <p>
+              <b>Fade:</b> in the first {cfg.lsWindowSec ?? 120} seconds, a move
+              bigger than Lightspeed's typical move that is <i>not</i> strong
+              gets faded: ${cfg.lsBet ?? 1} market buy of the other side,
+              market-sold at {cfg.takeProfit ?? 2}× the price (
+              {Math.round(((cfg.takeProfit ?? 2) - 1) * 100)}% profit) or held
+              to settlement. A big move that is strong is bought with instead
+              (from {cfg.strongFromSec ?? 60} s). At most one bet per window.
+            </p>
+          ) : (
+            <p>At most one bet per window. Big moves are no longer faded.</p>
+          )}
           {s.strength && s.strength.windows > 0 ? (
             <StrengthTable st={s.strength} min={cfg.strongMin ?? 60} />
           ) : null}

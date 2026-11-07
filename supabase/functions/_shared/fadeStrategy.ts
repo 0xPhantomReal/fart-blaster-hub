@@ -233,6 +233,7 @@ export interface LsRule {
   strongFromSec: number; //   strength buys from … (default 60)
   strongToSec: number; //     … until (default 240)
   strongMin: number; //       strength needed, 0–100 (default 60)
+  fade?: boolean; //          fade big weak moves (off by default)
 }
 
 /**
@@ -257,7 +258,10 @@ export function lightspeedDecision(
   const inStrong = elapsed >= rule.strongFromSec && elapsed < rule.strongToSec;
   const big = Math.abs(move) > typical;
   if (big && elapsed < rule.fadeWindowSec) {
-    if (!strong) return { side: moveSide === "up" ? "down" : "up", kind: "ls-fade", move, typical };
+    if (!strong) {
+      if (rule.fade) return { side: moveSide === "up" ? "down" : "up", kind: "ls-fade", move, typical };
+      return { skip: "big move but not strong (fading is off)" };
+    }
     if (inStrong) return { side: moveSide, kind: "ls-strong", move, typical };
     return { skip: "big and strong: waiting for the strength window", wait: true };
   }

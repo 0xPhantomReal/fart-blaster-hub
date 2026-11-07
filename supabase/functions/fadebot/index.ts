@@ -109,6 +109,8 @@ const settings = () => ({
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
   lsBet: Number(env("FADEBOT_LS_BET") || 1),
   lsWindowSec: Number(env("FADEBOT_LS_WINDOW_SEC") || 120),
+  // Fading big weak moves is off (removed Nov 7); FADEBOT_LS_FADE=1 turns it back on.
+  lsFade: env("FADEBOT_LS_FADE") === "1",
   // Candle strength ("strength decides"): a big move that's strong the same way is bought WITH instead of faded, and
   // a strong candle is bought between strongFromSec and strongToSec; strength = 0–100 (_shared/candleStrength.ts).
   strongMin: Number(env("FADEBOT_STRONG_MIN") || 60),
@@ -1211,7 +1213,7 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
   const chk = market ? await checkLong(start, market.longIs).catch((e) => ({ ok: null, note: (e as Error).message })) : null;
   let best = { ratio: 0, move: 0, typical: 0, at: 0 };
   let bestStrength = 0;
-  const rule = { fadeWindowSec: cfg.lsWindowSec, strongFromSec: cfg.strongFromSec, strongToSec: cfg.strongToSec, strongMin: cfg.strongMin };
+  const rule = { fadeWindowSec: cfg.lsWindowSec, strongFromSec: cfg.strongFromSec, strongToSec: cfg.strongToSec, strongMin: cfg.strongMin, fade: cfg.lsFade };
   const watchEnd = Math.max(cfg.lsWindowSec, cfg.strongToSec);
   const marks = [60, 120, 180, 240].filter((x) => x > minute * 60 && x <= (minute + 1) * 60);
   // The live market block (books, trade flow, other coins) for the strength score, refreshed every 5 s.
@@ -1310,9 +1312,9 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
       ? "no candle open (the minute before the window wasn't recorded)"
       : closed.length < 60
         ? "not enough candle history"
-        : `the move never beat the typical move in the first ${cfg.lsWindowSec} s (closest: ${
+        : `${cfg.lsFade ? `the move never beat the typical move in the first ${cfg.lsWindowSec} s (closest: ${
           best.move > 0 ? "+" : ""
-        }${best.move.toFixed(2)} $ vs ±${best.typical.toFixed(2)} $ at ${Math.round(best.at)} s) and the candle never got ${
+        }${best.move.toFixed(2)} $ vs ±${best.typical.toFixed(2)} $ at ${Math.round(best.at)} s) and ` : ""}the candle never got ${
           cfg.strongMin
         } strong between ${cfg.strongFromSec} and ${cfg.strongToSec} s (strongest ${bestStrength.toFixed(0)})`;
     await skip(start, `Lightspeed: ${why}: no bet`);

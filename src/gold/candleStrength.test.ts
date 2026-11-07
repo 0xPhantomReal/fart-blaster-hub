@@ -43,7 +43,8 @@ describe("candle strength", () => {
 describe("Lightspeed rule with strength", () => {
   const st = (score: number) => ({ score, strength: Math.abs(score), direction: score > 0 ? "up" : "down" });
   it("big + weak in the first 2 minutes → fade", () => {
-    expect(lightspeedDecision(core(60), st(30), 40, RULE)).toMatchObject({ side: "down", kind: "ls-fade" });
+    expect(lightspeedDecision(core(60), st(30), 40, { ...RULE, fade: true })).toMatchObject({ side: "down", kind: "ls-fade" });
+    expect(lightspeedDecision(core(60), st(30), 40, RULE)).toMatchObject({ skip: "big move but not strong (fading is off)" });
   });
   it("big + strong before minute 1 → wait; after → bet with it", () => {
     expect(lightspeedDecision(core(60), st(75), 40, RULE)).toMatchObject({ wait: true });
@@ -55,7 +56,7 @@ describe("Lightspeed rule with strength", () => {
     expect("skip" in lightspeedDecision(core(-20), st(-65), 240, RULE)).toBe(true);
   });
   it("strength against the move never counts; big move after 2 minutes isn't faded", () => {
-    expect(lightspeedDecision(core(60), st(-80), 50, RULE)).toMatchObject({ kind: "ls-fade" });
+    expect(lightspeedDecision(core(60), st(-80), 50, { ...RULE, fade: true })).toMatchObject({ kind: "ls-fade" });
     expect("skip" in lightspeedDecision(core(60), st(30), 150, RULE)).toBe(true);
   });
 });

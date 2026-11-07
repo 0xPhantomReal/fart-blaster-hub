@@ -761,6 +761,7 @@ export interface FadeBotStatus {
     lsWindowSec?: number;
     takeProfit?: number;
     strongMin?: number;
+    lsFade?: boolean;
     strongBet?: number;
     strongFromSec?: number;
     strongToSec?: number;
