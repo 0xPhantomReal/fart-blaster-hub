@@ -268,3 +268,54 @@ export function lightspeedDecision(
   if (strong && inStrong) return { side: moveSide, kind: "ls-strong", move, typical };
   return { skip: elapsed >= Math.max(rule.fadeWindowSec, rule.strongToSec) ? "past the watch" : "nothing yet" };
 }
+
+// ── Jev trader (FADEBOT_STRATEGY = jev-trader) ────────────────────────
+
+export interface TraderCfg {
+  edge: number; //        Jev's chance must beat the cost by this much (0.05 = 5 points)
+  bankroll: number; //    dollars the sizing works from
+  kelly: number; //       fraction of full Kelly (0.25 = quarter Kelly)
+  maxBet: number; //      dollars per buy, at most
+  minBet: number; //      dollars per buy, at least (smaller → no buy)
+  minLeftSec: number; //  no new buys with less time left than this
+  maxEntries: number; //  buys per window, at most
+}
+
+/** Kelly stake in dollars for buying at `cost` (0–1) a share that wins with chance `p`; 0 when there's no edge. */
+export function kellyStake(p: number, cost: number, cfg: Pick<TraderCfg, "bankroll" | "kelly" | "maxBet" | "minBet">) {
+  if (!(cost > 0 && cost < 1) || !(p > cost)) return 0;
+  const f = (p - cost) / (1 - cost);
+  const stake = Math.min(cfg.maxBet, cfg.bankroll * cfg.kelly * f);
+  return stake >= cfg.minBet ? Number(stake.toFixed(2)) : 0;
+}
+
+export type TraderAction = "buy_up" | "buy_down" | "wait" | "sell" | "hold";
+
+/**
+ * What the bot does with Jev's answer. Flat: a buy goes ahead only if Jev's chance for that side beats its cost by
+ * cfg.edge, sized by Kelly, within the caps. Holding: "sell" sells everything; anything else keeps the position.
+ */
+export function traderDecision(
+  jev: { action: TraderAction; pUp: number | null },
+  quotes: { upCost: number | null; downCost: number | null },
+  pos: { side: Side } | null,
+  ctx: { secondsLeft: number; entries: number; lossLimitHit: boolean },
+  cfg: TraderCfg,
+): { buy: Side; stake: number; p: number; cost: number } | { sell: true } | { none: string } {
+  if (pos) return jev.action === "sell" ? { sell: true } : { none: "Jev: hold" };
+  if (jev.action !== "buy_up" && jev.action !== "buy_down") return { none: "Jev: wait" };
+  const side: Side = jev.action === "buy_up" ? "up" : "down";
+  if (ctx.lossLimitHit) return { none: "daily loss limit reached" };
+  if (ctx.secondsLeft < cfg.minLeftSec) return { none: `under ${cfg.minLeftSec} s left` };
+  if (ctx.entries >= cfg.maxEntries) return { none: `already ${ctx.entries} buys this window` };
+  if (jev.pUp === null) return { none: "no probability from Jev" };
+  const p = side === "up" ? jev.pUp : 1 - jev.pUp;
+  const cost = side === "up" ? quotes.upCost : quotes.downCost;
+  if (cost === null) return { none: `no price for ${side}` };
+  if (p - cost < cfg.edge - 1e-9) {
+    return { none: `Jev ${Math.round(p * 100)}% vs cost ${Math.round(cost * 100)}¢: edge under ${Math.round(cfg.edge * 100)} points` };
+  }
+  const stake = kellyStake(p, cost, cfg);
+  if (!stake) return { none: `stake under $${cfg.minBet}` };
+  return { buy: side, stake, p, cost };
+}

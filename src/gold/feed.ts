@@ -761,11 +761,25 @@ export interface FadeBotStatus {
     lsWindowSec?: number;
     takeProfit?: number;
     strongMin?: number;
+    trader?: {
+      live: boolean;
+      edge: number;
+      bankroll: number;
+      kelly: number;
+      maxBet: number;
+      minBet: number;
+      dailyLoss: number;
+      minLeftSec: number;
+      maxEntries: number;
+      gapSec: number;
+    };
     lsFade?: boolean;
     strongBet?: number;
     strongFromSec?: number;
     strongToSec?: number;
   };
+  /** Jev trader mode: positions, recent questions and whether Jev's chances beat Polymarket's prices. */
+  trader?: TraderStatus | null;
   /** How often candles finished the way their strength score pointed (last 7 days), by checkpoint and strength. */
   strength?: { windows: number; rows: { at: number; from: number; n: number; theirWay: number }[] } | null;
   state: {
@@ -858,4 +872,45 @@ export async function fetchLightspeed(
   timeframeMin: number,
 ): Promise<{ forTime: number; live: Record<string, unknown> }> {
   return callFn({ action: "lightspeed", market, timeframeMin });
+}
+
+export interface TraderTrade {
+  id: number;
+  window_start: number | string;
+  mode: string;
+  status: string; //  open | sold | settled | void
+  side: "up" | "down";
+  stake: number;
+  shares: number;
+  price: number;
+  fees: number | null;
+  opened_sec: number;
+  p_side: number | null;
+  exit_price: number | null;
+  exit_sec: number | null;
+  result: string | null;
+  pnl: number | null;
+  reason: string | null;
+}
+export interface TraderAsk {
+  window_start: number | string;
+  at_sec: number;
+  p_up: number | null;
+  action: string | null;
+  up_cost: number | null;
+  down_cost: number | null;
+  up_sell: number | null;
+  down_sell: number | null;
+  pos_side: string | null;
+  unrealized: number | null;
+  did: string | null;
+  ms: number | null;
+}
+export interface TraderStatus {
+  live: boolean;
+  today: number;
+  trades: TraderTrade[];
+  totals: { n: number; pnl: number; wins: number } | null;
+  asks: TraderAsk[];
+  edge: { from: number; n: number; winPct: number | null; avgCost: number | null; returnPerDollar: number | null }[] | null;
 }

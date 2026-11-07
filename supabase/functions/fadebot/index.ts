@@ -1,6 +1,13 @@
 // Polymarket US bot for "BTC Up or Down: 5 min", run by a schedule every minute (pg_cron).
 //
-// FADEBOT_STRATEGY = lightspeed (the default): the Lightspeed fade. Minutes 0–1 of each window, the bot watches every
+// FADEBOT_STRATEGY = jev-trader (the default): Jev is asked over and over all through each window (a new question as
+//   soon as the last answer is in, FADEBOT_TRADER_GAP_SEC apart at least) with the candle, Lightspeed, candle strength,
+//   the live market block, Polymarket's buy/sell prices and our position: flat → buy Up / buy Down / wait; holding →
+//   sell / hold. Buys need Jev's chance to beat the cost by FADEBOT_TRADER_EDGE points (5) and are sized by Kelly
+//   (_shared/fadeStrategy.ts traderDecision); sells are market orders; anything unsold settles. Every ask is logged
+//   (fadebot_asks) to measure whether Jev beats the price. Real orders only with FADEBOT_MODE=live AND
+//   FADEBOT_TRADER_LIVE=1.
+// FADEBOT_STRATEGY = lightspeed: the Lightspeed fade. Minutes 0–1 of each window, the bot watches every
 //   BRTI tick; when the candle's move so far (from the website's candle open) gets bigger than Lightspeed's typical move
 //   in the time left (FADEBOT_LS_WINDOW_SEC, default the first 120 s), it market-buys $1 (FADEBOT_LS_BET) of the
 //   opposite side. Every run then checks the bid every 2 s and market-sells the whole position once it's worth
@@ -45,6 +52,8 @@ import {
   emaRuleDecision,
   lightspeedDecision,
   takeProfitPrice,
+  traderDecision,
+  type TraderCfg,
   pnl,
   regimeOf,
   REGIME_N,
@@ -67,6 +76,7 @@ import { runTvIndicator, tvContext } from "../_shared/tvIndicator.ts";
 import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
+import { askJevTrader } from "../_shared/jevTrader.ts";
 
 const TF = 300; //        5-minute windows
 // Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 3, 5, 15, 30, 60, 120 or 180 (default 30). The
@@ -104,7 +114,24 @@ const settings = () => ({
   readAt: READ_AT,
   // Which rule bets: "lightspeed" (default) = the Lightspeed fade with market orders; "jev-ema" = the old Jev + EMA
   // limit orders.
-  strategy: env("FADEBOT_STRATEGY") === "jev-ema" ? "jev-ema" : "lightspeed",
+  strategy: (["jev-ema", "lightspeed"].includes(env("FADEBOT_STRATEGY")) ? env("FADEBOT_STRATEGY") : "jev-trader") as
+    | "jev-trader"
+    | "lightspeed"
+    | "jev-ema",
+  // Jev trader: Jev is asked over and over (a new question as soon as the last answer is in) whether to buy Up, buy
+  // Down or wait — or, holding, whether to sell. Real orders only with FADEBOT_MODE=live AND FADEBOT_TRADER_LIVE=1.
+  trader: {
+    live: env("FADEBOT_TRADER_LIVE") === "1",
+    edge: Number(env("FADEBOT_TRADER_EDGE") || 5) / 100, //  points Jev's chance must beat the cost by
+    bankroll: Number(env("FADEBOT_TRADER_BANKROLL") || 100),
+    kelly: Number(env("FADEBOT_TRADER_KELLY") || 0.25),
+    maxBet: Number(env("FADEBOT_TRADER_MAX_BET") || 10),
+    minBet: Number(env("FADEBOT_TRADER_MIN_BET") || 1),
+    dailyLoss: Number(env("FADEBOT_TRADER_DAILY_LOSS") || 25),
+    minLeftSec: Number(env("FADEBOT_TRADER_MIN_LEFT_SEC") || 10),
+    maxEntries: Number(env("FADEBOT_TRADER_MAX_ENTRIES") || 3),
+    gapSec: Number(env("FADEBOT_TRADER_GAP_SEC") || 2),
+  },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
   lsBet: Number(env("FADEBOT_LS_BET") || 1),
@@ -169,6 +196,23 @@ async function setup() {
   await sql`create table if not exists fadebot_strength (
     window_start bigint not null, at_sec int not null, score double precision not null, used text,
     move double precision, primary key (window_start, at_sec))`;
+  // Jev trader: positions (one open per window at a time) and every question asked.
+  await sql`create table if not exists fadebot_trades (
+    id bigserial primary key, window_start bigint not null, mode text not null, status text not null default 'open',
+    market_slug text, long_is text, side text not null, stake double precision, shares double precision,
+    price double precision, fees double precision default 0, opened_sec double precision, p_side double precision,
+    order_id text, open_ref double precision, exit_price double precision, exit_sec double precision,
+    exit_order_id text, result text, pnl double precision, reason text, opened_at timestamptz default now(),
+    closed_at timestamptz)`;
+  await sql`create index if not exists fadebot_trades_window on fadebot_trades (window_start)`;
+  await sql`create table if not exists fadebot_asks (
+    id bigserial primary key, window_start bigint not null, at_sec double precision, p_up double precision,
+    action text, probs jsonb, up_cost double precision, down_cost double precision, up_sell double precision,
+    down_sell double precision, pos_side text, unrealized double precision, did text, ms int,
+    created_at timestamptz default now())`;
+  await sql`create index if not exists fadebot_asks_window on fadebot_asks (window_start)`;
+  await sql`alter table fadebot_trades enable row level security`;
+  await sql`alter table fadebot_asks enable row level security`;
   // Polymarket's own price history per 5-minute market: the lowest Up and Down prices during the window.
   await sql`create table if not exists fadebot_pmhist (
     window_start bigint primary key, slug text, long_is text, up_low double precision, down_low double precision,
@@ -1322,6 +1366,281 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
   return `watched minute ${minute + 1} (${ticks.length} ticks from ${source})`;
 }
 
+// ── Jev trader (FADEBOT_STRATEGY = jev-trader, the default) ────────────
+
+/** Both sides' buy and sell prices from one BBO read (prices on the book are the YES side's). */
+async function quotes(m: WindowMarket) {
+  const b = await pm().markets.bbo(m.slug);
+  const bid = b.bestBid ? Number(b.bestBid.value) : null;
+  const ask = b.bestAsk ? Number(b.bestAsk.value) : null;
+  const inv = (x: number | null) => (x === null ? null : Number((1 - x).toFixed(4)));
+  const yes = { cost: ask, sell: bid };
+  const no = { cost: inv(bid), sell: inv(ask) };
+  const up = m.longIs === "up" ? yes : no;
+  const down = m.longIs === "up" ? no : yes;
+  return { upCost: up.cost, downCost: down.cost, upSell: up.sell, downSell: down.sell };
+}
+
+/** Realized trader P&L since midnight New York time. */
+async function traderToday(): Promise<number> {
+  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where status <> 'open' and closed_at >=
+    (date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
+  return Number(r[0]?.p ?? 0);
+}
+
+/** Settle trader positions held to the end of their window. */
+async function settleTrades() {
+  const sql = db();
+  const now = Math.floor(Date.now() / 1000);
+  const open = await sql`select * from fadebot_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
+  for (const t of open) {
+    const end = Number(t.window_start) + TF;
+    let won: Side | null = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
+    if (!won) {
+      const fin = await period(end - 60);
+      if (fin && fin.n >= 20 && t.open_ref !== null && (t.mode === "dry" || now > end + 900)) won = winner(t.open_ref, fin.avg);
+      else if (now > end + 3600) {
+        await sql`update fadebot_trades set status = 'void', result = 'could not settle', closed_at = now() where id = ${t.id}`;
+        continue;
+      }
+    }
+    if (!won) continue;
+    const ok = won === t.side;
+    const p = Number(t.shares) * ((ok ? 1 : 0) - Number(t.price)) - Number(t.fees ?? 0);
+    await sql`update fadebot_trades set status = 'settled', result = ${ok ? "win" : "loss"}, pnl = ${p}, closed_at = now()
+      where id = ${t.id} and status = 'open'`;
+  }
+}
+
+/** One minute of the Jev trader for window `start`: record BRTI and ask Jev again and again until `until`. */
+async function traderRun(start: number, minute: number, until: number) {
+  const sql = db();
+  const cfg = settings();
+  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number } = cfg.trader;
+  const live = cfg.mode === "live" && tc.live;
+  const mode = live ? "live" : "dry";
+  const from = start + minute * 60;
+  const before = await period(start - 60);
+  const forming: Candle | null = before
+    ? { time: start, open: before.last, high: before.last, low: before.last, close: before.last }
+    : null;
+  for (let k = 0; forming && k < minute; k++) {
+    const pk = await period(start + k * 60);
+    if (pk) {
+      forming.high = Math.max(forming.high, pk.high);
+      forming.low = Math.min(forming.low, pk.low);
+      forming.close = pk.last;
+    }
+  }
+  const [closed, market] = await Promise.all([
+    forming ? closedCandles(start, 4).catch(() => [] as Candle[]) : Promise.resolve([] as Candle[]),
+    findMarket(start).catch(() => null),
+  ]);
+  let liveNow: Record<string, unknown> | null = null;
+  const liveLoop = (async () => {
+    while (forming && Date.now() / 1000 < until) {
+      liveNow = await lightspeedLive({ market: "btc", coinbase: "BTC-USD", tfSec: TF, forTime: start, open: forming.open })
+        .catch(() => liveNow);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  })();
+  const onTick = (t: number, p: number) => {
+    if (!forming || t < start) return;
+    forming.high = Math.max(forming.high, p);
+    forming.low = Math.min(forming.low, p);
+    forming.close = p;
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let asks = 0;
+  const logAsk = (row: Record<string, unknown>) =>
+    sql`insert into fadebot_asks ${sql({ window_start: start, ...row })}`.catch((e) => console.error("ask log:", e.message));
+
+  const asker = (async () => {
+    if (!forming || !market) {
+      await logAsk({
+        at_sec: Date.now() / 1000 - start,
+        did: !forming ? "no candle open (the minute before the window wasn't recorded)" : `no Polymarket market (${lastSearch})`,
+      });
+      return;
+    }
+    await sleep(1500); // let the first ticks and the live block arrive
+    while (Date.now() / 1000 < until - 1) {
+      const t0 = Date.now();
+      const elapsed = t0 / 1000 - start;
+      const left = TF - elapsed;
+      if (left < 3) break;
+      let row: Record<string, unknown> = { at_sec: elapsed };
+      try {
+        const [q, posRows, nRows, today] = await Promise.all([
+          quotes(market),
+          sql`select * from fadebot_trades where window_start = ${start} and status = 'open' order by id desc limit 1`,
+          sql`select count(*)::int as n from fadebot_trades where window_start = ${start}`,
+          traderToday(),
+        ]);
+        const pos = posRows[0] ?? null;
+        const sellNow = pos ? (pos.side === "up" ? q.upSell : q.downSell) : null;
+        const value = pos && sellNow !== null ? Number(pos.shares) * sellNow : null;
+        const unreal = pos && value !== null ? value - Number(pos.shares) * Number(pos.price) - Number(pos.fees ?? 0) : null;
+        const core = lightspeedCore(closed, start, TF, elapsed, forming);
+        const strength = candleStrength(core, liveNow, elapsed, TF, forming);
+        const r2 = (x: number) => Number(x.toFixed(2));
+        const state = {
+          instrument: "Polymarket US BTC Up/Down 5-minute (settles on CF Benchmarks BRTI)",
+          candle_so_far: {
+            seconds_in: Math.round(elapsed),
+            seconds_left: Math.round(left),
+            open: r2(forming.open),
+            high: r2(forming.high),
+            low: r2(forming.low),
+            price_now: r2(forming.close),
+            move_dollars: r2(forming.close - forming.open),
+            color_now: forming.close > forming.open ? "green" : forming.close < forming.open ? "red" : "flat",
+          },
+          last_40_candles: closed.slice(-40).map((c) => ({
+            o: r2(c.open), h: r2(c.high), l: r2(c.low), c: r2(c.close),
+            color: c.close > c.open ? "G" : c.close < c.open ? "R" : "-",
+          })),
+          lightspeed: core,
+          candle_strength: strength,
+          lightspeed_live: liveNow,
+          polymarket: { up_cost: q.upCost, down_cost: q.downCost, up_sell: q.upSell, down_sell: q.downSell },
+          position: pos
+            ? {
+              side: pos.side,
+              shares: Number(Number(pos.shares).toFixed(3)),
+              average_cost: Number(pos.price),
+              cost_dollars: r2(Number(pos.shares) * Number(pos.price)),
+              sells_for_now: sellNow,
+              value_now_dollars: value === null ? null : r2(value),
+              unrealized_pnl_dollars: unreal === null ? null : r2(unreal),
+              unrealized_pnl_pct: unreal === null ? null : r2((unreal / (Number(pos.shares) * Number(pos.price))) * 100),
+              held_seconds: Math.round(elapsed - Number(pos.opened_sec)),
+              your_chance_when_bought_pct: pos.p_side === null ? null : Math.round(Number(pos.p_side) * 100),
+            }
+            : null,
+          limits: {
+            buys_this_window: nRows[0].n,
+            max_buys_per_window: tc.maxEntries,
+            realized_pnl_today_dollars: r2(today),
+            daily_loss_limit_dollars: tc.dailyLoss,
+            sizing: `the bot sizes buys itself: ${tc.kelly} Kelly of $${tc.bankroll}, at most $${tc.maxBet}, only with ${
+              Math.round(tc.edge * 100)
+            }+ points of edge`,
+          },
+        };
+        const jev = await askJevTrader(state, !!pos);
+        asks += 1;
+        row = {
+          ...row,
+          p_up: jev.pUp,
+          action: jev.action,
+          probs: sql.json(jev.actionProbs),
+          up_cost: q.upCost,
+          down_cost: q.downCost,
+          up_sell: q.upSell,
+          down_sell: q.downSell,
+          pos_side: pos?.side ?? null,
+          unrealized: unreal,
+          ms: Date.now() - t0,
+        };
+        const nowEl = Date.now() / 1000 - start;
+        const d = traderDecision(
+          { action: jev.action, pUp: jev.pUp },
+          q,
+          pos ? { side: pos.side } : null,
+          { secondsLeft: TF - nowEl, entries: nRows[0].n, lossLimitHit: today <= -tc.dailyLoss },
+          tc,
+        );
+        if ("buy" in d) {
+          let shares = d.stake / d.cost;
+          let price = d.cost;
+          let fees = 0;
+          let orderId: string | null = null;
+          if (live) {
+            const f = await marketBuy(market, d.buy, d.stake);
+            if (!f.shares) throw new Error("market buy filled nothing");
+            shares = f.shares;
+            price = f.price;
+            fees = f.fees;
+            orderId = f.id;
+          }
+          await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+              opened_sec, p_side, order_id, open_ref, reason)
+            values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${d.buy}, ${d.stake}, ${shares}, ${price}, ${fees},
+              ${nowEl}, ${d.p}, ${orderId}, ${before?.avg ?? null},
+              ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} vs cost ${Math.round(d.cost * 100)}¢ at ${Math.round(nowEl)} s`})`;
+          row.did = `bought ${d.buy} $${d.stake.toFixed(2)} @ ${price.toFixed(2)}`;
+        } else if ("sell" in d && pos) {
+          let exit = sellNow;
+          let fees = Number(pos.fees ?? 0);
+          let exitId: string | null = null;
+          let sold = Number(pos.shares);
+          if (live) {
+            const f = await marketSellAll(market, pos.side, sellNow ?? 0);
+            if (!f.shares) throw new Error("market sell filled nothing");
+            exit = f.price;
+            fees += f.fees;
+            exitId = f.id;
+            sold = Math.min(sold, f.shares);
+          }
+          if (exit === null) throw new Error("no sell price");
+          const p = sold * (exit - Number(pos.price)) - fees;
+          await sql`update fadebot_trades set status = 'sold', result = ${p > 0 ? "win" : "loss"}, exit_price = ${exit},
+              exit_sec = ${nowEl}, exit_order_id = ${exitId}, pnl = ${p}, closed_at = now() where id = ${pos.id}`;
+          row.did = `sold ${pos.side} @ ${exit.toFixed(2)} (${p >= 0 ? "+" : "−"}$${Math.abs(p).toFixed(2)})`;
+        } else row.did = (d as { none: string }).none;
+      } catch (e) {
+        row.did = `error: ${(e as Error).message}`.slice(0, 300);
+        await sleep(3000);
+      }
+      await logAsk(row);
+      const gap = tc.gapSec * 1000 - (Date.now() - t0);
+      if (gap > 0) await sleep(gap);
+    }
+  })();
+
+  const [{ ticks, source }] = await Promise.all([record(until, onTick), asker, liveLoop]);
+  await savePeriod(from, from + 60, ticks, source);
+  return `trader minute ${minute + 1}: ${asks} Jev asks, ${ticks.length} ticks from ${source}`;
+}
+
+/** Does Jev beat Polymarket's price? Every ask's favoured side, bucketed by Jev's chance minus that side's cost. */
+async function traderStats(now: number) {
+  const rows = await db()`select a.window_start, a.p_up, a.up_cost, a.down_cost, (c.last >= o.last) as green
+    from fadebot_asks a
+    join fadebot_prices o on o.period_start = a.window_start - 60
+    join fadebot_prices c on c.period_start = a.window_start + 240
+    where a.window_start > ${now - 7 * 86400} and a.window_start + ${TF} <= ${now} and a.p_up is not null
+    order by a.id`;
+  const buckets = [-100, 0, 5, 10, 20];
+  const seen = new Set<string>();
+  const acc = buckets.map((from) => ({ from, n: 0, wins: 0, cost: 0, ret: 0 }));
+  for (const r of rows) {
+    const up = r.p_up >= 0.5;
+    const p = up ? r.p_up : 1 - r.p_up;
+    const cost = up ? r.up_cost : r.down_cost;
+    if (cost === null || !(cost > 0)) continue;
+    const edge = (p - cost) * 100;
+    const i = buckets.findLastIndex((b) => edge >= b);
+    const key = `${r.window_start}:${i}`;
+    if (seen.has(key)) continue; // one ask per window per bucket (asks in one window are nearly the same bet)
+    seen.add(key);
+    const win = up === r.green;
+    const a = acc[i];
+    a.n += 1;
+    a.wins += win ? 1 : 0;
+    a.cost += cost;
+    a.ret += (win ? 1 : 0) / cost - 1;
+  }
+  return acc.map((a) => ({
+    from: a.from,
+    n: a.n,
+    winPct: a.n ? Number(((a.wins / a.n) * 100).toFixed(1)) : null,
+    avgCost: a.n ? Number((a.cost / a.n).toFixed(3)) : null,
+    returnPerDollar: a.n ? Number((a.ret / a.n).toFixed(3)) : null,
+  }));
+}
+
 async function run() {
   await setup();
   const now = Date.now() / 1000;
@@ -1329,6 +1648,15 @@ async function run() {
   const m = Math.floor((now - start) / 60);
   const done: string[] = [];
   await dryLimitCheck().catch(() => {});
+  if (settings().strategy === "jev-trader") {
+    done.push(await traderRun(start, m, start + m * 60 + 58));
+    await settleTrades();
+    await settle();
+    await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 3 * 86400)}`;
+    await db()`delete from fadebot_asks where window_start < ${Math.floor(now - 7 * 86400)}`;
+    if (m === 3) await updatePmHistory(Date.now() / 1000).catch((e) => console.error("price history:", (e as Error).message));
+    return done;
+  }
   if (settings().strategy === "lightspeed") {
     const watchMins = Math.ceil(Math.max(settings().lsWindowSec, settings().strongToSec) / 60);
     if (m === 4) {
@@ -1431,6 +1759,20 @@ async function status() {
     bets,
     regime: { ...reg, window: REGIME_N, reads: hits.length, ...persistence(hits) },
     strength: await strengthStats(now).catch(() => null),
+    trader: cfg.strategy === "jev-trader"
+      ? {
+        live: cfg.mode === "live" && cfg.trader.live,
+        today: await traderToday().catch(() => 0),
+        trades: await sql`select * from fadebot_trades order by id desc limit 40`.catch(() => []),
+        totals: (await sql`select count(*)::int as n, coalesce(sum(pnl), 0) as pnl,
+            count(*) filter (where pnl > 0)::int as wins from fadebot_trades where status in ('sold', 'settled')`.catch(
+          () => [],
+        ))[0] ?? null,
+        asks: await sql`select window_start, at_sec, p_up, action, up_cost, down_cost, up_sell, down_sell, pos_side,
+            unrealized, did, ms, created_at from fadebot_asks order by id desc limit 30`.catch(() => []),
+        edge: await traderStats(now).catch(() => null),
+      }
+      : null,
     // Polymarket's prices per window (last 6 hours), with how the window ended (BRTI, Polymarket's rule).
     pmHistory: await db()`select h.window_start, h.up_low, h.down_low, h.up_read, h.down_read, h.n_points, h.long_is,
         h.error, h.sample, r.outcome from fadebot_pmhist h left join fadebot_reads5 r on r.window_start = h.window_start
@@ -1488,6 +1830,26 @@ Deno.serve(async (req) => {
       await savePeriod(start - 60, start, Array.from({ length: 30 }, (_, i) => ({ t: start - 30 + i, p: open })), "test");
       const msg = await lightspeedWatch(start, Number(body.minute ?? 0), now + Number(body.watch ?? 6));
       return json({ msg, start, bet: (await db()`select * from fadebot_bets5 where window_start = ${start}`)[0] ?? null });
+    }
+    if (body?.action === "test-trader" && env("FADEBOT_ALLOW_TEST") === "1") {
+      // Give the current window this candle open, then run the trader for a few seconds.
+      await setup();
+      const now = Date.now() / 1000;
+      const start = Math.floor(now / TF) * TF;
+      if (body.reset) {
+        await db()`delete from fadebot_trades where window_start = ${start}`;
+        await db()`delete from fadebot_asks where window_start = ${start}`;
+      }
+      const open = Number(body.open);
+      await savePeriod(start - 60, start, Array.from({ length: 30 }, (_, i) => ({ t: start - 30 + i, p: open })), "test");
+      const msg = await traderRun(start, Math.floor((now - start) / 60), now + Number(body.watch ?? 6));
+      return json({
+        msg,
+        start,
+        trades: await db()`select * from fadebot_trades where window_start = ${start} order by id`,
+        asks: await db()`select at_sec, p_up, action, up_cost, down_cost, pos_side, unrealized, did, ms from fadebot_asks
+          where window_start = ${start} order by id`,
+      });
     }
     if (body?.action === "test-exits" && env("FADEBOT_ALLOW_TEST") === "1") {
       await setup();

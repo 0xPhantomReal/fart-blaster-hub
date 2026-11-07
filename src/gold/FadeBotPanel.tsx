@@ -1,3 +1,4 @@
+import type { TraderStatus } from "./feed";
 import { useEffect, useState } from "react";
 import { FadeBacktestBox } from "./FadeBacktestBox";
 import { fadeBotFindMarket, fadeBotStatus, type FadeBotStatus } from "./feed";
@@ -68,7 +69,9 @@ export function FadeBotPanel({
   const cfg = s.settings;
   return (
     <div className="text-sm">
-      {cfg.strategy === "lightspeed" ? (
+      {cfg.strategy === "jev-trader" ? (
+        <TraderPanel t={s.trader ?? null} cfg={cfg} />
+      ) : cfg.strategy === "lightspeed" ? (
         <div className={`mb-2 space-y-1 text-xs ${MUTED}`}>
           <p>
             BTC 5-minute market on Polymarket US, Lightspeed rules (Jev isn't
@@ -140,154 +143,164 @@ export function FadeBotPanel({
           .
         </p>
       )}
-      <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">
-        <span>
-          Mode:{" "}
-          <b
-            className={
-              cfg.mode === "live" ? "text-[#ef5350]" : "text-[#d4a72c]"
-            }
-          >
-            {cfg.mode === "live" ? "LIVE" : "dry run"}
-          </b>
-        </span>
-        <span>
-          Max per window: $
-          {(cfg.limitShares * cfg.limitPrice + cfg.marketBet).toFixed(2)}
-        </span>
-        <span>
-          Won {st.wins} of {st.trades}
-          {st.trades ? ` (${Math.round((st.wins / st.trades) * 100)}%)` : ""}
-        </span>
-        <span
-          className={st.total_pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}
-        >
-          P&amp;L {money(st.total_pnl)}
-        </span>
-        <span className={`col-span-2 text-xs ${MUTED}`}>
-          Worst drawdown so far: ${st.worst_drawdown.toFixed(2)}
-        </span>
-      </div>
-      <button
-        className="mb-2 rounded border border-[#262c36] px-2 py-0.5 text-xs text-[#8b949e] hover:bg-[#1f252e]"
-        onClick={async () => {
-          setCheck("checking…");
-          const r = await fadeBotFindMarket();
-          setCheck(
-            "error" in r
-              ? `error: ${r.error}`
-              : r.market
-                ? `found ${r.market.slug} (YES pays on ${r.market.longIs}${r.how ? `, from ${r.how}` : ""}) for the window starting ${new Date(r.window).toLocaleTimeString()}${r.check ? `. Check against settled windows: ${r.check.ok === true ? "OK" : r.check.ok === false ? "MISMATCH" : "pending"}, ${r.check.note}` : ""}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`
-                : `not found: ${r.search}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`,
-          );
-        }}
-      >
-        Check Polymarket market
-      </button>
-      {check && <p className={`mb-2 break-all text-xs ${MUTED}`}>{check}</p>}
-      <table className="w-full text-xs tabular-nums">
-        <thead>
-          <tr className={MUTED}>
-            <th className="pb-1 text-left font-medium">Window</th>
-            <th className="pb-1 text-left font-medium">Jev</th>
-            <th className="pb-1 text-left font-medium">Bets</th>
-            <th className="pb-1 text-right font-medium">Result</th>
-          </tr>
-        </thead>
-        <tbody>
-          {s.bets.slice(0, 12).map((b) => (
-            <tr
-              key={String(b.window_start)}
-              className="border-t border-[#262c36]"
+      {cfg.strategy === "jev-trader" ? null : (
+        <>
+          <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">
+            <span>
+              Mode:{" "}
+              <b
+                className={
+                  cfg.mode === "live" ? "text-[#ef5350]" : "text-[#d4a72c]"
+                }
+              >
+                {cfg.mode === "live" ? "LIVE" : "dry run"}
+              </b>
+            </span>
+            <span>
+              Max per window: $
+              {(cfg.limitShares * cfg.limitPrice + cfg.marketBet).toFixed(2)}
+            </span>
+            <span>
+              Won {st.wins} of {st.trades}
+              {st.trades
+                ? ` (${Math.round((st.wins / st.trades) * 100)}%)`
+                : ""}
+            </span>
+            <span
+              className={
+                st.total_pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"
+              }
             >
-              <td className="py-1">
-                {new Date(Number(b.window_start) * 1000).toLocaleTimeString(
-                  [],
-                  { hour: "numeric", minute: "2-digit" },
-                )}
-              </td>
-              {b.status === "skipped" || b.status === "void" ? (
-                <td colSpan={3} className={`py-1 ${MUTED}`}>
-                  {b.status === "void" ? "couldn't settle" : b.reason}
-                </td>
-              ) : (
-                <>
+              P&amp;L {money(st.total_pnl)}
+            </span>
+            <span className={`col-span-2 text-xs ${MUTED}`}>
+              Worst drawdown so far: ${st.worst_drawdown.toFixed(2)}
+            </span>
+          </div>
+          <button
+            className="mb-2 rounded border border-[#262c36] px-2 py-0.5 text-xs text-[#8b949e] hover:bg-[#1f252e]"
+            onClick={async () => {
+              setCheck("checking…");
+              const r = await fadeBotFindMarket();
+              setCheck(
+                "error" in r
+                  ? `error: ${r.error}`
+                  : r.market
+                    ? `found ${r.market.slug} (YES pays on ${r.market.longIs}${r.how ? `, from ${r.how}` : ""}) for the window starting ${new Date(r.window).toLocaleTimeString()}${r.check ? `. Check against settled windows: ${r.check.ok === true ? "OK" : r.check.ok === false ? "MISMATCH" : "pending"}, ${r.check.note}` : ""}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`
+                    : `not found: ${r.search}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`,
+              );
+            }}
+          >
+            Check Polymarket market
+          </button>
+          {check && (
+            <p className={`mb-2 break-all text-xs ${MUTED}`}>{check}</p>
+          )}
+          <table className="w-full text-xs tabular-nums">
+            <thead>
+              <tr className={MUTED}>
+                <th className="pb-1 text-left font-medium">Window</th>
+                <th className="pb-1 text-left font-medium">Jev</th>
+                <th className="pb-1 text-left font-medium">Bets</th>
+                <th className="pb-1 text-right font-medium">Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {s.bets.slice(0, 12).map((b) => (
+                <tr
+                  key={String(b.window_start)}
+                  className="border-t border-[#262c36]"
+                >
                   <td className="py-1">
-                    {b.kind === "ls-strong"
-                      ? `Lightspeed: strong ${b.side === "up" ? "green ↑" : "red ↓"}`
-                      : b.kind === "ls-fade"
-                        ? `Lightspeed: fade the ${b.side === "up" ? "drop" : "jump"}`
-                        : b.kind === "hold-with-chop" ||
-                            b.kind === "flip-with-chop"
-                          ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
-                          : b.kind === "hold-fade-chop" ||
-                              b.kind === "flip-fade-chop"
-                            ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
-                            : b.kind === "flip-ema" || b.kind === "hold-ema"
-                              ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
-                              : b.kind === "flip-follow"
-                                ? "flip → with Jev"
-                                : b.kind === "flip-fade"
-                                  ? "flip → other side"
-                                  : b.kind === "fade-hold"
-                                    ? "holds (faded)"
-                                    : b.kind === "fade-flip"
-                                      ? "flip (faded)"
-                                      : "holds"}{" "}
-                    {b.jev_sure !== null
-                      ? `${Math.round(b.jev_sure * 100)}%`
-                      : ""}
-                    {b.tv15 ? (
-                      <div className={`text-[10px] ${MUTED}`}>{b.tv15}</div>
-                    ) : null}
+                    {new Date(Number(b.window_start) * 1000).toLocaleTimeString(
+                      [],
+                      { hour: "numeric", minute: "2-digit" },
+                    )}
                   </td>
-                  <td className="py-1" title={b.reason ?? undefined}>
-                    {b.side}
-                    {b.shares
-                      ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)}`
-                      : b.stake
-                        ? ` $${b.stake.toFixed(0)} (no fill)`
-                        : ""}
-                    {b.kind === "ls-strong" && b.shares ? (
-                      <span className={MUTED}> → hold</span>
-                    ) : null}
-                    {b.kind === "ls-fade" && b.shares ? (
-                      <span className={MUTED}>
-                        {" "}
-                        {b.exit_price != null
-                          ? `→ sold @ ${b.exit_price.toFixed(2)}`
-                          : b.target_price != null
-                            ? `→ sell @ ${b.target_price.toFixed(2)}${b.status === "open" ? "" : " (not reached)"}`
-                            : "→ held"}
-                      </span>
-                    ) : null}
-                    {b.limit_shares ? (
-                      <span className={MUTED}>
-                        {" "}
-                        + {b.limit_shares} @{" "}
-                        {Math.round((b.limit_price ?? 0) * 100)}¢{" "}
-                        {b.limit_filled
-                          ? "filled"
-                          : b.status === "open"
-                            ? "waiting"
-                            : "not filled"}
-                      </span>
-                    ) : null}
-                    {b.reason ? <span className={MUTED}> ⓘ</span> : null}
-                  </td>
-                  <td
-                    className={`py-1 text-right ${b.result === "win" || (b.result === "sold" && (b.pnl ?? 0) > 0) ? "text-[#26a69a]" : b.result === "loss" ? "text-[#ef5350]" : MUTED}`}
-                  >
-                    {b.status === "open"
-                      ? "open"
-                      : `${b.result} ${money(b.pnl ?? 0)}`}
-                  </td>
-                </>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                  {b.status === "skipped" || b.status === "void" ? (
+                    <td colSpan={3} className={`py-1 ${MUTED}`}>
+                      {b.status === "void" ? "couldn't settle" : b.reason}
+                    </td>
+                  ) : (
+                    <>
+                      <td className="py-1">
+                        {b.kind === "ls-strong"
+                          ? `Lightspeed: strong ${b.side === "up" ? "green ↑" : "red ↓"}`
+                          : b.kind === "ls-fade"
+                            ? `Lightspeed: fade the ${b.side === "up" ? "drop" : "jump"}`
+                            : b.kind === "hold-with-chop" ||
+                                b.kind === "flip-with-chop"
+                              ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
+                              : b.kind === "hold-fade-chop" ||
+                                  b.kind === "flip-fade-chop"
+                                ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
+                                : b.kind === "flip-ema" || b.kind === "hold-ema"
+                                  ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
+                                  : b.kind === "flip-follow"
+                                    ? "flip → with Jev"
+                                    : b.kind === "flip-fade"
+                                      ? "flip → other side"
+                                      : b.kind === "fade-hold"
+                                        ? "holds (faded)"
+                                        : b.kind === "fade-flip"
+                                          ? "flip (faded)"
+                                          : "holds"}{" "}
+                        {b.jev_sure !== null
+                          ? `${Math.round(b.jev_sure * 100)}%`
+                          : ""}
+                        {b.tv15 ? (
+                          <div className={`text-[10px] ${MUTED}`}>{b.tv15}</div>
+                        ) : null}
+                      </td>
+                      <td className="py-1" title={b.reason ?? undefined}>
+                        {b.side}
+                        {b.shares
+                          ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)}`
+                          : b.stake
+                            ? ` $${b.stake.toFixed(0)} (no fill)`
+                            : ""}
+                        {b.kind === "ls-strong" && b.shares ? (
+                          <span className={MUTED}> → hold</span>
+                        ) : null}
+                        {b.kind === "ls-fade" && b.shares ? (
+                          <span className={MUTED}>
+                            {" "}
+                            {b.exit_price != null
+                              ? `→ sold @ ${b.exit_price.toFixed(2)}`
+                              : b.target_price != null
+                                ? `→ sell @ ${b.target_price.toFixed(2)}${b.status === "open" ? "" : " (not reached)"}`
+                                : "→ held"}
+                          </span>
+                        ) : null}
+                        {b.limit_shares ? (
+                          <span className={MUTED}>
+                            {" "}
+                            + {b.limit_shares} @{" "}
+                            {Math.round((b.limit_price ?? 0) * 100)}¢{" "}
+                            {b.limit_filled
+                              ? "filled"
+                              : b.status === "open"
+                                ? "waiting"
+                                : "not filled"}
+                          </span>
+                        ) : null}
+                        {b.reason ? <span className={MUTED}> ⓘ</span> : null}
+                      </td>
+                      <td
+                        className={`py-1 text-right ${b.result === "win" || (b.result === "sold" && (b.pnl ?? 0) > 0) ? "text-[#26a69a]" : b.result === "loss" ? "text-[#ef5350]" : MUTED}`}
+                      >
+                        {b.status === "open"
+                          ? "open"
+                          : `${b.result} ${money(b.pnl ?? 0)}`}
+                      </td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
       {s.pmHistory && <PmHistory s={s} readAt={cfg.readAt ?? 30} />}
       {bt(
         cfg.readAt ?? 30,
@@ -448,6 +461,180 @@ function StrengthTable({
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+const pct = (x: number | null | undefined) =>
+  x === null || x === undefined ? "—" : `${Math.round(x * 100)}`;
+const usd = (x: number) => `${x >= 0 ? "+" : "−"}$${Math.abs(x).toFixed(2)}`;
+const hhmm = (t: number | string) =>
+  new Date(Number(t) * 1000).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+/** Jev trader: Jev asked constantly whether to buy, sell or wait; its trades; and whether it beats the price. */
+function TraderPanel({
+  t,
+  cfg,
+}: {
+  t: TraderStatus | null;
+  cfg: FadeBotStatus["settings"];
+}) {
+  const tc = cfg.trader;
+  const open = t?.trades.find((x) => x.status === "open");
+  const last = t?.asks[0];
+  return (
+    <div className={`mb-2 space-y-2 text-xs ${MUTED}`}>
+      <p>
+        <b className="text-[#c9d1d9]">Jev trader</b>{" "}
+        {t?.live ? (
+          <b className="text-[#ef5350]">LIVE</b>
+        ) : (
+          <b>test mode (no real orders)</b>
+        )}
+        . Jev is asked over and over — a new question as soon as the last answer
+        is in — with the candle, Lightspeed, candle strength, the live market
+        data, Polymarket's prices and the position: buy Up, buy Down or wait;
+        holding, sell or hold.
+        {tc
+          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s, and no buys after losing $${tc.dailyLoss} in a day. Unsold positions are held to settlement.`
+          : ""}
+      </p>
+      {!t ? (
+        <p>Waiting for the bot.</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-x-4 text-[#c9d1d9]">
+            <span>
+              Trades {t.totals?.n ?? 0}, won {t.totals?.wins ?? 0}
+            </span>
+            <span
+              className={
+                (t.totals?.pnl ?? 0) >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"
+              }
+            >
+              P&amp;L {usd(Number(t.totals?.pnl ?? 0))}
+            </span>
+            <span>Today {usd(t.today)}</span>
+          </div>
+          {open ? (
+            <p className="text-[#c9d1d9]">
+              Holding {open.side === "up" ? "Up" : "Down"}:{" "}
+              {open.shares.toFixed(2)} shares @ {open.price.toFixed(2)} ($
+              {open.stake.toFixed(2)})
+              {last?.unrealized != null
+                ? `, unrealized ${usd(last.unrealized)}`
+                : ""}
+            </p>
+          ) : null}
+          {last ? (
+            <p>
+              Last ask ({hhmm(last.window_start)} window,{" "}
+              {Math.round(last.at_sec)} s): Jev {last.action ?? "—"},{" "}
+              {pct(last.p_up)}% green, Up costs {pct(last.up_cost)}¢, Down{" "}
+              {pct(last.down_cost)}¢ → {last.did ?? "—"}
+              {last.ms ? ` (${(last.ms / 1000).toFixed(1)} s)` : ""}
+            </p>
+          ) : null}
+          {t.edge && t.edge.some((e) => e.n) ? (
+            <div>
+              <div className="mb-0.5">
+                Does Jev beat the price? Every ask's favoured side, by Jev's
+                chance minus what that side cost (one ask per candle per row,
+                last 7 days):
+              </div>
+              <table className="w-full tabular-nums">
+                <thead>
+                  <tr>
+                    <th className="text-left font-normal">Edge</th>
+                    <th className="text-right font-normal">Candles</th>
+                    <th className="text-right font-normal">Won</th>
+                    <th className="text-right font-normal">Avg cost</th>
+                    <th className="text-right font-normal">Per $1</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {t.edge.map((e, i, a) => (
+                    <tr key={e.from}>
+                      <td>
+                        {e.from < 0
+                          ? "below 0"
+                          : i === a.length - 1
+                            ? `${e.from}+ pts`
+                            : `${e.from}–${a[i + 1].from} pts`}
+                      </td>
+                      <td className="text-right">{e.n}</td>
+                      <td className="text-right">
+                        {e.winPct === null ? "—" : `${e.winPct}%`}
+                      </td>
+                      <td className="text-right">
+                        {e.avgCost === null
+                          ? "—"
+                          : `${Math.round(e.avgCost * 100)}¢`}
+                      </td>
+                      <td
+                        className={`text-right ${e.returnPerDollar === null ? "" : e.returnPerDollar >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}`}
+                      >
+                        {e.returnPerDollar === null
+                          ? "—"
+                          : usd(e.returnPerDollar)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="mt-0.5">
+                "Per $1" is what each dollar would have made buying that side at
+                that price and holding. If the higher-edge rows aren't clearly
+                positive after a few hundred candles, Jev isn't seeing anything
+                the price misses.
+              </div>
+            </div>
+          ) : (
+            <p>
+              The "does Jev beat the price?" table fills in as candles finish.
+            </p>
+          )}
+          {t.trades.length ? (
+            <table className="w-full tabular-nums">
+              <thead>
+                <tr>
+                  <th className="text-left font-normal">Window</th>
+                  <th className="text-left font-normal">Trade</th>
+                  <th className="text-right font-normal">Result</th>
+                </tr>
+              </thead>
+              <tbody className="text-[#c9d1d9]">
+                {t.trades.slice(0, 15).map((x) => (
+                  <tr key={x.id}>
+                    <td className="py-0.5">{hhmm(x.window_start)}</td>
+                    <td className="py-0.5">
+                      {x.side === "up" ? "Up ↑" : "Down ↓"} $
+                      {x.stake.toFixed(2)} @ {x.price.toFixed(2)} at{" "}
+                      {Math.round(x.opened_sec)} s (Jev {pct(x.p_side)}%)
+                      {x.exit_price != null
+                        ? ` → sold @ ${x.exit_price.toFixed(2)} at ${Math.round(x.exit_sec ?? 0)} s`
+                        : x.status === "open"
+                          ? " → holding"
+                          : " → held to the end"}
+                      {x.mode === "dry" ? (
+                        <span className={MUTED}> (test)</span>
+                      ) : null}
+                    </td>
+                    <td
+                      className={`py-0.5 text-right ${x.pnl == null ? MUTED : x.pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}`}
+                    >
+                      {x.pnl == null ? x.status : usd(x.pnl)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
