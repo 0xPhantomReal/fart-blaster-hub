@@ -760,7 +760,13 @@ export interface FadeBotStatus {
     lsBet?: number;
     lsWindowSec?: number;
     takeProfit?: number;
+    strongMin?: number;
+    strongBet?: number;
+    strongFromSec?: number;
+    strongToSec?: number;
   };
+  /** How often candles finished the way their strength score pointed (last 7 days), by checkpoint and strength. */
+  strength?: { windows: number; rows: { at: number; from: number; n: number; theirWay: number }[] } | null;
   state: {
     step: number;
     total_pnl: number;

@@ -1,26 +1,50 @@
 import { useEffect, useMemo, useState } from "react";
 import { lightspeedCore } from "./lightspeedCore";
+import { candleStrength } from "./candleStrength";
 import { fetchLightspeed, type Market } from "./feed";
 
 const MUTED = "text-[#8b949e]";
 const GREEN = "text-[#26a69a]";
 const RED = "text-[#ef5350]";
 
-type C = { time: number; open: number; high: number; low: number; close: number };
+type C = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
 type Obj = Record<string, unknown>;
 
-const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const n = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
 const get = (o: unknown, ...path: string[]): unknown =>
-  path.reduce<unknown>((x, k) => (x && typeof x === "object" ? (x as Obj)[k] : undefined), o);
+  path.reduce<unknown>(
+    (x, k) => (x && typeof x === "object" ? (x as Obj)[k] : undefined),
+    o,
+  );
 const signed = (v: number | null, d = 2, unit = "") =>
   v === null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(d)}${unit}`;
-const tone = (v: number | null, dead = 0) => (v === null || Math.abs(v) <= dead ? MUTED : v > 0 ? GREEN : RED);
+const tone = (v: number | null, dead = 0) =>
+  v === null || Math.abs(v) <= dead ? MUTED : v > 0 ? GREEN : RED;
 
-function Row({ label, value, cls, hint }: { label: string; value: string; cls?: string; hint?: string }) {
+function Row({
+  label,
+  value,
+  cls,
+  hint,
+}: {
+  label: string;
+  value: string;
+  cls?: string;
+  hint?: string;
+}) {
   return (
     <div className="flex justify-between gap-3 text-xs" title={hint}>
       <span className={`truncate ${MUTED}`}>{label}</span>
-      <span className={`whitespace-nowrap font-mono ${cls ?? ""}`}>{value}</span>
+      <span className={`whitespace-nowrap font-mono ${cls ?? ""}`}>
+        {value}
+      </span>
     </div>
   );
 }
@@ -72,14 +96,28 @@ export function LightspeedPanel({
   }, [market, tfMin, enabled]);
 
   const f = forming && forming.time + tf > Date.now() / 1000 ? forming : null;
-  const t = f ? f.time : closed.length ? closed[closed.length - 1].time + tf : 0;
+  const t = f
+    ? f.time
+    : closed.length
+      ? closed[closed.length - 1].time + tf
+      : 0;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const core = useMemo(() => (t ? lightspeedCore(closed, t, tf, f ? Date.now() / 1000 - t : 0, f) : null), [closed, f?.close, f?.high, f?.low, t, tf, Math.floor(tick / 2)]);
+  const core = useMemo(
+    () =>
+      t
+        ? lightspeedCore(closed, t, tf, f ? Date.now() / 1000 - t : 0, f)
+        : null,
+    [closed, f?.close, f?.high, f?.low, t, tf, Math.floor(tick / 2)],
+  );
+
+  const strength =
+    core && f ? candleStrength(core, live, Date.now() / 1000 - t, tf, f) : null;
 
   if (!enabled) {
     return (
       <div className={`text-xs ${MUTED}`}>
-        Lightspeed V0.5: waiting for the gold edge function (redeploy it to turn on the live market block).
+        Lightspeed V0.5: waiting for the gold edge function (redeploy it to turn
+        on the live market block).
       </div>
     );
   }
@@ -102,20 +140,62 @@ export function LightspeedPanel({
         <div className="whitespace-nowrap text-sm font-semibold tracking-wide">
           Lightspeed <span className="text-[#58a6ff]">V0.5</span>
         </div>
-        <div className={`text-[11px] ${MUTED}`}>what Jev sees on every call</div>
+        <div className={`text-[11px] ${MUTED}`}>
+          what Jev sees on every call
+        </div>
       </div>
 
       <div className="mb-2">
         <div className="mb-1 flex items-baseline gap-2">
-          <div className={`font-mono text-2xl ${pRw === null ? MUTED : pRw >= 50 ? GREEN : RED}`}>
+          <div
+            className={`font-mono text-2xl ${pRw === null ? MUTED : pRw >= 50 ? GREEN : RED}`}
+          >
             {pRw === null ? "—" : `${pRw.toFixed(0)}%`}
           </div>
-          <div className={`text-[11px] ${MUTED}`}>chance of green if price random-walks from here</div>
+          <div className={`text-[11px] ${MUTED}`}>
+            chance of green if price random-walks from here
+          </div>
         </div>
         <div className="space-y-0.5">
-          <Row label="Time left" value={n(get(fp, "seconds_left")) === null ? "—" : `${n(get(fp, "seconds_left"))} s`} />
-          <Row label="Move so far" value={signed(n(get(fp, "move_dollars")), 2, " $")} cls={tone(n(get(fp, "move_dollars")))} />
-          <Row label="Typical move" value={`±${n(get(fp, "typical_move_in_time_left_dollars"))?.toFixed(2) ?? "—"} $`} />
+          <Row
+            label="Strength"
+            value={
+              strength
+                ? `${strength.strength.toFixed(0)} ${strength.direction === "up" ? "↑" : strength.direction === "down" ? "↓" : ""}`
+                : "—"
+            }
+            cls={
+              strength
+                ? strength.strength < 20
+                  ? MUTED
+                  : strength.direction === "up"
+                    ? GREEN
+                    : RED
+                : MUTED
+            }
+            hint={
+              strength
+                ? `0–100, from: ${strength.used}`
+                : "Candle strength (needs the forming candle)"
+            }
+          />
+          <Row
+            label="Time left"
+            value={
+              n(get(fp, "seconds_left")) === null
+                ? "—"
+                : `${n(get(fp, "seconds_left"))} s`
+            }
+          />
+          <Row
+            label="Move so far"
+            value={signed(n(get(fp, "move_dollars")), 2, " $")}
+            cls={tone(n(get(fp, "move_dollars")))}
+          />
+          <Row
+            label="Typical move"
+            value={`±${n(get(fp, "typical_move_in_time_left_dollars"))?.toFixed(2) ?? "—"} $`}
+          />
           <Row
             label="Last 48"
             value={`${n(get(core, "base_rates", "green_pct_last_48"))?.toFixed(0) ?? "—"}% green · ac ${signed(n(get(core, "serial_dependence", "lag1_autocorrelation")), 2)}`}
@@ -130,24 +210,68 @@ export function LightspeedPanel({
       </div>
 
       <div className="space-y-0.5 border-t border-[#30363d] pt-2">
-        <Row label="Coinbase book" value={signed(n(get(cb, "imbalance_within_25bps")), 2)} cls={tone(n(get(cb, "imbalance_within_25bps")), 0.05)} hint="+ = more bids than asks near the price" />
-        <Row label="Micro-price" value={signed(n(get(cb, "microprice_offset_bps")), 2, " bps")} cls={tone(n(get(cb, "microprice_offset_bps")), 0.01)} />
-        <Row label="Kraken book" value={signed(n(get(kr, "imbalance_within_25bps")), 2)} cls={tone(n(get(kr, "imbalance_within_25bps")), 0.05)} />
-        <Row label="Buys, last 30 s" value={buy30 === null ? "—" : `${buy30.toFixed(0)}%`} cls={buy30 === null ? MUTED : tone(buy30 - 50, 5)} />
-        <Row label="Hyperliquid perp" value={signed(n(get(hl, "perp_vs_spot_bps")), 1, " bps")} cls={tone(n(get(hl, "perp_vs_spot_bps")), 1)} />
-        <Row label="Deribit perp" value={signed(n(get(db, "perp_vs_index_bps")), 1, " bps")} cls={tone(n(get(db, "perp_vs_index_bps")), 1)} />
-        <Row label="Venue spread" hint={`BRTI venues: highest ${String(get(ven, "highest") ?? "—")}, lowest ${String(get(ven, "lowest") ?? "—")}`} value={`${n(get(ven, "spread_between_venues_bps"))?.toFixed(1) ?? "—"} bps`} />
+        <Row
+          label="Coinbase book"
+          value={signed(n(get(cb, "imbalance_within_25bps")), 2)}
+          cls={tone(n(get(cb, "imbalance_within_25bps")), 0.05)}
+          hint="+ = more bids than asks near the price"
+        />
+        <Row
+          label="Micro-price"
+          value={signed(n(get(cb, "microprice_offset_bps")), 2, " bps")}
+          cls={tone(n(get(cb, "microprice_offset_bps")), 0.01)}
+        />
+        <Row
+          label="Kraken book"
+          value={signed(n(get(kr, "imbalance_within_25bps")), 2)}
+          cls={tone(n(get(kr, "imbalance_within_25bps")), 0.05)}
+        />
+        <Row
+          label="Buys, last 30 s"
+          value={buy30 === null ? "—" : `${buy30.toFixed(0)}%`}
+          cls={buy30 === null ? MUTED : tone(buy30 - 50, 5)}
+        />
+        <Row
+          label="Hyperliquid perp"
+          value={signed(n(get(hl, "perp_vs_spot_bps")), 1, " bps")}
+          cls={tone(n(get(hl, "perp_vs_spot_bps")), 1)}
+        />
+        <Row
+          label="Deribit perp"
+          value={signed(n(get(db, "perp_vs_index_bps")), 1, " bps")}
+          cls={tone(n(get(db, "perp_vs_index_bps")), 1)}
+        />
+        <Row
+          label="Venue spread"
+          hint={`BRTI venues: highest ${String(get(ven, "highest") ?? "—")}, lowest ${String(get(ven, "lowest") ?? "—")}`}
+          value={`${n(get(ven, "spread_between_venues_bps"))?.toFixed(1) ?? "—"} bps`}
+        />
         {others &&
           Object.entries(others).map(([k, v]) => {
             const x = n(get(v, "move_since_candle_open_pct"));
-            return <Row key={k} label={`${k.toUpperCase()} this candle`} value={signed(x, 3, "%")} cls={tone(x)} />;
+            return (
+              <Row
+                key={k}
+                label={`${k.toUpperCase()} this candle`}
+                value={signed(x, 3, "%")}
+                cls={tone(x)}
+              />
+            );
           })}
         {pm ? (
-          <Row label="Polymarket crowd" value={`${n(get(pm, "implied_p_up_pct"))?.toFixed(0) ?? "—"}% up`} />
+          <Row
+            label="Polymarket crowd"
+            value={`${n(get(pm, "implied_p_up_pct"))?.toFixed(0) ?? "—"}% up`}
+          />
         ) : null}
-        <Row label="Clock" value={`${String(get(core, "clock", "session") ?? "—")}${get(core, "clock", "turn_of_15m_candle") ? " · 15m turn" : ""}`} />
+        <Row
+          label="Clock"
+          value={`${String(get(core, "clock", "session") ?? "—")}${get(core, "clock", "turn_of_15m_candle") ? " · 15m turn" : ""}`}
+        />
       </div>
-      {err && <div className={`mt-1 text-[11px] ${MUTED}`}>live block: {err}</div>}
+      {err && (
+        <div className={`mt-1 text-[11px] ${MUTED}`}>live block: {err}</div>
+      )}
     </div>
   );
 }

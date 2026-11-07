@@ -5,6 +5,10 @@
 //   in the time left (FADEBOT_LS_WINDOW_SEC, default the first 120 s), it market-buys $1 (FADEBOT_LS_BET) of the
 //   opposite side. Every run then checks the bid every 2 s and market-sells the whole position once it's worth
 //   FADEBOT_TAKE_PROFIT × the buy price (default 2 = 100% profit); otherwise it's held to settlement. Jev isn't asked.
+//   Candle strength (_shared/candleStrength.ts, 0–100 from momentum, range position, trade flow, books, ETH/SOL)
+//   decides: a big move that's FADEBOT_STRONG_MIN (60)+ strong the same way is bought WITH instead of faded, and any
+//   candle that strong between FADEBOT_STRONG_FROM_SEC (60) and FADEBOT_STRONG_TO_SEC (240) is bought WITH for
+//   FADEBOT_STRONG_BET ($5), held to settlement. Strength is also logged at 60/120/180/240 s of every window.
 //   FADEBOT_STRATEGY = jev-ema: the older rule below.
 //
 // Each 5-minute window [S, S+300):
@@ -39,7 +43,7 @@ import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
-  lightspeedFadeDecision,
+  lightspeedDecision,
   takeProfitPrice,
   pnl,
   regimeOf,
@@ -61,6 +65,8 @@ import {
 } from "../_shared/jevContext.ts";
 import { runTvIndicator, tvContext } from "../_shared/tvIndicator.ts";
 import { lightspeedCore } from "../_shared/lightspeedCore.ts";
+import { lightspeedLive } from "../_shared/lightspeedLive.ts";
+import { candleStrength } from "../_shared/candleStrength.ts";
 
 const TF = 300; //        5-minute windows
 // Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 3, 5, 15, 30, 60, 120 or 180 (default 30). The
@@ -103,6 +109,12 @@ const settings = () => ({
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
   lsBet: Number(env("FADEBOT_LS_BET") || 1),
   lsWindowSec: Number(env("FADEBOT_LS_WINDOW_SEC") || 120),
+  // Candle strength ("strength decides"): a big move that's strong the same way is bought WITH instead of faded, and
+  // a strong candle is bought between strongFromSec and strongToSec; strength = 0–100 (_shared/candleStrength.ts).
+  strongMin: Number(env("FADEBOT_STRONG_MIN") || 60),
+  strongBet: Number(env("FADEBOT_STRONG_BET") || 5),
+  strongFromSec: Number(env("FADEBOT_STRONG_FROM_SEC") || 60),
+  strongToSec: Number(env("FADEBOT_STRONG_TO_SEC") || 240),
   takeProfit: Number(env("FADEBOT_TAKE_PROFIT") || 2),
 });
 
@@ -151,6 +163,10 @@ async function setup() {
   await sql`alter table fadebot_bets5 add column if not exists exit_price double precision`;
   await sql`alter table fadebot_bets5 add column if not exists exit_order_id text`;
   await sql`alter table fadebot_bets5 add column if not exists exit_at timestamptz`;
+  // Candle strength at fixed points of every window (60/120/180/240 s), to see how often strong candles finish their way.
+  await sql`create table if not exists fadebot_strength (
+    window_start bigint not null, at_sec int not null, score double precision not null, used text,
+    move double precision, primary key (window_start, at_sec))`;
   // Polymarket's own price history per 5-minute market: the lowest Up and Down prices during the window.
   await sql`create table if not exists fadebot_pmhist (
     window_start bigint primary key, slug text, long_is text, up_low double precision, down_low double precision,
@@ -1185,18 +1201,38 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
       forming.close = pm0.last;
     }
   }
-  const closed = done || !forming ? [] : await closedCandles(start, 4).catch(() => []);
+  const closed = !forming ? [] : await closedCandles(start, 4).catch(() => []);
   const market = done || !forming ? null : await findMarket(start).catch(() => null);
   const chk = market ? await checkLong(start, market.longIs).catch((e) => ({ ok: null, note: (e as Error).message })) : null;
   let best = { ratio: 0, move: 0, typical: 0, at: 0 };
+  let bestStrength = 0;
+  const rule = { fadeWindowSec: cfg.lsWindowSec, strongFromSec: cfg.strongFromSec, strongToSec: cfg.strongToSec, strongMin: cfg.strongMin };
+  const watchEnd = Math.max(cfg.lsWindowSec, cfg.strongToSec);
+  const marks = [60, 120, 180, 240].filter((x) => x > minute * 60 && x <= (minute + 1) * 60);
+  // The live market block (books, trade flow, other coins) for the strength score, refreshed every 5 s.
+  let liveNow: Record<string, unknown> | null = null;
+  const liveLoop = (async () => {
+    while (forming && Date.now() / 1000 < until) {
+      liveNow = await lightspeedLive({ market: "btc", coinbase: "BTC-USD", tfSec: TF, forTime: start, open: forming.open })
+        .catch(() => liveNow);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  })();
   let busy = false;
   let lastEval = 0;
 
-  const enter = async (d: { side: Side; move: number; typical: number }, elapsed: number) => {
+  const enter = async (
+    d: { side: Side; kind: "ls-fade" | "ls-strong"; move: number; typical: number },
+    elapsed: number,
+    st: { score: number; used: string } | null,
+  ) => {
     if (await already()) return;
-    const why = `Lightspeed: move ${d.move > 0 ? "+" : ""}${d.move.toFixed(2)} $ beat the typical move ±${d.typical.toFixed(2)} $ at ${
-      Math.round(elapsed)
-    } s → ${d.side}`;
+    const mv = `move ${d.move > 0 ? "+" : ""}${d.move.toFixed(2)} $ (typical ±${d.typical.toFixed(2)} $)`;
+    const sc = st ? `strength ${st.score > 0 ? "+" : ""}${st.score.toFixed(0)} (${st.used})` : "no strength score";
+    const why = d.kind === "ls-fade"
+      ? `Lightspeed fade at ${Math.round(elapsed)} s: ${mv} beat the typical move but ${sc} is weak → ${d.side}`
+      : `Lightspeed strong at ${Math.round(elapsed)} s: ${sc}, ${mv} → ${d.side}`;
+    const bet = d.kind === "ls-fade" ? cfg.lsBet : cfg.strongBet;
     if (!market) return skip(start, `${why}, but no Polymarket 5-minute market found for this window (${lastSearch})`.slice(0, 700));
     if (chk?.ok === false) return skip(start, `${why}; market ${market.slug} (YES = ${market.longIs}) but ${chk.note}`.slice(0, 700));
     let price: number | null = await priceFor(market, d.side).catch(() => null);
@@ -1205,7 +1241,7 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
     let orderId: string | null = null;
     if (cfg.mode === "live") {
       try {
-        const f = await marketBuy(market, d.side, cfg.lsBet);
+        const f = await marketBuy(market, d.side, bet);
         orderId = f.id;
         shares = f.shares;
         fees = f.fees;
@@ -1214,29 +1250,39 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
         return skip(start, `${why}; market order failed: ${(e as Error).message}`.slice(0, 500));
       }
       if (!shares) return skip(start, `${why}; market order filled nothing`);
-    } else if (price && price > 0) shares = cfg.lsBet / price;
+    } else if (price && price > 0) shares = bet / price;
     else return skip(start, `${why}; no price for ${d.side}`);
-    const target = takeProfitPrice(price ?? 0, cfg.takeProfit);
+    // Fades sell at the take-profit; strength buys are held to settlement.
+    const target = d.kind === "ls-fade" ? takeProfitPrice(price ?? 0, cfg.takeProfit) : null;
     await sql`insert into fadebot_bets5 (window_start, mode, status, market_slug, long_is, side, step, stake, price, shares, fees,
         limit_shares, limit_filled, open_ref, order_id, kind, reason, target_price)
-      values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.side}, 0, ${cfg.lsBet}, ${price ?? 0},
-        ${shares}, ${fees}, 0, 0, ${before?.avg ?? null}, ${orderId}, 'ls-fade',
-        ${`${why}${target === null ? "; double the price is $1 or more, so held to settlement" : ""}${
+      values (${start}, ${cfg.mode}, 'open', ${market.slug}, ${market.longIs}, ${d.side}, 0, ${bet}, ${price ?? 0},
+        ${shares}, ${fees}, 0, 0, ${before?.avg ?? null}, ${orderId}, ${d.kind},
+        ${`${why}${d.kind === "ls-fade" && target === null ? "; double the price is $1 or more, so held to settlement" : ""}${
           chk?.ok ? "" : `; YES = ${market.longIs} from the ${lastHow}`
         }`.slice(0, 700)}, ${target})
       on conflict (window_start) do nothing`;
   };
 
   const onTick = (t: number, p: number) => {
-    if (done || busy || !forming || t < start) return;
+    if (!forming || t < start) return;
     forming.high = Math.max(forming.high, p);
     forming.low = Math.min(forming.low, p);
     forming.close = p;
-    if (Date.now() - lastEval < 200) return;
-    lastEval = Date.now();
     const elapsed = t - start;
+    // (each mark is taken just before its second so the minute's run, which ends at second 59, still sees it)
+    const mark = marks.length && elapsed >= marks[0] - 1.5 ? marks.shift() : undefined;
+    if (!mark && (done || busy || Date.now() - lastEval < 200)) return;
+    lastEval = Date.now();
     const ls = lightspeedCore(closed, start, TF, elapsed, forming);
-    const d = lightspeedFadeDecision(ls, elapsed, cfg.lsWindowSec);
+    const st = candleStrength(ls, liveNow, elapsed, TF, forming);
+    if (st && mark) {
+      sql`insert into fadebot_strength (window_start, at_sec, score, used, move)
+        values (${start}, ${mark}, ${st.score}, ${st.used}, ${forming.close - forming.open}) on conflict do nothing`.catch(() => {});
+    }
+    if (done || busy) return;
+    if (st && elapsed >= cfg.strongFromSec && elapsed < cfg.strongToSec) bestStrength = Math.max(bestStrength, st.strength);
+    const d = lightspeedDecision(ls, st, elapsed, rule);
     const fp = ls?.finish_probability as { move_dollars?: number; typical_move_in_time_left_dollars?: number } | undefined;
     if (fp?.typical_move_in_time_left_dollars) {
       const ratio = Math.abs(fp.move_dollars ?? 0) / fp.typical_move_in_time_left_dollars;
@@ -1245,23 +1291,25 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
     if ("skip" in d) return;
     busy = true;
     done = true;
-    enter(d, elapsed)
+    enter(d, elapsed, st)
       .catch((e) => skip(start, `error: ${(e as Error).message}`.slice(0, 300)))
       .finally(() => (busy = false));
   };
 
-  const [{ ticks, source }] = await Promise.all([record(until, onTick), watchExits(until)]);
+  const [{ ticks, source }] = await Promise.all([record(until, onTick), watchExits(until), liveLoop]);
   await savePeriod(from, from + 60, ticks, source);
   while (busy) await new Promise((r) => setTimeout(r, 200));
   // The end of the watch: say why there was no bet (shown on the page).
-  if (!done && (minute + 1) * 60 >= cfg.lsWindowSec) {
+  if (!done && (minute + 1) * 60 >= watchEnd) {
     const why = !before
       ? "no candle open (the minute before the window wasn't recorded)"
       : closed.length < 60
         ? "not enough candle history"
         : `the move never beat the typical move in the first ${cfg.lsWindowSec} s (closest: ${
           best.move > 0 ? "+" : ""
-        }${best.move.toFixed(2)} $ vs ±${best.typical.toFixed(2)} $ at ${Math.round(best.at)} s)`;
+        }${best.move.toFixed(2)} $ vs ±${best.typical.toFixed(2)} $ at ${Math.round(best.at)} s) and the candle never got ${
+          cfg.strongMin
+        } strong between ${cfg.strongFromSec} and ${cfg.strongToSec} s (strongest ${bestStrength.toFixed(0)})`;
     await skip(start, `Lightspeed: ${why}: no bet`);
   }
   return `watched minute ${minute + 1} (${ticks.length} ticks from ${source})`;
@@ -1275,7 +1323,7 @@ async function run() {
   const done: string[] = [];
   await dryLimitCheck().catch(() => {});
   if (settings().strategy === "lightspeed") {
-    const watchMins = Math.ceil(settings().lsWindowSec / 60);
+    const watchMins = Math.ceil(Math.max(settings().lsWindowSec, settings().strongToSec) / 60);
     if (m === 4) {
       // The price to beat (and next window's candle open), while watching this window's take-profit.
       const from = start + 240;
@@ -1342,6 +1390,23 @@ async function run() {
   return done;
 }
 
+/** How often candles finished the way their strength score pointed, by checkpoint and strength (last 7 days). */
+async function strengthStats(now: number) {
+  const rows = await db()`select s.window_start, s.at_sec, s.score, (c.last >= o.last) as green from fadebot_strength s
+    join fadebot_prices o on o.period_start = s.window_start - 60
+    join fadebot_prices c on c.period_start = s.window_start + 240
+    where s.window_start > ${now - 7 * 86400} and s.window_start + ${TF} <= ${now}`;
+  const buckets = [0, 20, 40, 60, 80];
+  const out: { at: number; from: number; n: number; theirWay: number }[] = [];
+  for (const at of [60, 120, 180, 240]) {
+    for (const from of buckets) {
+      const xs = rows.filter((r) => r.at_sec === at && Math.abs(r.score) >= from && Math.abs(r.score) < from + 20 && r.score !== 0);
+      out.push({ at, from, n: xs.length, theirWay: xs.filter((r) => (r.score > 0) === r.green).length });
+    }
+  }
+  return { windows: new Set(rows.map((r) => r.window_start)).size, rows: out };
+}
+
 async function status() {
   await setup();
   const sql = db();
@@ -1358,6 +1423,7 @@ async function status() {
     nextStake: cfg.marketBet,
     bets,
     regime: { ...reg, window: REGIME_N, reads: hits.length, ...persistence(hits) },
+    strength: await strengthStats(now).catch(() => null),
     // Polymarket's prices per window (last 6 hours), with how the window ended (BRTI, Polymarket's rule).
     pmHistory: await db()`select h.window_start, h.up_low, h.down_low, h.up_read, h.down_read, h.n_points, h.long_is,
         h.error, h.sample, r.outcome from fadebot_pmhist h left join fadebot_reads5 r on r.window_start = h.window_start

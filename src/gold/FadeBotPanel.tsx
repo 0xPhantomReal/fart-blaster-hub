@@ -68,19 +68,34 @@ export function FadeBotPanel({
   return (
     <div className="text-sm">
       {cfg.strategy === "lightspeed" ? (
-        <p className={`mb-2 text-xs ${MUTED}`}>
-          BTC 5-minute market on Polymarket US. Lightspeed fade: in the first{" "}
-          {(cfg.lsWindowSec ?? 120) % 60
-            ? `${cfg.lsWindowSec} seconds`
-            : `${(cfg.lsWindowSec ?? 120) / 60} minutes`}{" "}
-          of each candle, when the move so far gets bigger than Lightspeed's
-          typical move, the bot market-buys ${cfg.lsBet ?? 1} of the opposite
-          side (up move → Down, down move → Up). It market-sells once the shares
-          are worth {cfg.takeProfit ?? 2}× what they cost (
-          {Math.round(((cfg.takeProfit ?? 2) - 1) * 100)}% profit); if that
-          never happens, it holds to settlement. At most one bet per window. Jev
-          isn't asked.
-        </p>
+        <div className={`mb-2 space-y-1 text-xs ${MUTED}`}>
+          <p>
+            BTC 5-minute market on Polymarket US, Lightspeed rules (Jev isn't
+            asked). The bot scores each candle's strength live, from 0 to 100:
+            how big the move is for the time elapsed, where price sits in the
+            candle's range, aggressive buying vs selling, the order books, and
+            ETH/SOL.
+          </p>
+          <p>
+            <b>Strong:</b> from {cfg.strongFromSec ?? 60} to{" "}
+            {cfg.strongToSec ?? 240} seconds in, once the candle is{" "}
+            {cfg.strongMin ?? 60}+ strong in the direction it's moving, the bot
+            market-buys ${cfg.strongBet ?? 5} of that side and holds it to
+            settlement.
+          </p>
+          <p>
+            <b>Fade:</b> in the first {cfg.lsWindowSec ?? 120} seconds, a move
+            bigger than Lightspeed's typical move that is <i>not</i> strong gets
+            faded: ${cfg.lsBet ?? 1} market buy of the other side, market-sold
+            at {cfg.takeProfit ?? 2}× the price (
+            {Math.round(((cfg.takeProfit ?? 2) - 1) * 100)}% profit) or held to
+            settlement. A big move that is strong is bought with instead (from{" "}
+            {cfg.strongFromSec ?? 60} s). At most one bet per window.
+          </p>
+          {s.strength && s.strength.windows > 0 ? (
+            <StrengthTable st={s.strength} min={cfg.strongMin ?? 60} />
+          ) : null}
+        </div>
       ) : (
         <p className={`mb-2 text-xs ${MUTED}`}>
           BTC 5-minute market on Polymarket US. Jev reads each candle{" "}
@@ -193,25 +208,27 @@ export function FadeBotPanel({
               ) : (
                 <>
                   <td className="py-1">
-                    {b.kind === "ls-fade"
-                      ? `Lightspeed: fade the ${b.side === "up" ? "drop" : "jump"}`
-                      : b.kind === "hold-with-chop" ||
-                          b.kind === "flip-with-chop"
-                        ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
-                        : b.kind === "hold-fade-chop" ||
-                            b.kind === "flip-fade-chop"
-                          ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
-                          : b.kind === "flip-ema" || b.kind === "hold-ema"
-                            ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
-                            : b.kind === "flip-follow"
-                              ? "flip → with Jev"
-                              : b.kind === "flip-fade"
-                                ? "flip → other side"
-                                : b.kind === "fade-hold"
-                                  ? "holds (faded)"
-                                  : b.kind === "fade-flip"
-                                    ? "flip (faded)"
-                                    : "holds"}{" "}
+                    {b.kind === "ls-strong"
+                      ? `Lightspeed: strong ${b.side === "up" ? "green ↑" : "red ↓"}`
+                      : b.kind === "ls-fade"
+                        ? `Lightspeed: fade the ${b.side === "up" ? "drop" : "jump"}`
+                        : b.kind === "hold-with-chop" ||
+                            b.kind === "flip-with-chop"
+                          ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-with-chop" ? "flip" : "holds"}), EMAs close → with`
+                          : b.kind === "hold-fade-chop" ||
+                              b.kind === "flip-fade-chop"
+                            ? `Jev ${b.side === "up" ? "red ↓" : "green ↑"} (${b.kind === "flip-fade-chop" ? "flip" : "holds"}), EMAs close → against`
+                            : b.kind === "flip-ema" || b.kind === "hold-ema"
+                              ? `Jev ${b.side === "up" ? "green ↑" : "red ↓"} (${b.kind === "flip-ema" ? "flip" : "holds"}) + EMAs`
+                              : b.kind === "flip-follow"
+                                ? "flip → with Jev"
+                                : b.kind === "flip-fade"
+                                  ? "flip → other side"
+                                  : b.kind === "fade-hold"
+                                    ? "holds (faded)"
+                                    : b.kind === "fade-flip"
+                                      ? "flip (faded)"
+                                      : "holds"}{" "}
                     {b.jev_sure !== null
                       ? `${Math.round(b.jev_sure * 100)}%`
                       : ""}
@@ -226,6 +243,9 @@ export function FadeBotPanel({
                       : b.stake
                         ? ` $${b.stake.toFixed(0)} (no fill)`
                         : ""}
+                    {b.kind === "ls-strong" && b.shares ? (
+                      <span className={MUTED}> → hold</span>
+                    ) : null}
                     {b.kind === "ls-fade" && b.shares ? (
                       <span className={MUTED}>
                         {" "}
@@ -365,6 +385,64 @@ function PmHistory({ s, readAt }: { s: FadeBotStatus; readAt: number }) {
           market for some windows).
         </p>
       )}
+    </div>
+  );
+}
+
+/** How often candles finished the way their strength pointed, by checkpoint (rows) and strength (columns). */
+function StrengthTable({
+  st,
+  min,
+}: {
+  st: {
+    windows: number;
+    rows: { at: number; from: number; n: number; theirWay: number }[];
+  };
+  min: number;
+}) {
+  const froms = [0, 20, 40, 60, 80];
+  return (
+    <div className="mt-1">
+      <div className="mb-0.5">
+        How often the candle finished the way its strength pointed (last 7 days,{" "}
+        {st.windows} candles):
+      </div>
+      <table className="w-full tabular-nums">
+        <thead>
+          <tr>
+            <th className="text-left font-normal">at</th>
+            {froms.map((f) => (
+              <th
+                key={f}
+                className={`text-right font-normal ${f >= min ? "text-[#c9d1d9]" : ""}`}
+              >
+                {f}–{f + 20}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {[60, 120, 180, 240].map((at) => (
+            <tr key={at}>
+              <td>{at} s</td>
+              {froms.map((f) => {
+                const r = st.rows.find((x) => x.at === at && x.from === f);
+                return (
+                  <td
+                    key={f}
+                    className="text-right"
+                    title={r ? `${r.theirWay} of ${r.n}` : undefined}
+                  >
+                    {r && r.n
+                      ? `${Math.round((r.theirWay / r.n) * 100)}% (${r.n})`
+                      : "—"}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

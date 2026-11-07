@@ -227,3 +227,40 @@ export function takeProfitPrice(price: number, mult = 2): number | null {
   const t = Number((price * mult).toFixed(4));
   return price > 0 && t < 1 ? t : null;
 }
+
+export interface LsRule {
+  fadeWindowSec: number; //   fade only before this (default 120)
+  strongFromSec: number; //   strength buys from … (default 60)
+  strongToSec: number; //     … until (default 240)
+  strongMin: number; //       strength needed, 0–100 (default 60)
+}
+
+/**
+ * Lightspeed rule with candle strength ("strength decides"):
+ *  - big move (bigger than the typical move) in the fade window: strong the same way → bet WITH it (once the strength
+ *    window has opened; before that, wait); weak → fade it (bet against).
+ *  - otherwise, inside the strength window: strong the same way as the move → bet WITH it.
+ */
+export function lightspeedDecision(
+  ls: Record<string, unknown> | null,
+  strength: { score: number; strength: number; direction: string } | null,
+  elapsed: number,
+  rule: LsRule,
+): { side: Side; kind: "ls-fade" | "ls-strong"; move: number; typical: number } | { skip: string; wait?: boolean } {
+  const fp = ls?.finish_probability as { move_dollars?: number; typical_move_in_time_left_dollars?: number } | undefined;
+  const move = fp?.move_dollars;
+  const typical = fp?.typical_move_in_time_left_dollars;
+  if (typeof move !== "number" || typeof typical !== "number" || !(typical > 0)) return { skip: "no Lightspeed numbers" };
+  if (move === 0) return { skip: "no move" };
+  const moveSide: Side = move > 0 ? "up" : "down";
+  const strong = !!strength && strength.direction === moveSide && strength.strength >= rule.strongMin;
+  const inStrong = elapsed >= rule.strongFromSec && elapsed < rule.strongToSec;
+  const big = Math.abs(move) > typical;
+  if (big && elapsed < rule.fadeWindowSec) {
+    if (!strong) return { side: moveSide === "up" ? "down" : "up", kind: "ls-fade", move, typical };
+    if (inStrong) return { side: moveSide, kind: "ls-strong", move, typical };
+    return { skip: "big and strong: waiting for the strength window", wait: true };
+  }
+  if (strong && inStrong) return { side: moveSide, kind: "ls-strong", move, typical };
+  return { skip: elapsed >= Math.max(rule.fadeWindowSec, rule.strongToSec) ? "past the watch" : "nothing yet" };
+}
