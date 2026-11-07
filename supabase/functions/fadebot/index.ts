@@ -10,9 +10,9 @@
 //       bet WITH Jev's call (hold or flip) only when the EMAs agree with it:
 //       Jev calls up and the fast EMA (9) is above the slow EMA (21) → bet up
 //       Jev calls down and the fast EMA is below the slow EMA → bet down
-//       …and only when the EMAs are at least $60 apart (FADEBOT_EMA_GAP); otherwise no bet.
+//       …and only when the EMAs are at least $30 apart (FADEBOT_EMA_GAP); otherwise no bet.
 //       Flip calls also need the regime to be "Jev right" (FADEBOT_FLIP_REGIME=off to drop that).
-//     EMAs under $60 apart: a HOLD call the same color as the last closed candle, with the EMAs pointing against
+//     EMAs under $30 apart: a HOLD call the same color as the last closed candle, with the EMAs pointing against
 //       Jev → bet AGAINST Jev (the EMAs' side); a FLIP call with the EMAs pointing Jev's way and the last candle the
 //       other color → bet WITH Jev. Else no bet. (No regime check.) Any confidence over 50%. EMAs: the chart's live lines (FADEBOT_EMA_TF 5 or 15 minutes).
 //     A bet = a limit order for 15 shares at 33¢ (FADEBOT_LIMIT_SHARES / FADEBOT_LIMIT_PRICE), good until the window
@@ -82,7 +82,7 @@ const settings = () => ({
   // The EMA rule's fast/slow EMAs (9/21, as the chart's TV indicator draws them) on 5- or 15-minute candles.
   emaTf: env("FADEBOT_EMA_TF") === "15" ? 15 : 5,
   // …and only when the two EMAs are at least this many dollars apart.
-  emaGap: Number(env("FADEBOT_EMA_GAP") || 60),
+  emaGap: Number(env("FADEBOT_EMA_GAP") || 30),
   // Flip trades only in the "Jev right" regime (Jev right on more than half of its last 12 reads); off = any regime.
   flipNeedsRegime: env("FADEBOT_FLIP_REGIME") !== "off",
   readAt: READ_AT,

@@ -60,7 +60,7 @@ export function FadeBotPanel({
           Not running yet: deploy the <code>fadebot</code> function and schedule
           it every minute.
         </p>
-        {bt(30, 0.33, 15, 5, 60, true)}
+        {bt(30, 0.33, 15, 5, 30, true)}
       </>
     );
   const st = s.state;
@@ -84,7 +84,7 @@ export function FadeBotPanel({
         {cfg.flipNeedsRegime
           ? ' Flip calls also need the regime to be "Jev right" (Jev right on more than half of its last 12 reads). '
           : " "}
-        When the EMAs are closer than ${cfg.emaGap ?? 60}, it bets against a
+        When the EMAs are closer than ${cfg.emaGap ?? 30}, it bets against a
         hold call that's the same color as the last candle when the EMAs point
         against Jev, and with a flip call when the EMAs agree and the last
         candle was the opposite color. Otherwise no bet. Each bet is a limit
