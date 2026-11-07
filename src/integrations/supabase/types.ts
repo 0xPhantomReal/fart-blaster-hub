@@ -17,6 +17,9 @@ export type Database = {
       fadebot_bets5: {
         Row: {
           created_at: string | null
+          exit_at: string | null
+          exit_order_id: string | null
+          exit_price: number | null
           fees: number | null
           jev_sure: number | null
           kind: string | null
@@ -40,11 +43,15 @@ export type Database = {
           stake: number | null
           status: string | null
           step: number | null
+          target_price: number | null
           tv15: string | null
           window_start: number
         }
         Insert: {
           created_at?: string | null
+          exit_at?: string | null
+          exit_order_id?: string | null
+          exit_price?: number | null
           fees?: number | null
           jev_sure?: number | null
           kind?: string | null
@@ -68,11 +75,15 @@ export type Database = {
           stake?: number | null
           status?: string | null
           step?: number | null
+          target_price?: number | null
           tv15?: string | null
           window_start: number
         }
         Update: {
           created_at?: string | null
+          exit_at?: string | null
+          exit_order_id?: string | null
+          exit_price?: number | null
           fees?: number | null
           jev_sure?: number | null
           kind?: string | null
@@ -96,6 +107,7 @@ export type Database = {
           stake?: number | null
           status?: string | null
           step?: number | null
+          target_price?: number | null
           tv15?: string | null
           window_start?: number
         }
