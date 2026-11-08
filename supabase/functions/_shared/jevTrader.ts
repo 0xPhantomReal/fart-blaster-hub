@@ -27,9 +27,10 @@ const RULES =
   "You are trading Polymarket US's 5-minute bitcoin Up/Down market for the candle in candle_so_far. An Up share pays " +
   "$1 if the window settles Up (BRTI at the end ≥ BRTI at the start; candle_so_far tracks it as green), else $0; a " +
   "Down share pays $1 if it settles Down. polymarket gives what one share costs to buy right now (up_cost, down_cost) " +
-  "and what it sells for (up_sell, down_sell). A buy is only worth it when your chance of that side winning is clearly " +
-  "above its cost — the price already includes what everyone can see on the chart, so look for what the price is " +
-  "missing (order flow, books, futures, other coins, how much time is left versus how far price is from the open). ";
+  "and what it sells for (up_sell, down_sell). You are an active trader: a buy is worth it whenever your chance of " +
+  "that side winning is above its cost. Look for what the price is missing (order flow, books, futures, other coins, " +
+  "how much time is left versus how far price is from the open). The bot sizes every buy itself from your chance and " +
+  "the price (small edge → small bet) and caps the risk, so you don't need to be certain to buy. ";
 
 const FINISH_GUIDE =
   "Start from lightspeed.finish_probability.random_walk_p_green_pct (the pure-math chance of green from here) and " +
@@ -37,7 +38,7 @@ const FINISH_GUIDE =
   "candle_strength, momentum and the last 40 candles.";
 
 /** Jev's answer: what to do now, and its chance the candle closes green (both from one call when possible). */
-export async function askJevTrader(state: Record<string, unknown>, holding: boolean) {
+export async function askJevTrader(state: Record<string, unknown>, holding: boolean, edgePts = 5) {
   const trade = holding
     ? {
       type: "choice",
@@ -56,12 +57,15 @@ export async function askJevTrader(state: Record<string, unknown>, holding: bool
       type: "choice",
       instructions:
         RULES +
-        "You hold nothing in this window. Should you BUY UP now, BUY DOWN now, or WAIT? Only buy when your chance of " +
-        "that side winning beats its cost by a clear margin; otherwise wait. " + FINISH_GUIDE,
+        "You hold nothing in this window. Should you BUY UP now, BUY DOWN now, or WAIT? Work out your own chance the " +
+        "candle closes green (that is your answer to the other question). If that chance is at least " + edgePts +
+        " points above up_cost, BUY UP; if your chance of red is at least " + edgePts + " points above down_cost, BUY " +
+        "DOWN. WAIT only when neither side is that cheap against your chance. Be consistent: your choice must match " +
+        "your green/red probabilities. " + FINISH_GUIDE,
       criteria: {
-        buy_up: "Buy Up shares now at up_cost",
-        buy_down: "Buy Down shares now at down_cost",
-        wait: "Do nothing right now",
+        buy_up: "Buy Up now: your green chance beats up_cost by the margin",
+        buy_down: "Buy Down now: your red chance beats down_cost by the margin",
+        wait: "Neither side is cheap enough against your chances",
       },
     };
   const finish = {

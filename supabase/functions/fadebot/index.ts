@@ -1619,7 +1619,7 @@ async function traderRun(start: number, minute: number, until: number) {
           },
         };
         const via = lastQuoteVia;
-        const jev = await askJevTrader(state, !!pos);
+        const jev = await askJevTrader(state, !!pos, Math.round(tc.edge * 100));
         asks += 1;
         row = {
           ...row,
@@ -1684,6 +1684,13 @@ async function traderRun(start: number, minute: number, until: number) {
               exit_sec = ${nowEl}, exit_order_id = ${exitId}, pnl = ${p}, closed_at = now() where id = ${pos.id}`;
           row.did = `sold ${pos.side} @ ${exit.toFixed(2)} (${p >= 0 ? "+" : "−"}$${Math.abs(p).toFixed(2)})`;
         } else row.did = (d as { none: string }).none;
+        if (row.did === "Jev: wait" && jev.pUp !== null) {
+          // Say how far Jev's own chance is from each price, so a "wait" can be checked at a glance.
+          const eu = q.upCost === null ? null : Math.round((jev.pUp - q.upCost) * 100);
+          const ed = q.downCost === null ? null : Math.round((1 - jev.pUp - q.downCost) * 100);
+          const f = (x: number | null) => (x === null ? "—" : `${x > 0 ? "+" : ""}${x}`);
+          row.did = `Jev: wait (edge Up ${f(eu)}, Down ${f(ed)} points)`;
+        }
         if (via && via !== "bbo") row.did = `${row.did} [prices from the ${via}]`;
       } catch (e) {
         row.did = `error: ${(e as Error).message}`.slice(0, 300);
