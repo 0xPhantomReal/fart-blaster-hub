@@ -412,6 +412,8 @@ export type Database = {
           exit_sec: number | null
           fees: number | null
           id: number
+          limit_price: number | null
+          limit_shares: number | null
           long_is: string | null
           market_slug: string | null
           mode: string
@@ -419,6 +421,7 @@ export type Database = {
           opened_at: string | null
           opened_sec: number | null
           order_id: string | null
+          order_type: string | null
           p_side: number | null
           pnl: number | null
           price: number | null
@@ -438,6 +441,8 @@ export type Database = {
           exit_sec?: number | null
           fees?: number | null
           id?: number
+          limit_price?: number | null
+          limit_shares?: number | null
           long_is?: string | null
           market_slug?: string | null
           mode: string
@@ -445,6 +450,7 @@ export type Database = {
           opened_at?: string | null
           opened_sec?: number | null
           order_id?: string | null
+          order_type?: string | null
           p_side?: number | null
           pnl?: number | null
           price?: number | null
@@ -464,6 +470,8 @@ export type Database = {
           exit_sec?: number | null
           fees?: number | null
           id?: number
+          limit_price?: number | null
+          limit_shares?: number | null
           long_is?: string | null
           market_slug?: string | null
           mode?: string
@@ -471,6 +479,7 @@ export type Database = {
           opened_at?: string | null
           opened_sec?: number | null
           order_id?: string | null
+          order_type?: string | null
           p_side?: number | null
           pnl?: number | null
           price?: number | null
