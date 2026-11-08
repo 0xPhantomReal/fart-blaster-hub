@@ -136,6 +136,7 @@ export type Database = {
           fetched_at: string | null
           long_is: string | null
           n_points: number | null
+          pts: Json | null
           sample: string | null
           slug: string | null
           up_low: number | null
@@ -149,6 +150,7 @@ export type Database = {
           fetched_at?: string | null
           long_is?: string | null
           n_points?: number | null
+          pts?: Json | null
           sample?: string | null
           slug?: string | null
           up_low?: number | null
@@ -162,6 +164,7 @@ export type Database = {
           fetched_at?: string | null
           long_is?: string | null
           n_points?: number | null
+          pts?: Json | null
           sample?: string | null
           slug?: string | null
           up_low?: number | null
