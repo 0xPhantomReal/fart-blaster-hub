@@ -498,6 +498,14 @@ function TraderPanel({
         {tc?.sell
           ? "Holding, it's asked whether to sell or hold."
           : "Once it buys, the position is held to settlement (no early selling)."}
+        {tc?.invert ? (
+          <>
+            {" "}
+            <b className="text-[#d4a72c]">Fading Jev:</b> when Jev's buy passes
+            the checks below, the bot buys the <i>other</i> side for the same
+            amount.
+          </>
+        ) : null}
         {tc
           ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s, and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}

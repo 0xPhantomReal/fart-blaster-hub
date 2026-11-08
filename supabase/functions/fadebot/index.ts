@@ -134,6 +134,9 @@ const settings = () => ({
     // Selling early (Jev asked "sell or hold?" while holding) is off: positions are held to settlement.
     // FADEBOT_TRADER_SELL=1 turns Jev's sell decisions back on.
     sell: env("FADEBOT_TRADER_SELL") === "1",
+    // Fade Jev: when Jev's buy passes the checks, buy the OTHER side instead (same dollar amount).
+    // On by default (Nov 7); FADEBOT_TRADER_INVERT=0 follows Jev again.
+    invert: env("FADEBOT_TRADER_INVERT") !== "0",
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
@@ -1481,7 +1484,8 @@ async function settleTrades() {
 async function traderRun(start: number, minute: number, until: number) {
   const sql = db();
   const cfg = settings();
-  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number; sell: boolean } = cfg.trader;
+  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number; sell: boolean; invert: boolean } =
+    cfg.trader;
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
   const from = start + minute * 60;
@@ -1664,12 +1668,17 @@ async function traderRun(start: number, minute: number, until: number) {
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status = 'open'`).length > 0;
         if (raced) row.did = "another run just bought: skipped";
         else if ("buy" in d) {
-          let shares = d.stake / d.cost;
-          let price = d.cost;
+          // Jev's trade, or (fading Jev) the other side for the same dollars.
+          const side: Side = tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
+          const cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
+          if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
+          const pSide = tc.invert ? 1 - d.p : d.p;
+          let shares = d.stake / cost;
+          let price = cost;
           let fees = 0;
           let orderId: string | null = null;
           if (live) {
-            const f = await marketBuy(market, d.buy, d.stake);
+            const f = await marketBuy(market, side, d.stake);
             if (!f.shares) throw new Error("market buy filled nothing");
             shares = f.shares;
             price = f.price;
@@ -1678,10 +1687,12 @@ async function traderRun(start: number, minute: number, until: number) {
           }
           await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
               opened_sec, p_side, order_id, open_ref, reason)
-            values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${d.buy}, ${d.stake}, ${shares}, ${price}, ${fees},
-              ${nowEl}, ${d.p}, ${orderId}, ${before?.avg ?? null},
-              ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} vs cost ${Math.round(d.cost * 100)}¢ at ${Math.round(nowEl)} s`})`;
-          row.did = `bought ${d.buy} $${d.stake.toFixed(2)} @ ${price.toFixed(2)}`;
+            values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${d.stake}, ${shares}, ${price}, ${fees},
+              ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
+              ${`${tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`} (${Math.round(d.p * 100)}% for ${d.buy} vs ${
+                Math.round(d.cost * 100)
+              }¢) at ${Math.round(nowEl)} s`})`;
+          row.did = `${tc.invert ? `faded Jev's ${d.buy}: ` : ""}bought ${side} $${d.stake.toFixed(2)} @ ${price.toFixed(2)}`;
         } else if ("sell" in d && pos) {
           let exit = sellNow;
           let fees = Number(pos.fees ?? 0);
