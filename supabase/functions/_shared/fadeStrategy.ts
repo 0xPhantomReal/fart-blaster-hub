@@ -281,6 +281,9 @@ export interface TraderCfg {
   maxEntries: number; //  buys per window, at most
   banLo?: number; //      no buys at a cost from banLo …
   banHi?: number; //      … to banHi (inclusive, 0–1)
+  /** "probability": buy the side Jev thinks more likely whenever it beats its price by the edge, whatever Jev's
+   *  buy/wait choice says (what the "does Jev beat the price?" table measures). "choice": only when Jev says buy. */
+  trigger?: "choice" | "probability";
 }
 
 /** Kelly stake in dollars for buying at `cost` (0–1) a share that wins with chance `p`; 0 when there's no edge. */
@@ -305,8 +308,14 @@ export function traderDecision(
   cfg: TraderCfg,
 ): { buy: Side; stake: number; p: number; cost: number } | { sell: true } | { none: string } {
   if (pos) return jev.action === "sell" ? { sell: true } : { none: "Jev: hold" };
-  if (jev.action !== "buy_up" && jev.action !== "buy_down") return { none: "Jev: wait" };
-  const side: Side = jev.action === "buy_up" ? "up" : "down";
+  let side: Side;
+  if (cfg.trigger === "probability") {
+    if (jev.pUp === null) return { none: "no probability from Jev" };
+    side = jev.pUp >= 0.5 ? "up" : "down";
+  } else {
+    if (jev.action !== "buy_up" && jev.action !== "buy_down") return { none: "Jev: wait" };
+    side = jev.action === "buy_up" ? "up" : "down";
+  }
   if (ctx.lossLimitHit) return { none: "daily loss limit reached" };
   if (ctx.secondsLeft < cfg.minLeftSec) return { none: `under ${cfg.minLeftSec} s left` };
   if (ctx.entries >= cfg.maxEntries) return { none: `already ${ctx.entries} buys this window` };

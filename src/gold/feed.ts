@@ -789,6 +789,7 @@ export interface FadeBotStatus {
       banLo?: number;
       banHi?: number;
       allIn?: boolean;
+      trigger?: "choice" | "probability";
     };
     lsFade?: boolean;
     strongBet?: number;

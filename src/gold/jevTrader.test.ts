@@ -56,3 +56,14 @@ describe("trend summary", () => {
     expect(trendSummary(mixed, 100000, 100001, 100000, 40).label).toBe("no clear trend");
   });
 });
+
+describe("probability trigger", () => {
+  const P = { ...CFG, edge: 0.2, trigger: "probability" as const };
+  it("buys Jev's more-likely side at 20+ points even when Jev says wait", () => {
+    expect(traderDecision({ action: "wait", pUp: 0.3 }, { upCost: 0.72, downCost: 0.48 }, null, ctx, P)).toMatchObject({ buy: "down", cost: 0.48 });
+  });
+  it("never buys the less-likely side (no 1¢ lottery tickets), nor under 20 points", () => {
+    expect(traderDecision({ action: "wait", pUp: 0.21 }, { upCost: 0.01, downCost: null }, null, ctx, P)).toMatchObject({ none: "no price for down" });
+    expect(traderDecision({ action: "buy_up", pUp: 0.65 }, { upCost: 0.5, downCost: 0.52 }, null, ctx, P)).toHaveProperty("none");
+  });
+});

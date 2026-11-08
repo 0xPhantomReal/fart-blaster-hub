@@ -509,7 +509,7 @@ function TraderPanel({
           </>
         ) : null}
         {tc
-          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
+          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (

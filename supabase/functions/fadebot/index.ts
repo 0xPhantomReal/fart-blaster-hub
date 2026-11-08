@@ -165,9 +165,12 @@ const settings = () => ({
     // All-in (FADEBOT_TRADER_ALL_IN=1): every buy uses the whole available balance (less a 3% buffer for fees) instead of
     // the edge-based size; one loss empties the account. Live: Polymarket buying power; test: bankroll + test P&L.
     allIn: env("FADEBOT_TRADER_ALL_IN") === "1",
-    // No buys when the side costs between these (cents, inclusive); FADEBOT_TRADER_BAN=off removes it.
-    banLo: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MIN") || 45) / 100,
-    banHi: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MAX") || 60) / 100,
+    // No buys when the side costs between these (cents, inclusive). Off since Nov 8; FADEBOT_TRADER_BAN=on turns it on.
+    banLo: env("FADEBOT_TRADER_BAN") === "on" ? Number(env("FADEBOT_TRADER_BAN_MIN") || 45) / 100 : undefined,
+    banHi: env("FADEBOT_TRADER_BAN") === "on" ? Number(env("FADEBOT_TRADER_BAN_MAX") || 60) / 100 : undefined,
+    // What triggers a buy: "probability" (default, Nov 8) = Jev's more-likely side whenever Jev's chance beats its
+    // price by the edge, whatever Jev's buy/wait choice; FADEBOT_TRADER_TRIGGER=choice = only when Jev says buy.
+    trigger: (env("FADEBOT_TRADER_TRIGGER") === "choice" ? "choice" : "probability") as "choice" | "probability",
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
