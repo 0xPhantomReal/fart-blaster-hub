@@ -772,6 +772,7 @@ export interface FadeBotStatus {
       minLeftSec: number;
       maxEntries: number;
       gapSec: number;
+      sell?: boolean;
     };
     lsFade?: boolean;
     strongBet?: number;

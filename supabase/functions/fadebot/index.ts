@@ -131,6 +131,9 @@ const settings = () => ({
     minLeftSec: Number(env("FADEBOT_TRADER_MIN_LEFT_SEC") || 10),
     maxEntries: Number(env("FADEBOT_TRADER_MAX_ENTRIES") || 3),
     gapSec: Number(env("FADEBOT_TRADER_GAP_SEC") || 2),
+    // Selling early (Jev asked "sell or hold?" while holding) is off: positions are held to settlement.
+    // FADEBOT_TRADER_SELL=1 turns Jev's sell decisions back on.
+    sell: env("FADEBOT_TRADER_SELL") === "1",
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
@@ -1478,7 +1481,7 @@ async function settleTrades() {
 async function traderRun(start: number, minute: number, until: number) {
   const sql = db();
   const cfg = settings();
-  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number } = cfg.trader;
+  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number; sell: boolean } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
   const from = start + minute * 60;
@@ -1568,6 +1571,20 @@ async function traderRun(start: number, minute: number, until: number) {
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
+        if (pos && !tc.sell) {
+          // Holding to settlement: nothing more to decide in this window (one position at a time).
+          row = {
+            ...row,
+            up_cost: q.upCost,
+            down_cost: q.downCost,
+            up_sell: q.upSell,
+            down_sell: q.downSell,
+            pos_side: pos.side,
+            did: `holding ${pos.side} to settlement`,
+          };
+          await logAsk(row);
+          break;
+        }
         const sellNow = pos ? (pos.side === "up" ? q.upSell : q.downSell) : null;
         const value = pos && sellNow !== null ? Number(pos.shares) * sellNow : null;
         const unreal = pos && value !== null ? value - Number(pos.shares) * Number(pos.price) - Number(pos.fees ?? 0) : null;

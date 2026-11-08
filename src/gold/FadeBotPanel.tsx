@@ -494,10 +494,12 @@ function TraderPanel({
         )}
         . Jev is asked over and over — a new question as soon as the last answer
         is in — with the candle, Lightspeed, candle strength, the live market
-        data, Polymarket's prices and the position: buy Up, buy Down or wait;
-        holding, sell or hold.
+        data, Polymarket's prices and the position: buy Up, buy Down or wait.{" "}
+        {tc?.sell
+          ? "Holding, it's asked whether to sell or hold."
+          : "Once it buys, the position is held to settlement (no early selling)."}
         {tc
-          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s, and no buys after losing $${tc.dailyLoss} in a day. Unsold positions are held to settlement.`
+          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s, and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (
