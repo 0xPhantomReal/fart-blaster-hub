@@ -1,4 +1,4 @@
-import type { TraderStatus } from "./feed";
+import type { LongshotStatus, TraderStatus } from "./feed";
 import { useEffect, useState } from "react";
 import { FadeBacktestBox } from "./FadeBacktestBox";
 import { fadeBotFindMarket, fadeBotStatus, type FadeBotStatus } from "./feed";
@@ -69,7 +69,9 @@ export function FadeBotPanel({
   const cfg = s.settings;
   return (
     <div className="text-sm">
-      {cfg.strategy === "jev-trader" ? (
+      {cfg.strategy === "longshot" ? (
+        <LongshotPanel l={s.longshot ?? null} cfg={cfg} />
+      ) : cfg.strategy === "jev-trader" ? (
         <TraderPanel t={s.trader ?? null} cfg={cfg} />
       ) : cfg.strategy === "lightspeed" ? (
         <div className={`mb-2 space-y-1 text-xs ${MUTED}`}>
@@ -143,7 +145,7 @@ export function FadeBotPanel({
           .
         </p>
       )}
-      {cfg.strategy === "jev-trader" ? null : (
+      {cfg.strategy === "jev-trader" || cfg.strategy === "longshot" ? null : (
         <>
           <div className="mb-2 grid grid-cols-2 gap-1 tabular-nums">
             <span>
@@ -627,6 +629,118 @@ function TraderPanel({
                         : x.status === "open"
                           ? " → holding"
                           : " → held to the end"}
+                      {x.mode === "dry" ? (
+                        <span className={MUTED}> (test)</span>
+                      ) : null}
+                    </td>
+                    <td
+                      className={`py-0.5 text-right ${x.pnl == null ? MUTED : x.pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}`}
+                    >
+                      {x.pnl == null ? x.status : usd(x.pnl)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Longshot: near-certain sides only, late, 85–99¢, aiming for a run of wins. */
+function LongshotPanel({
+  l,
+  cfg,
+}: {
+  l: LongshotStatus | null;
+  cfg: FadeBotStatus["settings"];
+}) {
+  const c = cfg.longshot;
+  const goal = c?.goal ?? 45;
+  const cur = l?.streak?.current ?? 0;
+  const cal = l?.calibration;
+  return (
+    <div className={`mb-2 space-y-2 text-xs ${MUTED}`}>
+      <p>
+        <b className="text-[#c9d1d9]">Longshot</b>{" "}
+        {l?.live ? (
+          <b className="text-[#ef5350]">LIVE</b>
+        ) : (
+          <b>test mode (no real orders)</b>
+        )}
+        . In the last {c?.windowSec ?? 90} seconds of each window the bot works
+        out the settlement itself (Polymarket settles on the BRTI average over
+        the final minute against the minute before the start) and buys only a
+        side it puts at {((c?.minProb ?? 0.995) * 100).toFixed(1)}%+ that costs{" "}
+        {Math.round((c?.minCost ?? 0.85) * 100)}–
+        {Math.round((c?.maxCost ?? 0.99) * 100)}¢ and is at least{" "}
+        {Math.round((c?.margin ?? 0.01) * 100)} point under its chance. Size:{" "}
+        {c?.allIn
+          ? "all-in (whole balance less 3%), capped by what the book fills within 1¢"
+          : `$${c?.bet ?? 10}`}
+        . Held to settlement; one buy per window.
+      </p>
+      {!l ? (
+        <p>Waiting for the bot.</p>
+      ) : (
+        <>
+          <div>
+            <div className="mb-0.5 flex justify-between text-[#c9d1d9]">
+              <span>
+                Streak <b>{cur}</b> / {goal}
+              </span>
+              <span>
+                best {l.streak?.best ?? 0} · balance{" "}
+                {l.balance == null ? "—" : `$${l.balance.toFixed(2)}`}
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded bg-[#30363d]">
+              <div
+                className="h-1.5 rounded bg-[#26a69a]"
+                style={{ width: `${Math.min(100, (cur / goal) * 100)}%` }}
+              />
+            </div>
+          </div>
+          {l.last ? (
+            <p>
+              Last check ({hhmm(l.last.v.window)} window): {l.last.v.note}
+            </p>
+          ) : null}
+          <p>
+            {cal && cal.n
+              ? `Its calls so far: ${cal.wins} of ${cal.n} finished the way it said (${((cal.wins / cal.n) * 100).toFixed(1)}%), bought or not.`
+              : "Its calls are checked against how each window actually finished; nothing to show yet."}
+            {cal && cal.misses.length
+              ? ` Misses: ${cal.misses
+                  .map(
+                    (m) =>
+                      `${hhmm(m.window_start)} ${m.side} ${(m.p * 100).toFixed(2)}% @ ${Math.round(m.cost * 100)}¢`,
+                  )
+                  .join(", ")}.`
+              : ""}{" "}
+            For {goal} in a row it needs to be right well over 99% of the time —
+            one miss in a couple of hundred and the run is unlikely.
+          </p>
+          {l.trades.length ? (
+            <table className="w-full tabular-nums">
+              <thead>
+                <tr>
+                  <th className="text-left font-normal">Window</th>
+                  <th className="text-left font-normal">Buy</th>
+                  <th className="text-right font-normal">Result</th>
+                </tr>
+              </thead>
+              <tbody className="text-[#c9d1d9]">
+                {l.trades.slice(0, 15).map((x) => (
+                  <tr key={x.id}>
+                    <td className="py-0.5">{hhmm(x.window_start)}</td>
+                    <td className="py-0.5">
+                      {x.side === "up" ? "Up ↑" : "Down ↓"} $
+                      {x.stake.toFixed(2)} @ {x.price.toFixed(2)} at{" "}
+                      {Math.round(x.opened_sec)} s (
+                      {x.p_side == null ? "—" : (x.p_side * 100).toFixed(2)}%)
                       {x.mode === "dry" ? (
                         <span className={MUTED}> (test)</span>
                       ) : null}

@@ -761,6 +761,18 @@ export interface FadeBotStatus {
     lsWindowSec?: number;
     takeProfit?: number;
     strongMin?: number;
+    longshot?: {
+      live: boolean;
+      minCost: number;
+      maxCost: number;
+      minProb: number;
+      margin: number;
+      windowSec: number;
+      allIn: boolean;
+      bet: number;
+      goal: number;
+      safety: number;
+    };
     trader?: {
       live: boolean;
       edge: number;
@@ -785,6 +797,8 @@ export interface FadeBotStatus {
   };
   /** Jev trader mode: positions, recent questions and whether Jev's chances beat Polymarket's prices. */
   trader?: TraderStatus | null;
+  /** Longshot mode: streak toward the goal, balance, latest check, trades and how often its calls held. */
+  longshot?: LongshotStatus | null;
   /** How often candles finished the way their strength score pointed (last 7 days), by checkpoint and strength. */
   strength?: { windows: number; rows: { at: number; from: number; n: number; theirWay: number }[] } | null;
   state: {
@@ -919,4 +933,13 @@ export interface TraderStatus {
   totals: { n: number; pnl: number; wins: number } | null;
   asks: TraderAsk[];
   edge: { from: number; n: number; winPct: number | null; avgCost: number | null; returnPerDollar: number | null }[] | null;
+}
+
+export interface LongshotStatus {
+  live: boolean;
+  streak: { current: number; best: number; total: number } | null;
+  balance: number | null;
+  last: { v: { note: string; at: number; window: number }; at: string } | null;
+  trades: TraderTrade[];
+  calibration: { n: number; wins: number; misses: { window_start: number | string; side: string; p: number; cost: number }[] } | null;
 }

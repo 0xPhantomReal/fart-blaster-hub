@@ -1,5 +1,10 @@
 // Polymarket US bot for "BTC Up or Down: 5 min", run by a schedule every minute (pg_cron).
 //
+// FADEBOT_STRATEGY = longshot: in the last FADEBOT_LONGSHOT_WINDOW_SEC (90) of each window, work out the settlement
+//   (BRTI average over the final minute vs the minute before the start; _shared/longshot.ts) and buy only a side at
+//   99.5%+ costing 85–99¢ with a 1-point margin, all-in (capped by book depth), held to settlement; tracks the win
+//   streak toward FADEBOT_LONGSHOT_GOAL (45) and logs every call (fadebot_longshot). Real orders only with
+//   FADEBOT_MODE=live AND FADEBOT_LONGSHOT_LIVE=1.
 // FADEBOT_STRATEGY = jev-trader (the default): Jev is asked over and over all through each window (a new question as
 //   soon as the last answer is in, FADEBOT_TRADER_GAP_SEC apart at least) with the candle, Lightspeed, candle strength,
 //   the live market block, Polymarket's buy/sell prices and our position: flat → buy Up / buy Down / wait; holding →
@@ -78,6 +83,7 @@ import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
+import { depthDollars, type LongshotCfg, longshotDecision, settleProbability } from "../_shared/longshot.ts";
 
 const TF = 300; //        5-minute windows
 // Jev reads the candle this many seconds in: FADEBOT_READ_SEC = 3, 5, 15, 30, 60, 120 or 180 (default 30). The
@@ -115,10 +121,28 @@ const settings = () => ({
   readAt: READ_AT,
   // Which rule bets: "lightspeed" (default) = the Lightspeed fade with market orders; "jev-ema" = the old Jev + EMA
   // limit orders.
-  strategy: (["jev-ema", "lightspeed"].includes(env("FADEBOT_STRATEGY")) ? env("FADEBOT_STRATEGY") : "jev-trader") as
-    | "jev-trader"
-    | "lightspeed"
-    | "jev-ema",
+  strategy: (["jev-ema", "lightspeed", "longshot"].includes(env("FADEBOT_STRATEGY"))
+    ? env("FADEBOT_STRATEGY")
+    : "jev-trader") as "jev-trader" | "lightspeed" | "jev-ema" | "longshot",
+  // Longshot (FADEBOT_STRATEGY=longshot): near-certain sides only, late, 85–99¢, all-in, aiming for a run of wins.
+  // Real orders only with FADEBOT_MODE=live AND FADEBOT_LONGSHOT_LIVE=1.
+  longshot: {
+    live: env("FADEBOT_LONGSHOT_LIVE") === "1",
+    minCost: Number(env("FADEBOT_LONGSHOT_MIN") || 85) / 100,
+    maxCost: Number(env("FADEBOT_LONGSHOT_MAX") || 99) / 100,
+    minProb: Number(env("FADEBOT_LONGSHOT_MIN_PROB") || 99.5) / 100,
+    margin: Number(env("FADEBOT_LONGSHOT_MARGIN") || 1) / 100,
+    feePerShare: Number(env("FADEBOT_LONGSHOT_FEE_CENTS") || 0) / 100,
+    windowSec: Number(env("FADEBOT_LONGSHOT_WINDOW_SEC") || 90),
+    stopSec: Number(env("FADEBOT_LONGSHOT_STOP_SEC") || 3),
+    safety: Number(env("FADEBOT_LONGSHOT_SAFETY") || 1.5),
+    feedSd: Number(env("FADEBOT_LONGSHOT_FEED_SD") || 3),
+    allIn: env("FADEBOT_LONGSHOT_ALL_IN") !== "0",
+    bet: Number(env("FADEBOT_LONGSHOT_BET") || 10),
+    bankroll: Number(env("FADEBOT_LONGSHOT_BANKROLL") || 100),
+    slipCents: Number(env("FADEBOT_LONGSHOT_SLIP_CENTS") || 1),
+    goal: Number(env("FADEBOT_LONGSHOT_GOAL") || 45),
+  },
   // Jev trader: Jev is asked over and over (a new question as soon as the last answer is in) whether to buy Up, buy
   // Down or wait — or, holding, whether to sell. Real orders only with FADEBOT_MODE=live AND FADEBOT_TRADER_LIVE=1.
   trader: {
@@ -225,6 +249,15 @@ async function setup() {
     created_at timestamptz default now())`;
   await sql`create index if not exists fadebot_asks_window on fadebot_asks (window_start)`;
   await sql`alter table fadebot_trades enable row level security`;
+  // Which trader made the trade: 'trader' (Jev trader) or 'longshot'.
+  await sql`alter table fadebot_trades add column if not exists strategy text default 'trader'`;
+  // Longshot: every window where its rule fired (bought or not), to check how often "near-certain" really wins.
+  await sql`create table if not exists fadebot_longshot (
+    window_start bigint primary key, at_sec double precision, side text, p double precision, cost double precision,
+    bought boolean, note text, start_ref double precision, created_at timestamptz default now())`;
+  await sql`alter table fadebot_longshot enable row level security`;
+  await sql`create table if not exists fadebot_kv (k text primary key, v jsonb, at timestamptz default now())`;
+  await sql`alter table fadebot_kv enable row level security`;
   await sql`alter table fadebot_asks enable row level security`;
   // Polymarket's own price history per 5-minute market: the lowest Up and Down prices during the window.
   await sql`create table if not exists fadebot_pmhist (
@@ -1457,21 +1490,24 @@ async function quotes(m: WindowMarket) {
 }
 
 /** Money available to buy with: Polymarket buying power (live), or the bankroll plus all test P&L (test mode). */
-async function traderBalance(live: boolean, bankroll: number): Promise<number> {
+async function traderBalance(live: boolean, bankroll: number, strategy = "trader"): Promise<number> {
   if (live) {
     const r = await pm().account.balances();
     const b = r.balances?.find((x) => (x.currency ?? "USD").toUpperCase() === "USD") ?? r.balances?.[0];
     if (!b) throw new Error("no Polymarket balance");
     return Number(b.buyingPower ?? b.currentBalance ?? 0);
   }
-  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where mode = 'dry' and status <> 'open'`;
-  const open = await db()`select coalesce(sum(stake), 0) as s from fadebot_trades where mode = 'dry' and status = 'open'`;
+  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where mode = 'dry' and status <> 'open'
+    and coalesce(strategy, 'trader') = ${strategy}`;
+  const open = await db()`select coalesce(sum(stake), 0) as s from fadebot_trades where mode = 'dry' and status = 'open'
+    and coalesce(strategy, 'trader') = ${strategy}`;
   return bankroll + Number(r[0].p) - Number(open[0].s);
 }
 
 /** Realized trader P&L since midnight New York time. */
 async function traderToday(): Promise<number> {
-  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where status <> 'open' and closed_at >=
+  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where status <> 'open'
+    and coalesce(strategy, 'trader') = 'trader' and closed_at >=
     (date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
   return Number(r[0]?.p ?? 0);
 }
@@ -1596,8 +1632,10 @@ async function traderRun(start: number, minute: number, until: number) {
       try {
         const [q, posRows, nRows, today] = await Promise.all([
           quotes(market),
-          sql`select * from fadebot_trades where window_start = ${start} and status = 'open' order by id desc limit 1`,
-          sql`select count(*)::int as n from fadebot_trades where window_start = ${start}`,
+          sql`select * from fadebot_trades where window_start = ${start} and status = 'open'
+            and coalesce(strategy, 'trader') = 'trader' order by id desc limit 1`,
+          sql`select count(*)::int as n from fadebot_trades where window_start = ${start}
+            and coalesce(strategy, 'trader') = 'trader'`,
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
@@ -1626,7 +1664,7 @@ async function traderRun(start: number, minute: number, until: number) {
         const atr = (core?.volatility as { atr_dollars?: number } | undefined)?.atr_dollars ?? null;
         const trend = trendSummary(closed, forming.close, tvLive?.emaFast ?? null, tvLive?.emaSlow ?? null, atr);
         const recent = await sql`select window_start, side, price, p_side, status, result, pnl, opened_at from fadebot_trades
-          where mode = ${mode} order by id desc limit 10`;
+          where mode = ${mode} and coalesce(strategy, 'trader') = 'trader' order by id desc limit 10`;
         const recentTrades = recent.map((t) => ({
           minutes_ago: Math.round((Date.now() - new Date(t.opened_at).getTime()) / 60000),
           bought: t.side,
@@ -1726,7 +1764,8 @@ async function traderRun(start: number, minute: number, until: number) {
         );
         // Runs overlap for a moment at each minute: never buy if another run just opened a position.
         const raced = "buy" in d &&
-          (await sql`select 1 from fadebot_trades where window_start = ${start} and status = 'open'`).length > 0;
+          (await sql`select 1 from fadebot_trades where window_start = ${start} and status = 'open'
+            and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         if (raced) row.did = "another run just bought: skipped";
         else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
@@ -1838,6 +1877,233 @@ async function traderStats(now: number) {
   }));
 }
 
+// ── Longshot (FADEBOT_STRATEGY = longshot) ─────────────────────────────
+
+/** The YES order book as [price, size] levels. */
+async function yesBook(slug: string): Promise<{ bids: [number, number][]; offers: [number, number][] }> {
+  // deno-lint-ignore no-explicit-any
+  const r = (await pm().markets.book(slug)) as any;
+  const d = r?.marketData ?? r ?? {};
+  // deno-lint-ignore no-explicit-any
+  const lv = (xs: any[] | undefined): [number, number][] =>
+    (xs ?? [])
+      .map((l) => [Number(l?.px?.value ?? l?.px ?? l?.price), Number(l?.qty ?? l?.quantity ?? l?.size ?? 0)] as [number, number])
+      .filter(([p, q]) => Number.isFinite(p) && Number.isFinite(q) && q > 0);
+  return { bids: lv(d.bids), offers: lv(d.offers ?? d.asks) };
+}
+
+async function kvSet(k: string, v: unknown) {
+  await db()`insert into fadebot_kv (k, v, at) values (${k}, ${db().json(v as never)}, now())
+    on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
+}
+
+/** Current run of longshot wins (most recent first) and the best run. */
+async function longshotStreak(mode: string) {
+  const rows = await db()`select result from fadebot_trades where strategy = 'longshot' and mode = ${mode}
+    and status in ('settled', 'sold') order by window_start desc, id desc limit 500`;
+  let cur = 0;
+  for (const r of rows) {
+    if (r.result !== "win") break;
+    cur += 1;
+  }
+  let best = 0;
+  let run = 0;
+  for (const r of [...rows].reverse()) {
+    run = r.result === "win" ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  return { current: cur, best, total: rows.length };
+}
+
+/** One minute of longshot for window `start`: always record BRTI; in the last minutes, look for a near-certain side. */
+async function longshotRun(start: number, minute: number, until: number) {
+  const sql = db();
+  const cfg = settings();
+  const lc = cfg.longshot;
+  const live = cfg.mode === "live" && lc.live;
+  const mode = live ? "live" : "dry";
+  const end = start + TF;
+  const from = start + minute * 60;
+  // Per-second last price (the closing average is taken over seconds), plus every tick for volatility.
+  const perSec = new Map<number, number>();
+  let last: number | null = null;
+  const onTick = (t: number, p: number) => {
+    perSec.set(Math.floor(t), p);
+    last = p;
+  };
+  const recording = record(until, onTick).then(async (r) => {
+    await savePeriod(from, from + 60, r.ticks, r.source);
+    return r;
+  });
+  const lsCfg: LongshotCfg = lc;
+  let note = "";
+  const watcher = (async () => {
+    const watchFrom = end - lc.windowSec;
+    if (until < watchFrom) {
+      note = `minute ${minute + 1}: recording (longshot looks in the last ${lc.windowSec} s)`;
+      return;
+    }
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const ref = await period(start - 60);
+    if (!ref || ref.n < 20) {
+      note = "no start price (the minute before the window wasn't recorded)";
+      return;
+    }
+    const startRef = ref.avg;
+    const [closed, market] = await Promise.all([
+      closedCandles(start, 2).catch(() => [] as Candle[]),
+      findMarket(start).catch(() => null),
+    ]);
+    if (!market) {
+      note = `no Polymarket market (${lastSearch})`;
+      return;
+    }
+    const core = lightspeedCore(closed, start, TF, 0, null);
+    const perCandlePct = (core?.volatility as { per_candle_pct?: number } | undefined)?.per_candle_pct ?? null;
+    let done = (await sql`select 1 from fadebot_trades where window_start = ${start} and strategy = 'longshot'`).length > 0;
+    let logged = (await sql`select 1 from fadebot_longshot where window_start = ${start}`).length > 0;
+    let bestP = 0;
+    while (Date.now() / 1000 < until - 0.5) {
+      const now = Date.now() / 1000;
+      if (now < watchFrom || last === null) {
+        await sleep(500);
+        continue;
+      }
+      const price: number = last;
+      // Known part of the closing average: per-second prices from end − 60 up to now.
+      const closing = [...perSec.entries()].filter(([t]) => t >= end - 60 && t < end).map(([, p]) => p);
+      const knownSec = Math.max(0, Math.min(60, now - (end - 60)));
+      // If this run started after the closing minute began, the seconds it missed count as unknown: scale down.
+      const coveredSec = Math.min(knownSec, closing.length);
+      const knownAvg = closing.length ? closing.reduce((a, b) => a + b, 0) / closing.length : null;
+      // Volatility: the larger of the candle-based figure and what BRTI is doing in this run (per second).
+      const secs = [...perSec.entries()].sort((a, b) => a[0] - b[0]);
+      let ss = 0;
+      let nn = 0;
+      for (let i = 1; i < secs.length; i++) {
+        const dt = secs[i][0] - secs[i - 1][0];
+        if (dt > 0 && dt <= 5) {
+          ss += (secs[i][1] - secs[i - 1][1]) ** 2 / dt;
+          nn += 1;
+        }
+      }
+      const realized = nn >= 10 ? Math.sqrt(ss / nn) : 0;
+      const fromCandles = perCandlePct === null ? 0 : (price * perCandlePct) / 100 / Math.sqrt(TF);
+      const sigmaPerSec = Math.max(realized, fromCandles);
+      if (!(sigmaPerSec > 0)) {
+        note = "no volatility estimate yet";
+        await sleep(1000);
+        continue;
+      }
+      const est = settleProbability({
+        startRef,
+        now,
+        end,
+        price,
+        knownAvg,
+        knownSec: coveredSec,
+        sigmaPerSec,
+        safety: lc.safety,
+        feedSd: lc.feedSd,
+      });
+      const pSide = Math.max(est.pUp, 1 - est.pUp);
+      bestP = Math.max(bestP, pSide);
+      const secondsLeft = end - now;
+      note = `${Math.round(now - start)} s: expected close ${est.expectedFinal.toFixed(2)} vs start ${
+        startRef.toFixed(2)
+      } (±${est.sd.toFixed(2)}) → ${est.pUp >= 0.5 ? "up" : "down"} ${(pSide * 100).toFixed(3)}%`;
+      if (done || pSide < lc.minProb || secondsLeft > lc.windowSec) {
+        await sleep(1000);
+        continue;
+      }
+      try {
+        const q = await quotes(market);
+        const d = longshotDecision({ pUp: est.pUp }, q, secondsLeft, lsCfg);
+        if ("none" in d) {
+          note += ` — ${d.none}`;
+          await sleep(1000);
+          continue;
+        }
+        // Size: all-in (balance less a 3% buffer) or a fixed bet, capped by what the book fills near this price.
+        const book = await yesBook(market.slug).catch(() => null);
+        const maxCost = Math.min(lc.maxCost, d.cost + lc.slipCents / 100);
+        const depth = book ? depthDollars(book, d.side, market.longIs === "up", maxCost) : 0;
+        const bal = await traderBalance(live, lc.bankroll, "longshot");
+        const want = lc.allIn ? Math.floor(bal * 0.97 * 100) / 100 : lc.bet;
+        const stake = Math.floor(Math.min(want, depth > 0 ? depth : want) * 100) / 100;
+        const sig = { at_sec: now - start, side: d.side, p: d.p, cost: d.cost, start_ref: startRef };
+        if (!(stake >= 1)) {
+          if (!logged) {
+            await sql`insert into fadebot_longshot ${sql({ window_start: start, ...sig, bought: false,
+              note: `stake $${stake.toFixed(2)} too small (balance $${bal.toFixed(2)}, book $${depth.toFixed(2)})` })}
+              on conflict do nothing`;
+            logged = true;
+          }
+          note += ` — stake too small`;
+          await sleep(1000);
+          continue;
+        }
+        let shares = stake / d.cost;
+        let price2 = d.cost;
+        let fees = 0;
+        let orderId: string | null = null;
+        if (live) {
+          const f = await marketBuy(market, d.side, stake);
+          if (!f.shares) throw new Error("market buy filled nothing");
+          shares = f.shares;
+          price2 = f.price;
+          fees = f.fees;
+          orderId = f.id;
+        }
+        await sql`insert into fadebot_trades (window_start, mode, strategy, market_slug, long_is, side, stake, shares, price,
+            fees, opened_sec, p_side, order_id, open_ref, reason)
+          values (${start}, ${mode}, 'longshot', ${market.slug}, ${market.longIs}, ${d.side}, ${stake}, ${shares}, ${price2},
+            ${fees}, ${now - start}, ${d.p}, ${orderId}, ${startRef},
+            ${`${(d.p * 100).toFixed(3)}% ${d.side} at ${Math.round(now - start)} s, ${Math.round(d.cost * 100)}¢${
+              lc.allIn ? `, all-in of $${bal.toFixed(2)}` : ""
+            }${depth > 0 && depth < want ? ` (capped by the book: $${depth.toFixed(2)} at ≤${Math.round(maxCost * 100)}¢)` : ""}`})`;
+        await sql`insert into fadebot_longshot ${sql({ window_start: start, ...sig, bought: true, note: null })}
+          on conflict (window_start) do update set bought = true`;
+        done = true;
+        logged = true;
+        note += ` — bought ${d.side} $${stake.toFixed(2)} @ ${price2.toFixed(3)}`;
+      } catch (e) {
+        note += ` — error: ${(e as Error).message}`.slice(0, 300);
+        await sleep(2000);
+      }
+      await kvSet("longshot_last", { note, at: Date.now() / 1000, window: start });
+      await sleep(1000);
+    }
+    if (!done && minute === 4) note = `${note} — best ${(bestP * 100).toFixed(3)}%, no buy this window`;
+  })();
+  // Publish the latest check every few seconds for the panel.
+  const pub = (async () => {
+    while (Date.now() / 1000 < until) {
+      if (note) await kvSet("longshot_last", { note, at: Date.now() / 1000, window: start });
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  })();
+  const [{ ticks, source }] = await Promise.all([recording, watcher, pub]);
+  if (note) await kvSet("longshot_last", { note, at: Date.now() / 1000, window: start });
+  return `longshot minute ${minute + 1}: ${ticks.length} ticks from ${source}; ${note}`;
+}
+
+/** How often the longshot rule's "near-certain" calls actually finished that way (our BRTI averages). */
+async function longshotCalibration(now: number) {
+  const rows = await db()`select l.window_start, l.side, l.p, l.cost, l.bought, l.start_ref, c.avg as close_avg
+    from fadebot_longshot l join fadebot_prices c on c.period_start = l.window_start + 240
+    where l.window_start + ${TF} <= ${now} and c.n >= 20`;
+  let wins = 0;
+  const misses: unknown[] = [];
+  for (const r of rows) {
+    const up = r.close_avg >= r.start_ref;
+    const ok = (r.side === "up") === up;
+    if (ok) wins += 1;
+    else misses.push({ window_start: r.window_start, side: r.side, p: r.p, cost: r.cost });
+  }
+  return { n: rows.length, wins, misses: misses.slice(-10) };
+}
+
 async function run() {
   await setup();
   const now = Date.now() / 1000;
@@ -1845,6 +2111,13 @@ async function run() {
   const m = Math.floor((now - start) / 60);
   const done: string[] = [];
   await dryLimitCheck().catch(() => {});
+  if (settings().strategy === "longshot") {
+    done.push(await longshotRun(start, m, start + m * 60 + 58));
+    await settleTrades();
+    await db()`delete from fadebot_prices where period_start < ${Math.floor(now - 7 * 86400)}`;
+    if (m === 2) await updatePmHistory(Date.now() / 1000).catch((e) => console.error("price history:", (e as Error).message));
+    return done;
+  }
   if (settings().strategy === "jev-trader") {
     done.push(await traderRun(start, m, start + m * 60 + 58));
     await settleTrades();
@@ -1956,13 +2229,27 @@ async function status() {
     bets,
     regime: { ...reg, window: REGIME_N, reads: hits.length, ...persistence(hits) },
     strength: await strengthStats(now).catch(() => null),
+    longshot: cfg.strategy === "longshot"
+      ? {
+        live: cfg.mode === "live" && cfg.longshot.live,
+        streak: await longshotStreak(cfg.mode === "live" && cfg.longshot.live ? "live" : "dry").catch(() => null),
+        balance: await traderBalance(cfg.mode === "live" && cfg.longshot.live, cfg.longshot.bankroll, "longshot").catch(
+          () => null,
+        ),
+        last: (await sql`select v, at from fadebot_kv where k = 'longshot_last'`.catch(() => []))[0] ?? null,
+        trades: await sql`select * from fadebot_trades where strategy = 'longshot' order by id desc limit 40`.catch(() => []),
+        calibration: await longshotCalibration(now).catch(() => null),
+      }
+      : null,
     trader: cfg.strategy === "jev-trader"
       ? {
         live: cfg.mode === "live" && cfg.trader.live,
         today: await traderToday().catch(() => 0),
-        trades: await sql`select * from fadebot_trades order by id desc limit 40`.catch(() => []),
+        trades: await sql`select * from fadebot_trades where coalesce(strategy, 'trader') = 'trader'
+            order by id desc limit 40`.catch(() => []),
         totals: (await sql`select count(*)::int as n, coalesce(sum(pnl), 0) as pnl,
-            count(*) filter (where pnl > 0)::int as wins from fadebot_trades where status in ('sold', 'settled')`.catch(
+            count(*) filter (where pnl > 0)::int as wins from fadebot_trades where status in ('sold', 'settled')
+            and coalesce(strategy, 'trader') = 'trader'`.catch(
           () => [],
         ))[0] ?? null,
         asks: await sql`select window_start, at_sec, p_up, action, up_cost, down_cost, up_sell, down_sell, pos_side,
@@ -2044,6 +2331,26 @@ Deno.serve(async (req) => {
       await savePeriod(start - 60, start, Array.from({ length: 30 }, (_, i) => ({ t: start - 30 + i, p: open })), "test");
       const msg = await lightspeedWatch(start, Number(body.minute ?? 0), now + Number(body.watch ?? 6));
       return json({ msg, start, bet: (await db()`select * from fadebot_bets5 where window_start = ${start}`)[0] ?? null });
+    }
+    if (body?.action === "test-longshot" && env("FADEBOT_ALLOW_TEST") === "1") {
+      // Give the current window this start price, widen the watch window, then run longshot for a few seconds.
+      await setup();
+      const now = Date.now() / 1000;
+      const start = Math.floor(now / TF) * TF;
+      if (body.reset) {
+        await db()`delete from fadebot_trades where window_start = ${start} and strategy = 'longshot'`;
+        await db()`delete from fadebot_longshot where window_start = ${start}`;
+      }
+      Deno.env.set("FADEBOT_LONGSHOT_WINDOW_SEC", String(body.windowSec ?? 300));
+      const ref = Number(body.ref);
+      await savePeriod(start - 60, start, Array.from({ length: 30 }, (_, i) => ({ t: start - 30 + i, p: ref })), "test");
+      const msg = await longshotRun(start, Math.floor((now - start) / 60), now + Number(body.watch ?? 6));
+      return json({
+        msg,
+        start,
+        trades: await db()`select * from fadebot_trades where window_start = ${start} and strategy = 'longshot'`,
+        signal: (await db()`select * from fadebot_longshot where window_start = ${start}`)[0] ?? null,
+      });
     }
     if (body?.action === "test-trader" && env("FADEBOT_ALLOW_TEST") === "1") {
       // Give the current window this candle open, then run the trader for a few seconds.
