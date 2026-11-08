@@ -182,6 +182,60 @@ export type Database = {
         }
         Relationships: []
       }
+      fadebot_kv: {
+        Row: {
+          at: string | null
+          k: string
+          v: Json | null
+        }
+        Insert: {
+          at?: string | null
+          k: string
+          v?: Json | null
+        }
+        Update: {
+          at?: string | null
+          k?: string
+          v?: Json | null
+        }
+        Relationships: []
+      }
+      fadebot_longshot: {
+        Row: {
+          at_sec: number | null
+          bought: boolean | null
+          cost: number | null
+          created_at: string | null
+          note: string | null
+          p: number | null
+          side: string | null
+          start_ref: number | null
+          window_start: number
+        }
+        Insert: {
+          at_sec?: number | null
+          bought?: boolean | null
+          cost?: number | null
+          created_at?: string | null
+          note?: string | null
+          p?: number | null
+          side?: string | null
+          start_ref?: number | null
+          window_start: number
+        }
+        Update: {
+          at_sec?: number | null
+          bought?: boolean | null
+          cost?: number | null
+          created_at?: string | null
+          note?: string | null
+          p?: number | null
+          side?: string | null
+          start_ref?: number | null
+          window_start?: number
+        }
+        Relationships: []
+      }
       fadebot_pmhist: {
         Row: {
           down_low: number | null
@@ -374,6 +428,7 @@ export type Database = {
           side: string
           stake: number | null
           status: string
+          strategy: string | null
           window_start: number
         }
         Insert: {
@@ -399,6 +454,7 @@ export type Database = {
           side: string
           stake?: number | null
           status?: string
+          strategy?: string | null
           window_start: number
         }
         Update: {
@@ -424,6 +480,7 @@ export type Database = {
           side?: string
           stake?: number | null
           status?: string
+          strategy?: string | null
           window_start?: number
         }
         Relationships: []
