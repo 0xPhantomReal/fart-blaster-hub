@@ -14,6 +14,60 @@ export type Database = {
   }
   public: {
     Tables: {
+      fadebot_asks: {
+        Row: {
+          action: string | null
+          at_sec: number | null
+          created_at: string | null
+          did: string | null
+          down_cost: number | null
+          down_sell: number | null
+          id: number
+          ms: number | null
+          p_up: number | null
+          pos_side: string | null
+          probs: Json | null
+          unrealized: number | null
+          up_cost: number | null
+          up_sell: number | null
+          window_start: number
+        }
+        Insert: {
+          action?: string | null
+          at_sec?: number | null
+          created_at?: string | null
+          did?: string | null
+          down_cost?: number | null
+          down_sell?: number | null
+          id?: number
+          ms?: number | null
+          p_up?: number | null
+          pos_side?: string | null
+          probs?: Json | null
+          unrealized?: number | null
+          up_cost?: number | null
+          up_sell?: number | null
+          window_start: number
+        }
+        Update: {
+          action?: string | null
+          at_sec?: number | null
+          created_at?: string | null
+          did?: string | null
+          down_cost?: number | null
+          down_sell?: number | null
+          id?: number
+          ms?: number | null
+          p_up?: number | null
+          pos_side?: string | null
+          probs?: Json | null
+          unrealized?: number | null
+          up_cost?: number | null
+          up_sell?: number | null
+          window_start?: number
+        }
+        Relationships: []
+      }
       fadebot_bets5: {
         Row: {
           created_at: string | null
@@ -292,6 +346,84 @@ export type Database = {
           move?: number | null
           score?: number
           used?: string | null
+          window_start?: number
+        }
+        Relationships: []
+      }
+      fadebot_trades: {
+        Row: {
+          closed_at: string | null
+          exit_order_id: string | null
+          exit_price: number | null
+          exit_sec: number | null
+          fees: number | null
+          id: number
+          long_is: string | null
+          market_slug: string | null
+          mode: string
+          open_ref: number | null
+          opened_at: string | null
+          opened_sec: number | null
+          order_id: string | null
+          p_side: number | null
+          pnl: number | null
+          price: number | null
+          reason: string | null
+          result: string | null
+          shares: number | null
+          side: string
+          stake: number | null
+          status: string
+          window_start: number
+        }
+        Insert: {
+          closed_at?: string | null
+          exit_order_id?: string | null
+          exit_price?: number | null
+          exit_sec?: number | null
+          fees?: number | null
+          id?: number
+          long_is?: string | null
+          market_slug?: string | null
+          mode: string
+          open_ref?: number | null
+          opened_at?: string | null
+          opened_sec?: number | null
+          order_id?: string | null
+          p_side?: number | null
+          pnl?: number | null
+          price?: number | null
+          reason?: string | null
+          result?: string | null
+          shares?: number | null
+          side: string
+          stake?: number | null
+          status?: string
+          window_start: number
+        }
+        Update: {
+          closed_at?: string | null
+          exit_order_id?: string | null
+          exit_price?: number | null
+          exit_sec?: number | null
+          fees?: number | null
+          id?: number
+          long_is?: string | null
+          market_slug?: string | null
+          mode?: string
+          open_ref?: number | null
+          opened_at?: string | null
+          opened_sec?: number | null
+          order_id?: string | null
+          p_side?: number | null
+          pnl?: number | null
+          price?: number | null
+          reason?: string | null
+          result?: string | null
+          shares?: number | null
+          side?: string
+          stake?: number | null
+          status?: string
           window_start?: number
         }
         Relationships: []
