@@ -570,11 +570,66 @@ function settleValue(st: any): number {
 }
 
 /** Cost of one share of `side` now (0–1). The book is quoted in YES prices: NO costs 1 − the best YES bid. */
-/** Best bid/ask (YES side). The API nests them under `marketData`; older shapes had them at the top level. */
-async function bbo(slug: string): Promise<{ bestBid?: { value: string }; bestAsk?: { value: string } }> {
-  // deno-lint-ignore no-explicit-any
-  const r = (await pm().markets.bbo(slug)) as any;
-  return r?.marketData ?? r?.marketDataLite ?? r ?? {};
+type Px = { value: string };
+// deno-lint-ignore no-explicit-any
+const pxOf = (v: any): Px | undefined => {
+  const x = v && typeof v === "object" ? (v.value ?? v.px?.value ?? v.px) : v;
+  const n = Number(x);
+  return x !== undefined && x !== null && x !== "" && Number.isFinite(n) ? { value: String(n) } : undefined;
+};
+/** Which source last gave prices (shown in the ask log when it isn't the BBO). */
+let lastQuoteVia = "";
+/**
+ * Best bid/ask (YES side). Tries the BBO (prices nested under `marketData`), then the full book, then the market
+ * record itself, since the BBO has answered "market not found" for these 5-minute markets.
+ */
+async function bbo(slug: string): Promise<{ bestBid?: Px; bestAsk?: Px }> {
+  const errs: string[] = [];
+  const client = pm();
+  try {
+    // deno-lint-ignore no-explicit-any
+    const r = (await client.markets.bbo(slug)) as any;
+    const d = r?.marketData ?? r?.marketDataLite ?? r ?? {};
+    const out = { bestBid: pxOf(d.bestBid), bestAsk: pxOf(d.bestAsk) };
+    if (out.bestBid || out.bestAsk) {
+      lastQuoteVia = "bbo";
+      return out;
+    }
+    errs.push("bbo: no prices");
+  } catch (e) {
+    errs.push(`bbo: ${(e as Error).message}`);
+  }
+  try {
+    // deno-lint-ignore no-explicit-any
+    const r = (await client.markets.book(slug)) as any;
+    const d = r?.marketData ?? r ?? {};
+    // deno-lint-ignore no-explicit-any
+    const top = (xs: any[] | undefined, best: (a: number, b: number) => number) =>
+      (xs ?? []).map((l) => Number(l?.px?.value ?? l?.px ?? l?.price)).filter((n) => Number.isFinite(n)).sort(best)[0];
+    const bid = top(d.bids, (a, b) => b - a);
+    const ask = top(d.offers ?? d.asks, (a, b) => a - b);
+    if (bid !== undefined || ask !== undefined) {
+      lastQuoteVia = "book";
+      return { bestBid: pxOf(bid), bestAsk: pxOf(ask) };
+    }
+    errs.push("book: no levels");
+  } catch (e) {
+    errs.push(`book: ${(e as Error).message}`);
+  }
+  try {
+    // deno-lint-ignore no-explicit-any
+    const r = (await client.markets.retrieveBySlug(slug)) as any;
+    const m = r?.market ?? r ?? {};
+    const out = { bestBid: pxOf(m.bestBid), bestAsk: pxOf(m.bestAsk) };
+    if (out.bestBid || out.bestAsk) {
+      lastQuoteVia = "market record";
+      return out;
+    }
+    errs.push("market: no prices");
+  } catch (e) {
+    errs.push(`market: ${(e as Error).message}`);
+  }
+  throw new Error(`no prices for ${slug} (${errs.join("; ")})`);
 }
 
 async function priceFor(m: WindowMarket, side: Side): Promise<number | null> {
@@ -1535,6 +1590,7 @@ async function traderRun(start: number, minute: number, until: number) {
             }+ points of edge`,
           },
         };
+        const via = lastQuoteVia;
         const jev = await askJevTrader(state, !!pos);
         asks += 1;
         row = {
@@ -1596,6 +1652,7 @@ async function traderRun(start: number, minute: number, until: number) {
               exit_sec = ${nowEl}, exit_order_id = ${exitId}, pnl = ${p}, closed_at = now() where id = ${pos.id}`;
           row.did = `sold ${pos.side} @ ${exit.toFixed(2)} (${p >= 0 ? "+" : "−"}$${Math.abs(p).toFixed(2)})`;
         } else row.did = (d as { none: string }).none;
+        if (via && via !== "bbo") row.did = `${row.did} [prices from the ${via}]`;
       } catch (e) {
         row.did = `error: ${(e as Error).message}`.slice(0, 300);
         await sleep(3000);
@@ -1810,8 +1867,25 @@ Deno.serve(async (req) => {
       lastHow = "";
       const m = await findMarket(start);
       const check = m ? await checkLong(start, m.longIs).catch((e) => ({ ok: null, note: (e as Error).message })) : null;
+      // What each Polymarket price endpoint says about this market (raw, trimmed).
+      const probe = async (f: () => Promise<unknown>) => {
+        try {
+          return JSON.stringify(await f()).slice(0, 700);
+        } catch (e) {
+          return `error: ${(e as Error).message}`.slice(0, 300);
+        }
+      };
+      const prices = m
+        ? {
+          bbo: await probe(() => pm().markets.bbo(m.slug)),
+          book: await probe(() => pm().markets.book(m.slug)),
+          market: await probe(() => pm().markets.retrieveBySlug(m.slug)),
+          used: await probe(async () => ({ ...(await bbo(m.slug)), via: lastQuoteVia })),
+        }
+        : null;
       return json({
         check,
+        prices,
         window: new Date(start * 1000).toISOString(),
         market: m,
         search: lastSearch,

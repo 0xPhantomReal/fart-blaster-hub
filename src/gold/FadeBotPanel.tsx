@@ -177,25 +177,6 @@ export function FadeBotPanel({
               Worst drawdown so far: ${st.worst_drawdown.toFixed(2)}
             </span>
           </div>
-          <button
-            className="mb-2 rounded border border-[#262c36] px-2 py-0.5 text-xs text-[#8b949e] hover:bg-[#1f252e]"
-            onClick={async () => {
-              setCheck("checking…");
-              const r = await fadeBotFindMarket();
-              setCheck(
-                "error" in r
-                  ? `error: ${r.error}`
-                  : r.market
-                    ? `found ${r.market.slug} (YES pays on ${r.market.longIs}${r.how ? `, from ${r.how}` : ""}) for the window starting ${new Date(r.window).toLocaleTimeString()}${r.check ? `. Check against settled windows: ${r.check.ok === true ? "OK" : r.check.ok === false ? "MISMATCH" : "pending"}, ${r.check.note}` : ""}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`
-                    : `not found: ${r.search}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`,
-              );
-            }}
-          >
-            Check Polymarket market
-          </button>
-          {check && (
-            <p className={`mb-2 break-all text-xs ${MUTED}`}>{check}</p>
-          )}
           <table className="w-full text-xs tabular-nums">
             <thead>
               <tr className={MUTED}>
@@ -301,6 +282,23 @@ export function FadeBotPanel({
           </table>
         </>
       )}
+      <button
+        className="mb-2 rounded border border-[#262c36] px-2 py-0.5 text-xs text-[#8b949e] hover:bg-[#1f252e]"
+        onClick={async () => {
+          setCheck("checking…");
+          const r = await fadeBotFindMarket();
+          setCheck(
+            "error" in r
+              ? `error: ${r.error}`
+              : r.market
+                ? `found ${r.market.slug} (YES pays on ${r.market.longIs}${r.how ? `, from ${r.how}` : ""}) for the window starting ${new Date(r.window).toLocaleTimeString()}${r.check ? `. Check against settled windows: ${r.check.ok === true ? "OK" : r.check.ok === false ? "MISMATCH" : "pending"}, ${r.check.note}` : ""}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}${r.prices ? `. Prices — used: ${r.prices.used}; bbo: ${r.prices.bbo}; book: ${r.prices.book}; market: ${r.prices.market}` : ""}`
+                : `not found: ${r.search}${r.record && r.record !== "null" ? `. Market record: ${r.record}` : ""}`,
+          );
+        }}
+      >
+        Check Polymarket market
+      </button>
+      {check && <p className={`mb-2 break-all text-xs ${MUTED}`}>{check}</p>}
       {s.pmHistory && <PmHistory s={s} readAt={cfg.readAt ?? 30} />}
       {bt(
         cfg.readAt ?? 30,

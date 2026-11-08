@@ -844,6 +844,7 @@ export async function fadeBotFindMarket(): Promise<
       how?: string;
       record?: string;
       check?: { ok: boolean | null; note: string } | null;
+      prices?: { bbo: string; book: string; market: string; used: string } | null;
     }
   | { error: string }
 > {
