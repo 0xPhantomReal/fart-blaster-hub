@@ -138,6 +138,9 @@ const settings = () => ({
     // Fade Jev: when Jev's buy passes the checks, buy the OTHER side instead (same dollar amount).
     // Off (Nov 8); FADEBOT_TRADER_INVERT=1 turns it on.
     invert: env("FADEBOT_TRADER_INVERT") === "1",
+    // All-in (FADEBOT_TRADER_ALL_IN=1): every buy uses the whole available balance (less a 3% buffer for fees) instead of
+    // the edge-based size; one loss empties the account. Live: Polymarket buying power; test: bankroll + test P&L.
+    allIn: env("FADEBOT_TRADER_ALL_IN") === "1",
     // No buys when the side costs between these (cents, inclusive); FADEBOT_TRADER_BAN=off removes it.
     banLo: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MIN") || 45) / 100,
     banHi: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MAX") || 60) / 100,
@@ -1453,6 +1456,19 @@ async function quotes(m: WindowMarket) {
   return { upCost: up.cost, downCost: down.cost, upSell: up.sell, downSell: down.sell };
 }
 
+/** Money available to buy with: Polymarket buying power (live), or the bankroll plus all test P&L (test mode). */
+async function traderBalance(live: boolean, bankroll: number): Promise<number> {
+  if (live) {
+    const r = await pm().account.balances();
+    const b = r.balances?.find((x) => (x.currency ?? "USD").toUpperCase() === "USD") ?? r.balances?.[0];
+    if (!b) throw new Error("no Polymarket balance");
+    return Number(b.buyingPower ?? b.currentBalance ?? 0);
+  }
+  const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where mode = 'dry' and status <> 'open'`;
+  const open = await db()`select coalesce(sum(stake), 0) as s from fadebot_trades where mode = 'dry' and status = 'open'`;
+  return bankroll + Number(r[0].p) - Number(open[0].s);
+}
+
 /** Realized trader P&L since midnight New York time. */
 async function traderToday(): Promise<number> {
   const r = await db()`select coalesce(sum(pnl), 0) as p from fadebot_trades where status <> 'open' and closed_at >=
@@ -1488,8 +1504,14 @@ async function settleTrades() {
 async function traderRun(start: number, minute: number, until: number) {
   const sql = db();
   const cfg = settings();
-  const tc: TraderCfg & { live: boolean; dailyLoss: number; gapSec: number; sell: boolean; invert: boolean } =
-    cfg.trader;
+  const tc: TraderCfg & {
+    live: boolean;
+    dailyLoss: number;
+    gapSec: number;
+    sell: boolean;
+    invert: boolean;
+    allIn: boolean;
+  } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
   const from = start + minute * 60;
@@ -1669,9 +1691,13 @@ async function traderRun(start: number, minute: number, until: number) {
             no_buys_when_cost_between: tc.banLo !== undefined && tc.banHi !== undefined
               ? `${Math.round(tc.banLo * 100)}¢ and ${Math.round(tc.banHi * 100)}¢ (the bot refuses those buys)`
               : null,
-            sizing: `the bot sizes buys itself: ${tc.kelly} Kelly of $${tc.bankroll}, at most $${tc.maxBet}, only with ${
-              Math.round(tc.edge * 100)
-            }+ points of edge`,
+            sizing: tc.allIn
+              ? `ALL-IN: every buy uses the whole balance (a loss empties the account); only with ${
+                Math.round(tc.edge * 100)
+              }+ points of edge`
+              : `the bot sizes buys itself: ${tc.kelly} Kelly of $${tc.bankroll}, at most $${tc.maxBet}, only with ${
+                Math.round(tc.edge * 100)
+              }+ points of edge`,
           },
         };
         const via = lastQuoteVia;
@@ -1708,6 +1734,12 @@ async function traderRun(start: number, minute: number, until: number) {
           const cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           const pSide = tc.invert ? 1 - d.p : d.p;
+          if (tc.allIn) {
+            const bal = await traderBalance(live, tc.bankroll);
+            const all = Math.floor(bal * 0.97 * 100) / 100;
+            if (!(all >= 1)) throw new Error(`all-in: balance $${bal.toFixed(2)} is too small to buy`);
+            d.stake = all;
+          }
           let shares = d.stake / cost;
           let price = cost;
           let fees = 0;

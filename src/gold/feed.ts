@@ -776,6 +776,7 @@ export interface FadeBotStatus {
       invert?: boolean;
       banLo?: number;
       banHi?: number;
+      allIn?: boolean;
     };
     lsFade?: boolean;
     strongBet?: number;
