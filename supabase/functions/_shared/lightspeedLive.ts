@@ -288,7 +288,9 @@ async function polymarket(m: string, tfSec: number, forTime: number) {
   const mk = (ev?.event ?? ev)?.markets?.[0];
   const long = pmLongIs(mk);
   if (!mk?.slug || !long) throw new Error("no market");
-  const b = (await getJson(`${URLS.polymarket()}/v1/markets/${mk.slug}/bbo`)) as Record<string, unknown>;
+  // deno-lint-ignore no-explicit-any
+  const raw = (await getJson(`${URLS.polymarket()}/v1/markets/${mk.slug}/bbo`)) as any;
+  const b = (raw?.marketData ?? raw?.marketDataLite ?? raw ?? {}) as Record<string, unknown>;
   const bid = num(b.bestBid);
   const ask = num(b.bestAsk);
   if (!Number.isFinite(bid) && !Number.isFinite(ask)) throw new Error("no prices");

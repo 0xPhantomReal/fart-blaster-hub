@@ -570,8 +570,15 @@ function settleValue(st: any): number {
 }
 
 /** Cost of one share of `side` now (0–1). The book is quoted in YES prices: NO costs 1 − the best YES bid. */
+/** Best bid/ask (YES side). The API nests them under `marketData`; older shapes had them at the top level. */
+async function bbo(slug: string): Promise<{ bestBid?: { value: string }; bestAsk?: { value: string } }> {
+  // deno-lint-ignore no-explicit-any
+  const r = (await pm().markets.bbo(slug)) as any;
+  return r?.marketData ?? r?.marketDataLite ?? r ?? {};
+}
+
 async function priceFor(m: WindowMarket, side: Side): Promise<number | null> {
-  const b = await pm().markets.bbo(m.slug);
+  const b = await bbo(m.slug);
   if (side === m.longIs) return b.bestAsk ? Number(b.bestAsk.value) : null;
   return b.bestBid ? Number((1 - Number(b.bestBid.value)).toFixed(4)) : null;
 }
@@ -626,7 +633,7 @@ async function limitBuy(m: WindowMarket, side: Side, price: number, shares: numb
 
 /** What one share of `side` sells for now (0–1): YES sells at the best YES bid; NO at 1 − the best YES ask. */
 async function sellPriceFor(m: WindowMarket, side: Side): Promise<number | null> {
-  const b = await pm().markets.bbo(m.slug);
+  const b = await bbo(m.slug);
   if (side === m.longIs) return b.bestBid ? Number(b.bestBid.value) : null;
   return b.bestAsk ? Number((1 - Number(b.bestAsk.value)).toFixed(4)) : null;
 }
@@ -1370,7 +1377,7 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
 
 /** Both sides' buy and sell prices from one BBO read (prices on the book are the YES side's). */
 async function quotes(m: WindowMarket) {
-  const b = await pm().markets.bbo(m.slug);
+  const b = await bbo(m.slug);
   const bid = b.bestBid ? Number(b.bestBid.value) : null;
   const ask = b.bestAsk ? Number(b.bestAsk.value) : null;
   const inv = (x: number | null) => (x === null ? null : Number((1 - x).toFixed(4)));
