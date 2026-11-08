@@ -507,7 +507,7 @@ function TraderPanel({
           </>
         ) : null}
         {tc
-          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s, and no buys after losing $${tc.dailyLoss} in a day.`
+          ? ` A buy goes ahead only if Jev's chance beats the price by ${Math.round(tc.edge * 100)}+ points; size is ${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (

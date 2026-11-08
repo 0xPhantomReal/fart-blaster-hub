@@ -279,6 +279,8 @@ export interface TraderCfg {
   minBet: number; //      dollars per buy, at least (smaller → no buy)
   minLeftSec: number; //  no new buys with less time left than this
   maxEntries: number; //  buys per window, at most
+  banLo?: number; //      no buys at a cost from banLo …
+  banHi?: number; //      … to banHi (inclusive, 0–1)
 }
 
 /** Kelly stake in dollars for buying at `cost` (0–1) a share that wins with chance `p`; 0 when there's no edge. */
@@ -312,6 +314,9 @@ export function traderDecision(
   const p = side === "up" ? jev.pUp : 1 - jev.pUp;
   const cost = side === "up" ? quotes.upCost : quotes.downCost;
   if (cost === null) return { none: `no price for ${side}` };
+  if (cfg.banLo !== undefined && cfg.banHi !== undefined && cost >= cfg.banLo - 1e-9 && cost <= cfg.banHi + 1e-9) {
+    return { none: `${side} costs ${Math.round(cost * 100)}¢: no buys from ${Math.round(cfg.banLo * 100)}–${Math.round(cfg.banHi * 100)}¢` };
+  }
   if (p - cost < cfg.edge - 1e-9) {
     return { none: `Jev ${Math.round(p * 100)}% vs cost ${Math.round(cost * 100)}¢: edge under ${Math.round(cfg.edge * 100)} points` };
   }

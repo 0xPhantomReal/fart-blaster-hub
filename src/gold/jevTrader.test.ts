@@ -27,4 +27,11 @@ describe("Jev trader", () => {
     expect(traderDecision({ action: "sell", pUp: 0.4 }, { upCost: 0.4, downCost: 0.62 }, { side: "up" }, ctx, CFG)).toEqual({ sell: true });
     expect(traderDecision({ action: "hold", pUp: 0.4 }, { upCost: 0.4, downCost: 0.62 }, { side: "up" }, ctx, CFG)).toHaveProperty("none");
   });
+  it("bans buys from 45 to 60¢", () => {
+    const BAN = { ...CFG, banLo: 0.45, banHi: 0.6 };
+    expect(traderDecision({ action: "buy_up", pUp: 0.9 }, { upCost: 0.6, downCost: 0.42 }, null, ctx, BAN)).toMatchObject({ none: expect.stringContaining("45–60¢") });
+    expect(traderDecision({ action: "buy_up", pUp: 0.9 }, { upCost: 0.45, downCost: 0.57 }, null, ctx, BAN)).toHaveProperty("none");
+    expect(traderDecision({ action: "buy_up", pUp: 0.9 }, { upCost: 0.61, downCost: 0.41 }, null, ctx, BAN)).toMatchObject({ buy: "up" });
+    expect(traderDecision({ action: "buy_down", pUp: 0.1 }, { upCost: 0.58, downCost: 0.44 }, null, ctx, BAN)).toMatchObject({ buy: "down" });
+  });
 });

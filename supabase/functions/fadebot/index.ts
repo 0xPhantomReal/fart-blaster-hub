@@ -135,8 +135,11 @@ const settings = () => ({
     // FADEBOT_TRADER_SELL=1 turns Jev's sell decisions back on.
     sell: env("FADEBOT_TRADER_SELL") === "1",
     // Fade Jev: when Jev's buy passes the checks, buy the OTHER side instead (same dollar amount).
-    // On by default (Nov 7); FADEBOT_TRADER_INVERT=0 follows Jev again.
-    invert: env("FADEBOT_TRADER_INVERT") !== "0",
+    // Off (Nov 8); FADEBOT_TRADER_INVERT=1 turns it on.
+    invert: env("FADEBOT_TRADER_INVERT") === "1",
+    // No buys when the side costs between these (cents, inclusive); FADEBOT_TRADER_BAN=off removes it.
+    banLo: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MIN") || 45) / 100,
+    banHi: env("FADEBOT_TRADER_BAN") === "off" ? undefined : Number(env("FADEBOT_TRADER_BAN_MAX") || 60) / 100,
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
@@ -1634,6 +1637,9 @@ async function traderRun(start: number, minute: number, until: number) {
             max_buys_per_window: tc.maxEntries,
             realized_pnl_today_dollars: r2(today),
             daily_loss_limit_dollars: tc.dailyLoss,
+            no_buys_when_cost_between: tc.banLo !== undefined && tc.banHi !== undefined
+              ? `${Math.round(tc.banLo * 100)}¢ and ${Math.round(tc.banHi * 100)}¢ (the bot refuses those buys)`
+              : null,
             sizing: `the bot sizes buys itself: ${tc.kelly} Kelly of $${tc.bankroll}, at most $${tc.maxBet}, only with ${
               Math.round(tc.edge * 100)
             }+ points of edge`,
