@@ -177,6 +177,9 @@ const settings = () => ({
     order: (env("FADEBOT_TRADER_ORDER") === "market" ? "market" : "limit") as "market" | "limit",
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
+    // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
+    // instead of placing the limit order.
+    cheapBet: Number(env("FADEBOT_TRADER_CHEAP_BET") || 1),
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
@@ -1604,6 +1607,7 @@ async function traderRun(start: number, minute: number, until: number) {
     order: "market" | "limit";
     limitPrice: number;
     limitShares: number;
+    cheapBet: number;
   } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
@@ -1867,9 +1871,34 @@ async function traderRun(start: number, minute: number, until: number) {
             // 15 shares at 33¢ (or what's set), good until the window ends; filled shares are tracked as they come.
             const lp = tc.limitPrice;
             const n = tc.limitShares;
-            const orderId = live ? await limitBuy(market, side, lp, n, end) : null;
             const sideNow = side === "up" ? q.upCost : q.downCost;
-            const instant = !live && sideNow !== null && sideNow <= lp; // test mode: fills at once if already cheaper
+            if (sideNow !== null && sideNow < lp - 1e-9) {
+              // Already under the limit: buy $1 (FADEBOT_TRADER_CHEAP_BET) at market instead.
+              let shares = tc.cheapBet / sideNow;
+              let price = sideNow;
+              let fees = 0;
+              let orderId: string | null = null;
+              if (live) {
+                const f = await marketBuy(market, side, tc.cheapBet);
+                if (!f.shares) throw new Error("market buy filled nothing");
+                shares = f.shares;
+                price = f.price;
+                fees = f.fees;
+                orderId = f.id;
+              }
+              await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+                  opened_sec, p_side, order_id, open_ref, reason, order_type)
+                values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${tc.cheapBet}, ${shares}, ${price},
+                  ${fees}, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
+                  ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} already ${Math.round(sideNow * 100)}¢ (under ${
+                    Math.round(lp * 100)
+                  }¢) → $${tc.cheapBet} market buy at ${Math.round(nowEl)} s`}, 'market')`;
+              row.did = `${side} under ${Math.round(lp * 100)}¢: bought $${tc.cheapBet} @ ${price.toFixed(2)}`;
+              await logAsk(row);
+              continue;
+            }
+            const orderId = live ? await limitBuy(market, side, lp, n, end) : null;
+            const instant = !live && sideNow !== null && sideNow <= lp; // test mode: fills at once at exactly the limit
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
                 opened_sec, p_side, order_id, open_ref, reason, order_type, limit_price, limit_shares)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${lp * n}, ${instant ? n : 0},
