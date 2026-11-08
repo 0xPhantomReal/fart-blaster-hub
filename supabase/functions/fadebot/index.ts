@@ -1482,36 +1482,62 @@ async function traderRun(start: number, minute: number, until: number) {
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
   const from = start + minute * 60;
-  const before = await period(start - 60);
-  const forming: Candle | null = before
-    ? { time: start, open: before.last, high: before.last, low: before.last, close: before.last }
-    : null;
-  for (let k = 0; forming && k < minute; k++) {
-    const pk = await period(start + k * 60);
-    if (pk) {
-      forming.high = Math.max(forming.high, pk.high);
-      forming.low = Math.min(forming.low, pk.low);
-      forming.close = pk.last;
-    }
-  }
-  const [closed, market] = await Promise.all([
-    forming ? closedCandles(start, 4).catch(() => [] as Candle[]) : Promise.resolve([] as Candle[]),
-    findMarket(start).catch(() => null),
-  ]);
-  let liveNow: Record<string, unknown> | null = null;
-  const liveLoop = (async () => {
-    while (forming && Date.now() / 1000 < until) {
-      liveNow = await lightspeedLive({ market: "btc", coinbase: "BTC-USD", tfSec: TF, forTime: start, open: forming.open })
-        .catch(() => liveNow);
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-  })();
+  // Start recording at once (and save the minute as soon as it ends, not after the last Jev answer: the next run
+  // reads this minute as its candle open).
+  let forming: Candle | null = null;
+  const early: { t: number; p: number }[] = [];
   const onTick = (t: number, p: number) => {
-    if (!forming || t < start) return;
+    if (t < start) return;
+    if (!forming) {
+      early.push({ t, p });
+      return;
+    }
     forming.high = Math.max(forming.high, p);
     forming.low = Math.min(forming.low, p);
     forming.close = p;
   };
+  const recording = record(until, onTick).then(async (r) => {
+    await savePeriod(from, from + 60, r.ticks, r.source);
+    return r;
+  });
+  const [closed, market] = await Promise.all([
+    closedCandles(start, 4).catch(() => [] as Candle[]),
+    findMarket(start).catch(() => null),
+  ]);
+  // The candle open, as the website has it: the last BRTI price before the window (the previous run saves it right
+  // at the end of its minute). Wait a little for it, then fall back to the last closed candle's close.
+  let before = await period(start - 60);
+  for (let k = 0; !before && k < 8 && Date.now() / 1000 < until - 5; k++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    before = await period(start - 60);
+  }
+  const prevClose = closed.length && closed[closed.length - 1].time === start - TF ? closed[closed.length - 1].close : null;
+  const openPx = before?.last ?? prevClose;
+  if (openPx !== null) {
+    const f: Candle = { time: start, open: openPx, high: openPx, low: openPx, close: openPx };
+    for (let k = 0; k < minute; k++) {
+      const pk = await period(start + k * 60);
+      if (pk) {
+        f.high = Math.max(f.high, pk.high);
+        f.low = Math.min(f.low, pk.low);
+        f.close = pk.last;
+      }
+    }
+    for (const x of early) {
+      f.high = Math.max(f.high, x.p);
+      f.low = Math.min(f.low, x.p);
+      f.close = x.p;
+    }
+    forming = f;
+  }
+  let liveNow: Record<string, unknown> | null = null;
+  const liveLoop = (async () => {
+    while (forming && Date.now() / 1000 < until) {
+      liveNow = await lightspeedLive({ market: "btc", coinbase: "BTC-USD", tfSec: TF, forTime: start, open: openPx })
+        .catch(() => liveNow);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  })();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let asks = 0;
   const logAsk = (row: Record<string, unknown>) =>
@@ -1521,7 +1547,9 @@ async function traderRun(start: number, minute: number, until: number) {
     if (!forming || !market) {
       await logAsk({
         at_sec: Date.now() / 1000 - start,
-        did: !forming ? "no candle open (the minute before the window wasn't recorded)" : `no Polymarket market (${lastSearch})`,
+        did: !forming
+          ? "no candle open (no BRTI for the minute before the window, and no closed candle from the chart feed)"
+          : `no Polymarket market (${lastSearch})`,
       });
       return;
     }
@@ -1614,7 +1642,11 @@ async function traderRun(start: number, minute: number, until: number) {
           { secondsLeft: TF - nowEl, entries: nRows[0].n, lossLimitHit: today <= -tc.dailyLoss },
           tc,
         );
-        if ("buy" in d) {
+        // Runs overlap for a moment at each minute: never buy if another run just opened a position.
+        const raced = "buy" in d &&
+          (await sql`select 1 from fadebot_trades where window_start = ${start} and status = 'open'`).length > 0;
+        if (raced) row.did = "another run just bought: skipped";
+        else if ("buy" in d) {
           let shares = d.stake / d.cost;
           let price = d.cost;
           let fees = 0;
@@ -1663,8 +1695,7 @@ async function traderRun(start: number, minute: number, until: number) {
     }
   })();
 
-  const [{ ticks, source }] = await Promise.all([record(until, onTick), asker, liveLoop]);
-  await savePeriod(from, from + 60, ticks, source);
+  const [{ ticks, source }] = await Promise.all([recording, asker, liveLoop]);
   return `trader minute ${minute + 1}: ${asks} Jev asks, ${ticks.length} ticks from ${source}`;
 }
 
