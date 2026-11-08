@@ -30,12 +30,20 @@ const RULES =
   "and what it sells for (up_sell, down_sell). You are an active trader: a buy is worth it whenever your chance of " +
   "that side winning is above its cost. Look for what the price is missing (order flow, books, futures, other coins, " +
   "how much time is left versus how far price is from the open). The bot sizes every buy itself from your chance and " +
-  "the price (small edge → small bet) and caps the risk, so you don't need to be certain to buy. ";
+  "the price (small edge → small bet) and caps the risk, so you don't need to be certain to buy. " +
+  "TREND: read `trend` (EMA 9/21 direction and gap, price against the slow EMA, recent colours, lower highs / higher " +
+  "lows, a plain label) and tv_indicator. In a downtrend, Up is cheap because the market expects more red, and a cheap " +
+  "Up is usually cheap for a reason; the same for Down in an uptrend. The random-walk baseline ignores trends, so in " +
+  "a clear trend lean your chance toward continuation. Buy against the trend only on real evidence the move is " +
+  "turning right now (aggressive flow and the book flipping, candle_strength turning, a higher low in a downtrend) — " +
+  "never just because that side is cheap. Buying with the trend is fine. " +
+  "YOUR RECORD: your_recent_trades shows your last buys and how they ended. If you've been losing buying the same " +
+  "side against the trend, don't keep making that bet — the trend is telling you something. ";
 
 const FINISH_GUIDE =
-  "Start from lightspeed.finish_probability.random_walk_p_green_pct (the pure-math chance of green from here) and " +
-  "move away only for real evidence: lightspeed_live (books, aggressive trade flow, futures, other coins), " +
-  "candle_strength, momentum and the last 40 candles.";
+  "Start from lightspeed.finish_probability.random_walk_p_green_pct (the pure-math chance of green from here), then " +
+  "adjust for the trend (continuation is more likely in a clear trend), lightspeed_live (books, aggressive trade " +
+  "flow, futures, other coins), candle_strength, momentum and the last 40 candles.";
 
 /** Jev's answer: what to do now, and its chance the candle closes green (both from one call when possible). */
 export async function askJevTrader(state: Record<string, unknown>, holding: boolean, edgePts = 5) {

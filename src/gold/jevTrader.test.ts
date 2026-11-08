@@ -35,3 +35,24 @@ describe("Jev trader", () => {
     expect(traderDecision({ action: "buy_down", pUp: 0.1 }, { upCost: 0.58, downCost: 0.44 }, null, ctx, BAN)).toMatchObject({ buy: "down" });
   });
 });
+
+import { trendSummary } from "../../supabase/functions/_shared/fadeStrategy";
+describe("trend summary", () => {
+  const stairs = (dir: number) =>
+    Array.from({ length: 14 }, (_, i) => {
+      const o = 100000 + dir * i * 30;
+      return { open: o, close: o + dir * 25, high: Math.max(o, o + dir * 25) + 5, low: Math.min(o, o + dir * 25) - 5 };
+    });
+  it("calls a falling staircase below falling EMAs a strong downtrend", () => {
+    const c = stairs(-1);
+    const t = trendSummary(c, c[13].close, 99700, 99800, 40);
+    expect(t.label).toBe("strong downtrend");
+    expect(t.last_12_candle_colors).toBe("RRRRRRRRRRRR");
+  });
+  it("and the mirror image a strong uptrend; mixed candles no clear trend", () => {
+    const c = stairs(1);
+    expect(trendSummary(c, c[13].close, 100300, 100200, 40).label).toBe("strong uptrend");
+    const mixed = Array.from({ length: 14 }, (_, i) => ({ open: 100000, close: 100000 + (i % 2 ? 20 : -20), high: 100030, low: 99970 }));
+    expect(trendSummary(mixed, 100000, 100001, 100000, 40).label).toBe("no clear trend");
+  });
+});

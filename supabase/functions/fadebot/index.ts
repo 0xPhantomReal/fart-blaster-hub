@@ -53,6 +53,7 @@ import {
   lightspeedDecision,
   takeProfitPrice,
   traderDecision,
+  trendSummary,
   type TraderCfg,
   pnl,
   regimeOf,
@@ -1598,6 +1599,26 @@ async function traderRun(start: number, minute: number, until: number) {
         const core = lightspeedCore(closed, start, TF, elapsed, forming);
         const strength = candleStrength(core, liveNow, elapsed, TF, forming);
         const r2 = (x: number) => Number(x.toFixed(2));
+        // The trend (5m EMA 9/21 live, as on the chart; your TV indicator) and how our recent buys went.
+        const tvLive = runTvIndicator(closed.slice(-3000), forming).live;
+        const atr = (core?.volatility as { atr_dollars?: number } | undefined)?.atr_dollars ?? null;
+        const trend = trendSummary(closed, forming.close, tvLive?.emaFast ?? null, tvLive?.emaSlow ?? null, atr);
+        const recent = await sql`select window_start, side, price, p_side, status, result, pnl, opened_at from fadebot_trades
+          where mode = ${mode} order by id desc limit 10`;
+        const recentTrades = recent.map((t) => ({
+          minutes_ago: Math.round((Date.now() - new Date(t.opened_at).getTime()) / 60000),
+          bought: t.side,
+          cost_cents: Math.round(Number(t.price) * 100),
+          your_chance_then_pct: t.p_side === null ? null : Math.round(Number(t.p_side) * 100),
+          result: t.status === "open" ? "open" : t.result,
+          pnl_dollars: t.pnl === null ? null : r2(Number(t.pnl)),
+        }));
+        const closedT = recentTrades.filter((t) => t.result === "win" || t.result === "loss");
+        let streak = 0;
+        for (const t of closedT) {
+          if (t.result !== closedT[0].result || t.bought !== closedT[0].bought) break;
+          streak += 1;
+        }
         const state = {
           instrument: "Polymarket US BTC Up/Down 5-minute (settles on CF Benchmarks BRTI)",
           candle_so_far: {
@@ -1614,6 +1635,14 @@ async function traderRun(start: number, minute: number, until: number) {
             o: r2(c.open), h: r2(c.high), l: r2(c.low), c: r2(c.close),
             color: c.close > c.open ? "G" : c.close < c.open ? "R" : "-",
           })),
+          trend,
+          tv_indicator: tvContext(closed, start, TF, forming.close),
+          your_recent_trades: {
+            last_10: recentTrades,
+            streak: closedT.length
+              ? `${streak} ${closedT[0].result === "loss" ? "losses" : "wins"} in a row buying ${closedT[0].bought}`
+              : "no finished trades yet",
+          },
           lightspeed: core,
           candle_strength: strength,
           lightspeed_live: liveNow,

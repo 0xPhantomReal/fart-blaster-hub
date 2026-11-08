@@ -324,3 +324,47 @@ export function traderDecision(
   if (!stake) return { none: `stake under $${cfg.minBet}` };
   return { buy: side, stake, p, cost };
 }
+
+type Ohlc = { open: number; high: number; low: number; close: number };
+
+/**
+ * The trend picture for Jev (it informs, it doesn't gate): EMA direction and gap, where price sits against the slow
+ * EMA, recent candle colours, lower highs / higher lows, and a plain label.
+ */
+export function trendSummary(closed: Ohlc[], price: number, emaFast: number | null, emaSlow: number | null, atr: number | null) {
+  const last12 = closed.slice(-12);
+  const reds = last12.filter((c) => c.close < c.open).length;
+  const greens = last12.filter((c) => c.close > c.open).length;
+  const last6 = closed.slice(-6);
+  let lowerHighs = 0;
+  let higherLows = 0;
+  for (let i = 1; i < last6.length; i++) {
+    if (last6[i].high < last6[i - 1].high) lowerHighs += 1;
+    if (last6[i].low > last6[i - 1].low) higherLows += 1;
+  }
+  const net12 = last12.length ? price - last12[0].open : 0;
+  const r2 = (x: number) => Number(x.toFixed(2));
+  const emaDir = emaFast === null || emaSlow === null ? null : emaFast > emaSlow ? "up" : emaFast < emaSlow ? "down" : "flat";
+  const vsSlow = emaSlow === null ? null : price > emaSlow ? "above" : price < emaSlow ? "below" : "at";
+  const down = (emaDir === "down" ? 1 : 0) + (vsSlow === "below" ? 1 : 0) + (reds >= 8 ? 1 : 0) + (lowerHighs >= 4 ? 1 : 0) +
+    (net12 < 0 && atr && -net12 > 2 * atr ? 1 : 0);
+  const up = (emaDir === "up" ? 1 : 0) + (vsSlow === "above" ? 1 : 0) + (greens >= 8 ? 1 : 0) + (higherLows >= 4 ? 1 : 0) +
+    (net12 > 0 && atr && net12 > 2 * atr ? 1 : 0);
+  const label = down >= 4 ? "strong downtrend" : down >= 3 && down > up ? "downtrend" : up >= 4 ? "strong uptrend" :
+    up >= 3 && up > down ? "uptrend" : "no clear trend";
+  return {
+    label,
+    ema_fast_9: emaFast === null ? null : r2(emaFast),
+    ema_slow_21: emaSlow === null ? null : r2(emaSlow),
+    ema_direction: emaDir,
+    ema_gap_dollars: emaFast === null || emaSlow === null ? null : r2(emaFast - emaSlow),
+    price_vs_slow_ema: vsSlow,
+    last_12_candle_colors: last12.map((c) => (c.close > c.open ? "G" : c.close < c.open ? "R" : "-")).join(""),
+    red_of_last_12: reds,
+    green_of_last_12: greens,
+    lower_highs_of_last_5: lowerHighs,
+    higher_lows_of_last_5: higherLows,
+    move_over_last_12_candles_dollars: r2(net12),
+    move_over_last_12_candles_in_atr: atr ? r2(net12 / atr) : null,
+  };
+}
