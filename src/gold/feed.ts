@@ -790,6 +790,9 @@ export interface FadeBotStatus {
       banHi?: number;
       allIn?: boolean;
       trigger?: "choice" | "probability";
+      order?: "market" | "limit";
+      limitPrice?: number;
+      limitShares?: number;
     };
     lsFade?: boolean;
     strongBet?: number;
@@ -912,6 +915,9 @@ export interface TraderTrade {
   result: string | null;
   pnl: number | null;
   reason: string | null;
+  order_type?: string | null;
+  limit_price?: number | null;
+  limit_shares?: number | null;
 }
 export interface TraderAsk {
   window_start: number | string;

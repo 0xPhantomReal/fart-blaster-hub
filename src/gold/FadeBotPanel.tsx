@@ -509,7 +509,7 @@ function TraderPanel({
           </>
         ) : null}
         {tc
-          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
+          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; ${tc.order === "limit" ? `instead of buying at market it places a limit order for ${tc.limitShares} shares at ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢ on that side, good until the window ends (the edge is measured against what it would pay: ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, or less if the side is already cheaper), and unfilled orders cost nothing` : `size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (
@@ -621,9 +621,11 @@ function TraderPanel({
                   <tr key={x.id}>
                     <td className="py-0.5">{hhmm(x.window_start)}</td>
                     <td className="py-0.5">
-                      {x.side === "up" ? "Up ↑" : "Down ↓"} $
-                      {x.stake.toFixed(2)} @ {x.price.toFixed(2)} at{" "}
-                      {Math.round(x.opened_sec)} s (Jev {pct(x.p_side)}%)
+                      {x.side === "up" ? "Up ↑" : "Down ↓"}{" "}
+                      {x.order_type === "limit"
+                        ? `limit ${x.limit_shares} @ ${Math.round((x.limit_price ?? 0) * 100)}¢, ${Number(x.shares).toFixed(0)} filled${x.shares > 0 ? ` @ ${x.price.toFixed(2)}` : ""}`
+                        : `$${x.stake.toFixed(2)} @ ${x.price.toFixed(2)}`}{" "}
+                      at {Math.round(x.opened_sec)} s (Jev {pct(x.p_side)}%)
                       {x.exit_price != null
                         ? ` → sold @ ${x.exit_price.toFixed(2)} at ${Math.round(x.exit_sec ?? 0)} s`
                         : x.status === "open"

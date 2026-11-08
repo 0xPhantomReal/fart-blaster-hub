@@ -171,6 +171,12 @@ const settings = () => ({
     // What triggers a buy: "probability" (default, Nov 8) = Jev's more-likely side whenever Jev's chance beats its
     // price by the edge, whatever Jev's buy/wait choice; FADEBOT_TRADER_TRIGGER=choice = only when Jev says buy.
     trigger: (env("FADEBOT_TRADER_TRIGGER") === "choice" ? "choice" : "probability") as "choice" | "probability",
+    // How it buys: "limit" (default, Nov 8) = a limit order for FADEBOT_TRADER_LIMIT_SHARES (15) at
+    // FADEBOT_TRADER_LIMIT_PRICE (33¢) on the picked side, good until the window ends (the edge is measured against
+    // what it would pay: 33¢, or less if the side is already cheaper); FADEBOT_TRADER_ORDER=market = a market buy.
+    order: (env("FADEBOT_TRADER_ORDER") === "market" ? "market" : "limit") as "market" | "limit",
+    limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
+    limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
   },
   // Lightspeed fade: market buy of this many dollars, only in the first lsWindowSec seconds of the candle, sold with a
   // market order once the shares are worth takeProfit × what they cost (2 = 100% profit); otherwise held to settlement.
@@ -254,6 +260,10 @@ async function setup() {
   await sql`alter table fadebot_trades enable row level security`;
   // Which trader made the trade: 'trader' (Jev trader) or 'longshot'.
   await sql`alter table fadebot_trades add column if not exists strategy text default 'trader'`;
+  // Limit orders: the order and how much of it has filled (shares/price then hold what actually filled).
+  await sql`alter table fadebot_trades add column if not exists order_type text default 'market'`;
+  await sql`alter table fadebot_trades add column if not exists limit_price double precision`;
+  await sql`alter table fadebot_trades add column if not exists limit_shares double precision`;
   // Longshot: every window where its rule fired (bought or not), to check how often "near-certain" really wins.
   await sql`create table if not exists fadebot_longshot (
     window_start bigint primary key, at_sec double precision, side text, p double precision, cost double precision,
@@ -1515,6 +1525,37 @@ async function traderToday(): Promise<number> {
   return Number(r[0]?.p ?? 0);
 }
 
+/** Update a limit order's fills (live: the order's filled quantity and average price; test: filled once the side's
+ *  price is at or under the limit). */
+// deno-lint-ignore no-explicit-any
+async function limitFill(t: any, q?: { upCost: number | null; downCost: number | null }) {
+  const want = Number(t.limit_shares);
+  const lp = Number(t.limit_price);
+  let filled = Number(t.shares);
+  let price = Number(t.price);
+  if (t.mode === "live" && t.order_id) {
+    const r = await pm().orders.retrieve(t.order_id);
+    const cum = Number(r.order?.cumQuantity ?? 0);
+    const avg = Number(r.order?.avgPx?.value ?? NaN);
+    if (cum > filled) {
+      filled = cum;
+      if (Number.isFinite(avg) && avg > 0) {
+        // Order prices are YES prices; for the NO side take whichever reading is closer to the limit.
+        price = t.side !== t.long_is && Math.abs(1 - avg - lp) < Math.abs(avg - lp) ? 1 - avg : avg;
+      }
+    }
+  } else if (q) {
+    const now = t.side === "up" ? q.upCost : q.downCost;
+    if (now !== null && now <= lp && filled < want) {
+      filled = want;
+      price = Math.min(lp, now);
+    }
+  }
+  const changed = filled !== Number(t.shares);
+  if (changed) await db()`update fadebot_trades set shares = ${filled}, price = ${price} where id = ${t.id}`;
+  return { filled, price, changed };
+}
+
 /** Settle trader positions held to the end of their window. */
 async function settleTrades() {
   const sql = db();
@@ -1532,8 +1573,18 @@ async function settleTrades() {
       }
     }
     if (!won) continue;
+    let shares = Number(t.shares);
+    if (t.order_type === "limit" && t.mode === "live") {
+      shares = (await limitFill(t).catch(() => ({ filled: shares }))).filled;
+      t.price = (await sql`select price from fadebot_trades where id = ${t.id}`)[0]?.price ?? t.price;
+    }
+    if (t.order_type === "limit" && !(shares > 0)) {
+      await sql`update fadebot_trades set status = 'settled', result = 'unfilled', pnl = 0, closed_at = now()
+        where id = ${t.id} and status = 'open'`;
+      continue;
+    }
     const ok = won === t.side;
-    const p = Number(t.shares) * ((ok ? 1 : 0) - Number(t.price)) - Number(t.fees ?? 0);
+    const p = shares * ((ok ? 1 : 0) - Number(t.price)) - Number(t.fees ?? 0);
     await sql`update fadebot_trades set status = 'settled', result = ${ok ? "win" : "loss"}, pnl = ${p}, closed_at = now()
       where id = ${t.id} and status = 'open'`;
   }
@@ -1550,10 +1601,14 @@ async function traderRun(start: number, minute: number, until: number) {
     sell: boolean;
     invert: boolean;
     allIn: boolean;
+    order: "market" | "limit";
+    limitPrice: number;
+    limitShares: number;
   } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
   const mode = live ? "live" : "dry";
   const from = start + minute * 60;
+  const end = start + TF;
   // Start recording at once (and save the minute as soon as it ends, not after the last Jev answer: the next run
   // reads this minute as its candle open).
   let forming: Candle | null = null;
@@ -1612,6 +1667,7 @@ async function traderRun(start: number, minute: number, until: number) {
   })();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let asks = 0;
+  let limitLogged = false;
   const logAsk = (row: Record<string, unknown>) =>
     sql`insert into fadebot_asks ${sql({ window_start: start, ...row })}`.catch((e) => console.error("ask log:", e.message));
 
@@ -1642,6 +1698,24 @@ async function traderRun(start: number, minute: number, until: number) {
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
+        if (pos && pos.order_type === "limit" && Number(pos.shares) < Number(pos.limit_shares) - 1e-9) {
+          // A limit order is waiting: keep checking how much has filled (no more Jev questions this window).
+          const f = await limitFill(pos, q);
+          if (f.changed || !limitLogged) {
+            limitLogged = true;
+            await logAsk({
+              ...row,
+              up_cost: q.upCost,
+              down_cost: q.downCost,
+              pos_side: pos.side,
+              did: `limit ${Number(pos.limit_shares)} ${pos.side} @ ${Math.round(Number(pos.limit_price) * 100)}¢: ${
+                f.filled
+              } filled`,
+            });
+          }
+          await sleep(2000);
+          continue;
+        }
         if (pos && !tc.sell) {
           // Holding to settlement: nothing more to decide in this window (one position at a time).
           row = {
@@ -1758,12 +1832,19 @@ async function traderRun(start: number, minute: number, until: number) {
           ms: Date.now() - t0,
         };
         const nowEl = Date.now() / 1000 - start;
+        // Limit mode: the edge is measured against what the order would pay (the limit, or less if already cheaper).
+        const lim = tc.order === "limit"
+          ? {
+            upCost: q.upCost === null ? tc.limitPrice : Math.min(q.upCost, tc.limitPrice),
+            downCost: q.downCost === null ? tc.limitPrice : Math.min(q.downCost, tc.limitPrice),
+          }
+          : q;
         const d = traderDecision(
           { action: jev.action, pUp: jev.pUp },
-          q,
+          lim,
           pos ? { side: pos.side } : null,
           { secondsLeft: TF - nowEl, entries: nRows[0].n, lossLimitHit: today <= -tc.dailyLoss },
-          tc,
+          tc.order === "limit" ? { ...tc, minBet: 0 } : tc,
         );
         // Runs overlap for a moment at each minute: never buy if another run just opened a position.
         const raced = "buy" in d &&
@@ -1776,11 +1857,29 @@ async function traderRun(start: number, minute: number, until: number) {
           const cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           const pSide = tc.invert ? 1 - d.p : d.p;
-          if (tc.allIn) {
+          if (tc.allIn && tc.order !== "limit") {
             const bal = await traderBalance(live, tc.bankroll);
             const all = Math.floor(bal * 0.97 * 100) / 100;
             if (!(all >= 1)) throw new Error(`all-in: balance $${bal.toFixed(2)} is too small to buy`);
             d.stake = all;
+          }
+          if (tc.order === "limit") {
+            // 15 shares at 33¢ (or what's set), good until the window ends; filled shares are tracked as they come.
+            const lp = tc.limitPrice;
+            const n = tc.limitShares;
+            const orderId = live ? await limitBuy(market, side, lp, n, end) : null;
+            const sideNow = side === "up" ? q.upCost : q.downCost;
+            const instant = !live && sideNow !== null && sideNow <= lp; // test mode: fills at once if already cheaper
+            await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+                opened_sec, p_side, order_id, open_ref, reason, order_type, limit_price, limit_shares)
+              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${lp * n}, ${instant ? n : 0},
+                ${instant ? sideNow : lp}, 0, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
+                ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} costs ${
+                  sideNow === null ? "—" : `${Math.round(sideNow * 100)}¢`
+                } → limit ${n} @ ${Math.round(lp * 100)}¢ at ${Math.round(nowEl)} s`}, 'limit', ${lp}, ${n})`;
+            row.did = `limit ${n} ${side} @ ${Math.round(lp * 100)}¢${instant ? " (filled)" : ""}`;
+            await logAsk(row);
+            continue;
           }
           let shares = d.stake / cost;
           let price = cost;
