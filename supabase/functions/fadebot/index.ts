@@ -174,7 +174,16 @@ const settings = () => ({
     // How it buys: "limit" (default, Nov 8) = a limit order for FADEBOT_TRADER_LIMIT_SHARES (15) at
     // FADEBOT_TRADER_LIMIT_PRICE (33¢) on the picked side, good until the window ends (the edge is measured against
     // what it would pay: 33¢, or less if the side is already cheaper); FADEBOT_TRADER_ORDER=market = a market buy.
-    order: (env("FADEBOT_TRADER_ORDER") === "market" ? "market" : "limit") as "market" | "limit",
+    // "flip" (default, Nov 9): once Jev's pick triggers, buy nothing yet — wait for the OTHER side to reach
+    // FADEBOT_TRADER_FLIP_AT (60¢), then market-buy FADEBOT_TRADER_FLIP_BET dollars ($5) of that other side, as long as
+    // it costs no more than FADEBOT_TRADER_FLIP_MAX (75¢); held to settlement.
+    order: (["market", "limit"].includes(env("FADEBOT_TRADER_ORDER")) ? env("FADEBOT_TRADER_ORDER") : "flip") as
+      | "market"
+      | "limit"
+      | "flip",
+    flipAt: Number(env("FADEBOT_TRADER_FLIP_AT") || 60) / 100,
+    flipMax: Number(env("FADEBOT_TRADER_FLIP_MAX") || 75) / 100,
+    flipBet: Number(env("FADEBOT_TRADER_FLIP_BET") || 5),
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
@@ -1563,6 +1572,9 @@ async function limitFill(t: any, q?: { upCost: number | null; downCost: number |
 async function settleTrades() {
   const sql = db();
   const now = Math.floor(Date.now() / 1000);
+  // Flip watches whose window ended without the other side reaching its price: nothing was bought.
+  await sql`update fadebot_trades set status = 'settled', result = 'not triggered', pnl = 0, closed_at = now()
+    where status = 'watching' and window_start + ${TF} <= ${now}`;
   const open = await sql`select * from fadebot_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
   for (const t of open) {
     const end = Number(t.window_start) + TF;
@@ -1604,7 +1616,10 @@ async function traderRun(start: number, minute: number, until: number) {
     sell: boolean;
     invert: boolean;
     allIn: boolean;
-    order: "market" | "limit";
+    order: "market" | "limit" | "flip";
+    flipAt: number;
+    flipMax: number;
+    flipBet: number;
     limitPrice: number;
     limitShares: number;
     cheapBet: number;
@@ -1695,13 +1710,50 @@ async function traderRun(start: number, minute: number, until: number) {
       try {
         const [q, posRows, nRows, today] = await Promise.all([
           quotes(market),
-          sql`select * from fadebot_trades where window_start = ${start} and status = 'open'
+          sql`select * from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader' order by id desc limit 1`,
           sql`select count(*)::int as n from fadebot_trades where window_start = ${start}
             and coalesce(strategy, 'trader') = 'trader'`,
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
+        if (pos && pos.status === "watching") {
+          // Flip: Jev's pick triggered; buy the other side once it costs FADEBOT_TRADER_FLIP_AT or more.
+          const other = pos.side as Side;
+          const c = other === "up" ? q.upCost : q.downCost;
+          const left = TF - (Date.now() / 1000 - start);
+          const watchNote = `waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢ (now ${
+            c === null ? "—" : `${Math.round(c * 100)}¢`
+          })`;
+          if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
+            let shares = tc.flipBet / c;
+            let price = c;
+            let fees = 0;
+            let orderId: string | null = null;
+            if (live) {
+              const f = await marketBuy(market, other, tc.flipBet);
+              if (!f.shares) throw new Error("market buy filled nothing");
+              shares = f.shares;
+              price = f.price;
+              fees = f.fees;
+              orderId = f.id;
+            }
+            await sql`update fadebot_trades set status = 'open', stake = ${tc.flipBet}, shares = ${shares}, price = ${price},
+                fees = ${fees}, order_id = ${orderId}, opened_sec = ${Date.now() / 1000 - start},
+                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought $${tc.flipBet}`}
+              where id = ${pos.id} and status = 'watching'`;
+            await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
+              did: `${other} reached ${Math.round(c * 100)}¢: bought $${tc.flipBet} @ ${price.toFixed(2)}` });
+            continue;
+          }
+          if (!limitLogged) {
+            limitLogged = true;
+            await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
+              did: c !== null && c > tc.flipMax ? `${watchNote}; over ${Math.round(tc.flipMax * 100)}¢, skipped` : watchNote });
+          }
+          await sleep(1000);
+          continue;
+        }
         if (pos && pos.order_type === "limit" && Number(pos.shares) < Number(pos.limit_shares) - 1e-9) {
           // A limit order is waiting: keep checking how much has filled (no more Jev questions this window).
           const f = await limitFill(pos, q);
@@ -1852,7 +1904,7 @@ async function traderRun(start: number, minute: number, until: number) {
         );
         // Runs overlap for a moment at each minute: never buy if another run just opened a position.
         const raced = "buy" in d &&
-          (await sql`select 1 from fadebot_trades where window_start = ${start} and status = 'open'
+          (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         if (raced) row.did = "another run just bought: skipped";
         else if ("buy" in d) {
@@ -1861,11 +1913,24 @@ async function traderRun(start: number, minute: number, until: number) {
           const cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           const pSide = tc.invert ? 1 - d.p : d.p;
-          if (tc.allIn && tc.order !== "limit") {
+          if (tc.allIn && tc.order === "market") {
             const bal = await traderBalance(live, tc.bankroll);
             const all = Math.floor(bal * 0.97 * 100) / 100;
             if (!(all >= 1)) throw new Error(`all-in: balance $${bal.toFixed(2)} is too small to buy`);
             d.stake = all;
+          }
+          if (tc.order === "flip") {
+            const other: Side = side === "up" ? "down" : "up";
+            await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+                opened_sec, p_side, open_ref, reason, order_type, status)
+              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl}, ${1 - pSide},
+                ${before?.avg ?? null},
+                ${`Jev ${Math.round(d.p * 100)}% for ${side} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
+                  Math.round(tc.flipAt * 100)
+                }¢`}, 'flip', 'watching')`;
+            row.did = `Jev picked ${side}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢`;
+            await logAsk(row);
+            continue;
           }
           if (tc.order === "limit") {
             // 15 shares at 33¢ (or what's set), good until the window ends; filled shares are tracked as they come.

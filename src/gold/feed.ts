@@ -790,7 +790,10 @@ export interface FadeBotStatus {
       banHi?: number;
       allIn?: boolean;
       trigger?: "choice" | "probability";
-      order?: "market" | "limit";
+      order?: "market" | "limit" | "flip";
+      flipAt?: number;
+      flipMax?: number;
+      flipBet?: number;
       limitPrice?: number;
       limitShares?: number;
       cheapBet?: number;
