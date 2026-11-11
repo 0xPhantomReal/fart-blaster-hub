@@ -794,6 +794,7 @@ export interface FadeBotStatus {
       flipAt?: number;
       flipMax?: number;
       flipBet?: number;
+      betPct?: number;
       limitPrice?: number;
       limitShares?: number;
       cheapBet?: number;

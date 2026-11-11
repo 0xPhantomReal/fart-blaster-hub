@@ -184,6 +184,9 @@ const settings = () => ({
     flipAt: Number(env("FADEBOT_TRADER_FLIP_AT") || 60) / 100,
     flipMax: Number(env("FADEBOT_TRADER_FLIP_MAX") || 75) / 100,
     flipBet: Number(env("FADEBOT_TRADER_FLIP_BET") || 5),
+    // Flip buys sized as a % of the balance (live: Polymarket buying power; test: bankroll + test P&L), default 10%;
+    // FADEBOT_TRADER_BET_PCT=0 goes back to the fixed FADEBOT_TRADER_FLIP_BET. Never under $1.
+    betPct: env("FADEBOT_TRADER_BET_PCT") === "" ? 10 : Number(env("FADEBOT_TRADER_BET_PCT")) || 0,
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
@@ -1620,6 +1623,7 @@ async function traderRun(start: number, minute: number, until: number) {
     flipAt: number;
     flipMax: number;
     flipBet: number;
+    betPct: number;
     limitPrice: number;
     limitShares: number;
     cheapBet: number;
@@ -1726,24 +1730,32 @@ async function traderRun(start: number, minute: number, until: number) {
             c === null ? "—" : `${Math.round(c * 100)}¢`
           })`;
           if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
-            let shares = tc.flipBet / c;
+            // Size: % of the balance (default 10%), or the fixed flip bet.
+            let bet = tc.flipBet;
+            let sizeNote = "";
+            if (tc.betPct > 0) {
+              const bal = await traderBalance(live, tc.bankroll);
+              bet = Math.max(1, Math.floor(bal * (tc.betPct / 100) * 100) / 100);
+              sizeNote = ` (${tc.betPct}% of $${bal.toFixed(2)})`;
+            }
+            let shares = bet / c;
             let price = c;
             let fees = 0;
             let orderId: string | null = null;
             if (live) {
-              const f = await marketBuy(market, other, tc.flipBet);
+              const f = await marketBuy(market, other, bet);
               if (!f.shares) throw new Error("market buy filled nothing");
               shares = f.shares;
               price = f.price;
               fees = f.fees;
               orderId = f.id;
             }
-            await sql`update fadebot_trades set status = 'open', stake = ${tc.flipBet}, shares = ${shares}, price = ${price},
+            await sql`update fadebot_trades set status = 'open', stake = ${bet}, shares = ${shares}, price = ${price},
                 fees = ${fees}, order_id = ${orderId}, opened_sec = ${Date.now() / 1000 - start},
-                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought $${tc.flipBet}`}
+                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought $${bet.toFixed(2)}${sizeNote}`}
               where id = ${pos.id} and status = 'watching'`;
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
-              did: `${other} reached ${Math.round(c * 100)}¢: bought $${tc.flipBet} @ ${price.toFixed(2)}` });
+              did: `${other} reached ${Math.round(c * 100)}¢: bought $${bet.toFixed(2)}${sizeNote} @ ${price.toFixed(2)}` });
             continue;
           }
           if (!limitLogged) {
