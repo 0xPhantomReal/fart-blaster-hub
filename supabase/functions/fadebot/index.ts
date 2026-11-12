@@ -188,8 +188,8 @@ const settings = () => ({
     // Flip buys sized as a % of the balance (live: Polymarket buying power; test: bankroll + test P&L), default 10%;
     // FADEBOT_TRADER_BET_PCT=0 goes back to the fixed FADEBOT_TRADER_FLIP_BET. Never under $1.
     betPct: env("FADEBOT_TRADER_BET_PCT") === "" ? 10 : Number(env("FADEBOT_TRADER_BET_PCT")) || 0,
-    // Trend-aware flip (Nov 12): in a downtrend, Up reaching 60¢ is a bounce → buy Down instead; in an uptrend, Down
-    // reaching 60¢ → buy Up. FADEBOT_TRADER_TREND=off = the flip exactly as before.
+    // Trend-aware flip (Nov 12): in a downtrend, Up reaching 60¢ is a bounce → don't buy it; wait for Down to reach
+    // 60¢ and buy Down (mirror in an uptrend). FADEBOT_TRADER_TREND=off = the flip exactly as before.
     trend: env("FADEBOT_TRADER_TREND") !== "off",
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
@@ -1735,6 +1735,28 @@ async function traderRun(start: number, minute: number, until: number) {
             c === null ? "—" : `${Math.round(c * 100)}¢`
           })`;
           if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
+            // Trend-aware: if this side reaching 60¢ is a bounce against the trend (Up in a downtrend, Down in an
+            // uptrend), don't buy it — switch the watch to the trend's side and buy that once IT reaches 60¢.
+            if (tc.trend && forming) {
+              const elNow = Date.now() / 1000 - start;
+              const coreNow = lightspeedCore(closed, start, TF, elNow, forming);
+              const atrNow = (coreNow?.volatility as { atr_dollars?: number } | undefined)?.atr_dollars ?? null;
+              const tvNow = runTvIndicator(closed.slice(-3000), forming).live;
+              const tr = trendSummary(closed, forming.close, tvNow?.emaFast ?? null, tvNow?.emaSlow ?? null, atrNow);
+              const want = trendFlipSide(other, tr.label);
+              if (want !== other) {
+                await sql`update fadebot_trades set side = ${want}, reason = ${`${pos.reason}; ${tr.label}: ${other} bounced to ${
+                  Math.round(c * 100)
+                }¢ → now waiting for ${want} to reach ${Math.round(tc.flipAt * 100)}¢`} where id = ${pos.id} and status = 'watching'`;
+                await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: want,
+                  did: `${tr.label}: ${other} bounced to ${Math.round(c * 100)}¢ — waiting for ${want} to reach ${
+                    Math.round(tc.flipAt * 100)
+                  }¢ instead` });
+                limitLogged = true;
+                await sleep(1000);
+                continue;
+              }
+            }
             // Size: % of the balance (default 10%), or the fixed flip bet.
             let bet = tc.flipBet;
             let sizeNote = "";
@@ -1743,20 +1765,8 @@ async function traderRun(start: number, minute: number, until: number) {
               bet = Math.max(1, Math.floor(bal * (tc.betPct / 100) * 100) / 100);
               sizeNote = ` (${tc.betPct}% of $${bal.toFixed(2)})`;
             }
-            // Trend-aware: a trigger against the trend (a bounce) is bought on the trend's side instead.
-            let buySide: Side = other;
-            let trendNote = "";
-            if (tc.trend && forming) {
-              const elNow = Date.now() / 1000 - start;
-              const coreNow = lightspeedCore(closed, start, TF, elNow, forming);
-              const atrNow = (coreNow?.volatility as { atr_dollars?: number } | undefined)?.atr_dollars ?? null;
-              const tvNow = runTvIndicator(closed.slice(-3000), forming).live;
-              const tr = trendSummary(closed, forming.close, tvNow?.emaFast ?? null, tvNow?.emaSlow ?? null, atrNow);
-              buySide = trendFlipSide(other, tr.label);
-              trendNote = buySide !== other ? `${tr.label}: ${other} bounced to ${Math.round(c * 100)}¢ → bought ${buySide}` : tr.label;
-            }
-            const cost = buySide === other ? c : buySide === "up" ? q.upCost : q.downCost;
-            if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${buySide}`);
+            const buySide: Side = other;
+            const cost = c;
             let shares = bet / cost;
             let price = cost;
             let fees = 0;
@@ -1771,14 +1781,10 @@ async function traderRun(start: number, minute: number, until: number) {
             }
             await sql`update fadebot_trades set status = 'open', side = ${buySide}, stake = ${bet}, shares = ${shares},
                 price = ${price}, fees = ${fees}, order_id = ${orderId}, opened_sec = ${Date.now() / 1000 - start},
-                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought ${buySide} $${bet.toFixed(2)}${sizeNote}${
-                  trendNote ? ` [${trendNote}]` : ""
-                }`}
+                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought ${buySide} $${bet.toFixed(2)}${sizeNote}`}
               where id = ${pos.id} and status = 'watching'`;
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: buySide,
-              did: `${other} reached ${Math.round(c * 100)}¢: bought ${buySide} $${bet.toFixed(2)}${sizeNote} @ ${price.toFixed(2)}${
-                trendNote ? ` [${trendNote}]` : ""
-              }` });
+              did: `${other} reached ${Math.round(c * 100)}¢: bought ${buySide} $${bet.toFixed(2)}${sizeNote} @ ${price.toFixed(2)}` });
             continue;
           }
           if (!limitLogged) {
