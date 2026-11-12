@@ -188,8 +188,9 @@ const settings = () => ({
     // Flip buys sized as a % of the balance (live: Polymarket buying power; test: bankroll + test P&L), default 10%;
     // FADEBOT_TRADER_BET_PCT=0 goes back to the fixed FADEBOT_TRADER_FLIP_BET. Never under $1.
     betPct: env("FADEBOT_TRADER_BET_PCT") === "" ? 10 : Number(env("FADEBOT_TRADER_BET_PCT")) || 0,
-    // Trend-aware flip (Nov 12): in a downtrend, Up reaching 60¢ is a bounce → don't buy it; wait for Down to reach
-    // 60¢ and buy Down (mirror in an uptrend). FADEBOT_TRADER_TREND=off = the flip exactly as before.
+    // Trend-aware flip (Nov 12): if, when Jev's call comes in, the side the flip would buy is already at 60¢+ and it's
+    // against the trend (Up already high in a downtrend), watch the trend's side instead and buy it once it reaches
+    // 60¢ (mirror in an uptrend). A later cross of 60¢ buys as before. FADEBOT_TRADER_TREND=off = the old flip.
     trend: env("FADEBOT_TRADER_TREND") !== "off",
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
@@ -1735,28 +1736,6 @@ async function traderRun(start: number, minute: number, until: number) {
             c === null ? "—" : `${Math.round(c * 100)}¢`
           })`;
           if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
-            // Trend-aware: if this side reaching 60¢ is a bounce against the trend (Up in a downtrend, Down in an
-            // uptrend), don't buy it — switch the watch to the trend's side and buy that once IT reaches 60¢.
-            if (tc.trend && forming) {
-              const elNow = Date.now() / 1000 - start;
-              const coreNow = lightspeedCore(closed, start, TF, elNow, forming);
-              const atrNow = (coreNow?.volatility as { atr_dollars?: number } | undefined)?.atr_dollars ?? null;
-              const tvNow = runTvIndicator(closed.slice(-3000), forming).live;
-              const tr = trendSummary(closed, forming.close, tvNow?.emaFast ?? null, tvNow?.emaSlow ?? null, atrNow);
-              const want = trendFlipSide(other, tr.label);
-              if (want !== other) {
-                await sql`update fadebot_trades set side = ${want}, reason = ${`${pos.reason}; ${tr.label}: ${other} bounced to ${
-                  Math.round(c * 100)
-                }¢ → now waiting for ${want} to reach ${Math.round(tc.flipAt * 100)}¢`} where id = ${pos.id} and status = 'watching'`;
-                await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: want,
-                  did: `${tr.label}: ${other} bounced to ${Math.round(c * 100)}¢ — waiting for ${want} to reach ${
-                    Math.round(tc.flipAt * 100)
-                  }¢ instead` });
-                limitLogged = true;
-                await sleep(1000);
-                continue;
-              }
-            }
             // Size: % of the balance (default 10%), or the fixed flip bet.
             let bet = tc.flipBet;
             let sizeNote = "";
@@ -1961,15 +1940,28 @@ async function traderRun(start: number, minute: number, until: number) {
             d.stake = all;
           }
           if (tc.order === "flip") {
-            const other: Side = side === "up" ? "down" : "up";
+            let other: Side = side === "up" ? "down" : "up";
+            let note = "";
+            // Trend-aware: if the side the flip would buy is ALREADY at 60¢+ when Jev's call comes in, and it's against
+            // the trend (Up already high in a downtrend, Down in an uptrend), don't buy it straight away — watch the
+            // trend's side instead and buy that once it reaches 60¢. A later cross of 60¢ is unchanged.
+            const otherNow = other === "up" ? q.upCost : q.downCost;
+            if (tc.trend && otherNow !== null && otherNow >= tc.flipAt - 1e-9) {
+              const tr = trend; // the same trend picture Jev was just given
+              const want = trendFlipSide(other, tr.label);
+              if (want !== other) {
+                note = `; ${tr.label} and ${other} already ${Math.round(otherNow * 100)}¢ → waiting for ${want} instead`;
+                other = want;
+              }
+            }
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
                 opened_sec, p_side, open_ref, reason, order_type, status)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl}, ${1 - pSide},
                 ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${side} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
-                }¢`}, 'flip', 'watching')`;
-            row.did = `Jev picked ${side}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢`;
+                }¢${note}`}, 'flip', 'watching')`;
+            row.did = `Jev picked ${side}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
             await logAsk(row);
             continue;
           }

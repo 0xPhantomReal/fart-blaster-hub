@@ -379,9 +379,9 @@ export function trendSummary(closed: Ohlc[], price: number, emaFast: number | nu
 }
 
 /**
- * Trend-aware flip: which side the flip should be on when its trigger fires on `trigger` (the side that just reached
- * 60¢). In a downtrend, Up reaching 60¢ is a bounce: the watch moves to Down (bought once Down reaches 60¢); in an
- * uptrend, the mirror. With the trend, or with no clear trend, the trigger side as before.
+ * Trend-aware flip: which side to watch when the flip's side (`trigger`) is already at 60¢+ as Jev's call comes in.
+ * In a downtrend an already-high Up is against the trend: watch Down instead (bought once Down reaches 60¢); in an
+ * uptrend, the mirror. With the trend, or with no clear trend, the flip's side as before.
  */
 export function trendFlipSide(trigger: Side, trendLabel: string | null | undefined): Side {
   const label = trendLabel ?? "";
