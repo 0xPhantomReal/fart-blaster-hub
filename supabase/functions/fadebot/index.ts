@@ -1958,10 +1958,10 @@ async function traderRun(start: number, minute: number, until: number) {
                 opened_sec, p_side, open_ref, reason, order_type, status)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl}, ${1 - pSide},
                 ${before?.avg ?? null},
-                ${`Jev ${Math.round(d.p * 100)}% for ${side} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
+                ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
                 }¢${note}`}, 'flip', 'watching')`;
-            row.did = `Jev picked ${side}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
+            row.did = `Jev picked ${d.buy}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
             await logAsk(row);
             continue;
           }
