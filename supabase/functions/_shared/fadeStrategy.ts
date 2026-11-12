@@ -377,3 +377,15 @@ export function trendSummary(closed: Ohlc[], price: number, emaFast: number | nu
     move_over_last_12_candles_in_atr: atr ? r2(net12 / atr) : null,
   };
 }
+
+/**
+ * Trend-aware flip: which side to buy when the flip trigger fires on `trigger` (the side that just reached 60¢).
+ * In a downtrend, a bounce that lifts Up to 60¢ is bought as Down (fade the bounce, with the trend); in an uptrend,
+ * a dip that lifts Down to 60¢ is bought as Up. With the trend, or with no clear trend, the trigger side as before.
+ */
+export function trendFlipSide(trigger: Side, trendLabel: string | null | undefined): Side {
+  const label = trendLabel ?? "";
+  if (/downtrend/.test(label) && trigger === "up") return "down";
+  if (/uptrend/.test(label) && trigger === "down") return "up";
+  return trigger;
+}

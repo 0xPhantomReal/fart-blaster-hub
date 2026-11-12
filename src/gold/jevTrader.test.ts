@@ -67,3 +67,16 @@ describe("probability trigger", () => {
     expect(traderDecision({ action: "buy_up", pUp: 0.65 }, { upCost: 0.5, downCost: 0.52 }, null, ctx, P)).toHaveProperty("none");
   });
 });
+
+import { trendFlipSide } from "../../supabase/functions/_shared/fadeStrategy";
+describe("trend-aware flip", () => {
+  it("fades bounces against the trend, keeps with-trend and no-trend triggers", () => {
+    expect(trendFlipSide("up", "strong downtrend")).toBe("down");
+    expect(trendFlipSide("up", "downtrend")).toBe("down");
+    expect(trendFlipSide("down", "downtrend")).toBe("down");
+    expect(trendFlipSide("down", "uptrend")).toBe("up");
+    expect(trendFlipSide("up", "strong uptrend")).toBe("up");
+    expect(trendFlipSide("up", "no clear trend")).toBe("up");
+    expect(trendFlipSide("down", null)).toBe("down");
+  });
+});
