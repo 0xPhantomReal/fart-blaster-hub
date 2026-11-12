@@ -487,6 +487,7 @@ function TraderPanel({
   const last = t?.asks[0];
   return (
     <div className={`mb-2 space-y-2 text-xs ${MUTED}`}>
+      <ModeBox t={t} cfg={cfg} />
       <p>
         <b className="text-[#c9d1d9]">Jev trader</b>{" "}
         {t?.live ? (
@@ -762,6 +763,100 @@ function LongshotPanel({
           ) : null}
         </>
       )}
+    </div>
+  );
+}
+
+/** The bot's current mode at a glance: live/test, the buy mode, and what it chose for the latest window. */
+function ModeBox({
+  t,
+  cfg,
+}: {
+  t: TraderStatus | null;
+  cfg: FadeBotStatus["settings"];
+}) {
+  const tc = cfg.trader;
+  const order = tc?.order ?? "flip";
+  const mode =
+    order === "market"
+      ? "Market buys on Jev's pick"
+      : order === "limit"
+        ? `Limit ${tc?.limitShares ?? 15} @ ${Math.round((tc?.limitPrice ?? 0.33) * 100)}¢ on Jev's pick`
+        : tc?.auto !== false
+          ? "Auto — strong trend: straight with Jev · otherwise: flip"
+          : tc?.invert
+            ? "Straight with Jev (flip mechanics)"
+            : "Flip — against Jev";
+  // The latest window's choice, from its trade note ("[auto: strong downtrend → straight with Jev]").
+  const latest = t?.trades[0];
+  const auto = latest?.reason?.match(/\[auto: ([^\]]+)\]/)?.[1] ?? null;
+  const watching =
+    latest && (latest.status === "watching" || latest.status === "open");
+  const chip = (on: boolean | undefined, label: string) => (
+    <span
+      className={`rounded px-1.5 py-0.5 ${on ? "bg-[#1f6feb33] text-[#58a6ff]" : "bg-[#30363d] text-[#8b949e]"}`}
+    >
+      {label}
+    </span>
+  );
+  return (
+    <div className="rounded border border-[#30363d] bg-[#0d1117] p-2">
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+        <span
+          className={`rounded px-1.5 py-0.5 font-semibold ${t?.live ? "bg-[#ef535033] text-[#ef5350]" : "bg-[#30363d] text-[#c9d1d9]"}`}
+        >
+          {t?.live ? "LIVE" : "TEST"}
+        </span>
+        <span className="font-semibold text-[#c9d1d9]">{mode}</span>
+      </div>
+      <div className="mb-1 flex flex-wrap gap-1.5">
+        {order === "flip"
+          ? chip(
+              tc?.auto !== false,
+              `Auto ${tc?.auto !== false ? "on" : "off"}`,
+            )
+          : null}
+        {order === "flip"
+          ? chip(
+              tc?.trend !== false,
+              `Trend rule ${tc?.trend !== false ? "on" : "off"}`,
+            )
+          : null}
+        {order === "flip" && tc?.auto === false
+          ? chip(!!tc?.invert, `Invert ${tc?.invert ? "on" : "off"}`)
+          : null}
+        {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
+        {order === "flip"
+          ? chip(
+              true,
+              tc?.betPct
+                ? `${tc.betPct}% of balance`
+                : `$${tc?.flipBet ?? 5} per buy`,
+            )
+          : null}
+        {order === "flip"
+          ? chip(
+              true,
+              `Buy at ${Math.round((tc?.flipAt ?? 0.6) * 100)}–${Math.round((tc?.flipMax ?? 0.75) * 100)}¢`,
+            )
+          : null}
+        {chip(true, `Daily loss $${tc?.dailyLoss ?? 25}`)}
+      </div>
+      {latest ? (
+        <div>
+          {watching ? "Now" : "Last window"} ({hhmm(latest.window_start)}):{" "}
+          <span className="text-[#c9d1d9]">
+            {latest.status === "watching"
+              ? `waiting for ${latest.side === "up" ? "Up" : "Down"} to reach ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢`
+              : latest.status === "open"
+                ? `holding ${latest.side === "up" ? "Up" : "Down"}`
+                : latest.result === "not triggered"
+                  ? `no buy (${latest.side === "up" ? "Up" : "Down"} never reached ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢)`
+                  : `${latest.side === "up" ? "Up" : "Down"} — ${latest.result ?? latest.status}`}
+          </span>
+          {auto ? <span> · {auto}</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

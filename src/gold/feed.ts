@@ -798,6 +798,8 @@ export interface FadeBotStatus {
       limitPrice?: number;
       limitShares?: number;
       cheapBet?: number;
+      trend?: boolean;
+      auto?: boolean;
     };
     lsFade?: boolean;
     strongBet?: number;
