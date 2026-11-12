@@ -828,6 +828,7 @@ function ModeBox({
         {order === "flip" && tc?.auto === false
           ? chip(!!tc?.invert, `Invert ${tc?.invert ? "on" : "off"}`)
           : null}
+        {chip(tc?.feed === "ws", `Prices: ${tc?.feed === "ws" ? "websocket" : "polling"}`)}
         {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
         {order === "flip"
           ? chip(

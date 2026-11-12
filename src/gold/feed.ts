@@ -800,6 +800,7 @@ export interface FadeBotStatus {
       cheapBet?: number;
       trend?: boolean;
       auto?: boolean;
+      feed?: string;
     };
     lsFade?: boolean;
     strongBet?: number;

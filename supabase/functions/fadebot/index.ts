@@ -52,6 +52,7 @@
 
 import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
+import { PriceStream, type MarketsSocket } from "../_shared/priceStream.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
@@ -196,6 +197,12 @@ const settings = () => ({
     // Auto mode (Nov 12): each window, in a STRONG downtrend/uptrend go straight with Jev's pick; otherwise flip
     // against it. Overrides FADEBOT_TRADER_INVERT. FADEBOT_TRADER_AUTO=off = flip (or INVERT) as set.
     auto: env("FADEBOT_TRADER_AUTO") !== "off",
+    // Price feed (Nov 12): "poll" (default) asks Polymarket's REST API for the price on every check; "ws" also opens
+    // Polymarket's markets websocket for the window's market and uses its pushed best bid/ask while it's fresh
+    // (FADEBOT_WS_MAX_AGE_SEC, default 3), falling back to the REST call otherwise. While watching for the flip price,
+    // "ws" wakes on each pushed price instead of sleeping a second. Set FADEBOT_PRICE_FEED=ws to try it.
+    feed: (env("FADEBOT_PRICE_FEED") || "poll").toLowerCase() === "ws" ? "ws" : "poll",
+    wsMaxAgeSec: Number(env("FADEBOT_WS_MAX_AGE_SEC") || 3),
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
@@ -662,12 +669,19 @@ const pxOf = (v: any): Px | undefined => {
 };
 /** Which source last gave prices (shown in the ask log when it isn't the BBO). */
 let lastQuoteVia = "";
+/** The window's live price stream, when FADEBOT_PRICE_FEED=ws (see PriceStream). */
+let stream: { s: PriceStream; maxAgeMs: number } | null = null;
 /**
  * Best bid/ask (YES side). Tries the BBO (prices nested under `marketData`), then the full book, then the market
  * record itself, since the BBO has answered "market not found" for these 5-minute markets.
  */
 async function bbo(slug: string): Promise<{ bestBid?: Px; bestAsk?: Px }> {
   const errs: string[] = [];
+  const pushed = stream && stream.s.slug === slug ? stream.s.fresh(stream.maxAgeMs) : null;
+  if (pushed && (pushed.bid !== null || pushed.ask !== null)) {
+    lastQuoteVia = "live stream";
+    return { bestBid: pxOf(pushed.bid ?? undefined), bestAsk: pxOf(pushed.ask ?? undefined) };
+  }
   const client = pm();
   try {
     // deno-lint-ignore no-explicit-any
@@ -1635,6 +1649,8 @@ async function traderRun(start: number, minute: number, until: number) {
     betPct: number;
     trend: boolean;
     auto: boolean;
+    feed: string;
+    wsMaxAgeSec: number;
     limitPrice: number;
     limitShares: number;
     cheapBet: number;
@@ -1704,6 +1720,18 @@ async function traderRun(start: number, minute: number, until: number) {
   let limitLogged = false;
   const logAsk = (row: Record<string, unknown>) =>
     sql`insert into fadebot_asks ${sql({ window_start: start, ...row })}`.catch((e) => console.error("ask log:", e.message));
+
+  // FADEBOT_PRICE_FEED=ws: open the market's live price stream for this run (REST stays the fallback).
+  let myStream: PriceStream | null = null;
+  if (tc.feed === "ws" && forming && market) {
+    myStream = new PriceStream(market.slug);
+    const ok = await myStream.open(() => pm().ws.markets() as unknown as MarketsSocket);
+    if (ok) stream = { s: myStream, maxAgeMs: tc.wsMaxAgeSec * 1000 };
+    else {
+      await logAsk({ at_sec: Date.now() / 1000 - start, did: `live price stream failed (${myStream.error}); polling instead` });
+      myStream = null;
+    }
+  }
 
   const asker = (async () => {
     if (!forming || !market) {
@@ -1776,7 +1804,9 @@ async function traderRun(start: number, minute: number, until: number) {
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
               did: c !== null && c > tc.flipMax ? `${watchNote}; over ${Math.round(tc.flipMax * 100)}¢, skipped` : watchNote });
           }
-          await sleep(1000);
+          // With the live stream, check again as soon as a new price is pushed (at most a second's wait).
+          if (stream?.s.connected) await stream.s.next(1000);
+          else await sleep(1000);
           continue;
         }
         if (pos && pos.order_type === "limit" && Number(pos.shares) < Number(pos.limit_shares) - 1e-9) {
@@ -2077,8 +2107,17 @@ async function traderRun(start: number, minute: number, until: number) {
     }
   })();
 
-  const [{ ticks, source }] = await Promise.all([recording, asker, liveLoop]);
-  return `trader minute ${minute + 1}: ${asks} Jev asks, ${ticks.length} ticks from ${source}`;
+  let rec!: Awaited<typeof recording>;
+  try {
+    [rec] = await Promise.all([recording, asker, liveLoop]);
+  } finally {
+    if (myStream) {
+      if (stream?.s === myStream) stream = null;
+      myStream.close();
+    }
+  }
+  const feedNote = myStream ? `, ${myStream.updates} pushed prices` : "";
+  return `trader minute ${minute + 1}: ${asks} Jev asks, ${rec.ticks.length} ticks from ${rec.source}${feedNote}`;
 }
 
 /** Does Jev beat Polymarket's price? Every ask's favoured side, bucketed by Jev's chance minus that side's cost. */
