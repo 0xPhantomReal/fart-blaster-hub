@@ -192,6 +192,9 @@ const settings = () => ({
     // against the trend (Up already high in a downtrend), watch the trend's side instead and buy it once it reaches
     // 60¢ (mirror in an uptrend). A later cross of 60¢ buys as before. FADEBOT_TRADER_TREND=off = the old flip.
     trend: env("FADEBOT_TRADER_TREND") !== "off",
+    // Auto mode (Nov 12): each window, in a STRONG downtrend/uptrend go straight with Jev's pick; otherwise flip
+    // against it. Overrides FADEBOT_TRADER_INVERT. FADEBOT_TRADER_AUTO=off = flip (or INVERT) as set.
+    auto: env("FADEBOT_TRADER_AUTO") !== "off",
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
@@ -1630,6 +1633,7 @@ async function traderRun(start: number, minute: number, until: number) {
     flipBet: number;
     betPct: number;
     trend: boolean;
+    auto: boolean;
     limitPrice: number;
     limitShares: number;
     cheapBet: number;
@@ -1942,6 +1946,12 @@ async function traderRun(start: number, minute: number, until: number) {
           if (tc.order === "flip") {
             let other: Side = side === "up" ? "down" : "up";
             let note = "";
+            // Auto: strong trend → straight with Jev (watch his pick); anything else → flip (watch the other side).
+            if (tc.auto) {
+              const strong = /^strong (down|up)trend$/.test(trend.label);
+              other = strong ? d.buy : d.buy === "up" ? "down" : "up";
+              note = strong ? ` [auto: ${trend.label} → straight with Jev]` : ` [auto: ${trend.label} → flip]`;
+            }
             // Trend-aware: if the side the flip would buy is ALREADY at 60¢+ when Jev's call comes in, and it's against
             // the trend (Up already high in a downtrend, Down in an uptrend), don't buy it straight away — watch the
             // trend's side instead and buy that once it reaches 60¢. A later cross of 60¢ is unchanged.
@@ -1950,13 +1960,14 @@ async function traderRun(start: number, minute: number, until: number) {
               const tr = trend; // the same trend picture Jev was just given
               const want = trendFlipSide(other, tr.label);
               if (want !== other) {
-                note = `; ${tr.label} and ${other} already ${Math.round(otherNow * 100)}¢ → waiting for ${want} instead`;
+                note += `; ${tr.label} and ${other} already ${Math.round(otherNow * 100)}¢ → waiting for ${want} instead`;
                 other = want;
               }
             }
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
                 opened_sec, p_side, open_ref, reason, order_type, status)
-              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl}, ${1 - pSide},
+              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl},
+                ${other === d.buy ? d.p : 1 - d.p},
                 ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
