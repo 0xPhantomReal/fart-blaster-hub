@@ -2475,11 +2475,190 @@ async function status() {
   };
 }
 
+// ── Report (read-only): real results from Polymarket's own account history ─
+
+/**
+ * Every BTC 5-minute trade and settlement on the account since `since` (unix seconds), straight from Polymarket's
+ * activity history (with the bot's key; nothing is traded), grouped per window: what was bought, what it cost, how it
+ * ended. Only BTC Up/Down 5-minute markets are included (no deposits or balances).
+ */
+async function report(since: number) {
+  // deno-lint-ignore no-explicit-any
+  const acts: any[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  let reachedStart = false;
+  while (pages < 60 && !reachedStart) {
+    // deno-lint-ignore no-explicit-any
+    const r: any = await pm().portfolio.activities({
+      limit: 100,
+      cursor,
+      types: ["ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION"],
+      sortOrder: "SORT_ORDER_DESCENDING",
+    });
+    pages += 1;
+    for (const a of r.activities ?? []) {
+      const t = Date.parse(a.trade?.createTime ?? a.trade?.updateTime ?? a.positionResolution?.updateTime ?? "") / 1000;
+      if (Number.isFinite(t) && t < since) {
+        reachedStart = true;
+        continue;
+      }
+      acts.push({ ...a, _t: t });
+    }
+    if (r.eof || !r.nextCursor) break;
+    cursor = r.nextCursor;
+  }
+  const isBtc5 = (slug: string | undefined) => !!slug && /btc-updown-5m/.test(slug);
+  const num = (v: unknown) => {
+    const x = v && typeof v === "object" ? (v as { value?: unknown }).value : v;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  };
+  // Window start from the slug (…-YYYY-MM-DD-HHMMz).
+  const windowOf = (slug: string) => {
+    const m = /(\d{4})-(\d\d)-(\d\d)-(\d\d)(\d\d)z/.exec(slug);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 1000 : null;
+  };
+  type W = {
+    slug: string;
+    window: number | null;
+    buys: number;
+    sells: number;
+    qty: number;
+    cost: number;
+    prices: number[];
+    resolved: boolean;
+    net_before: number | null;
+    realized: number | null;
+    side_from_api: string | null;
+  };
+  const by = new Map<string, W>();
+  const get = (slug: string): W => {
+    let w = by.get(slug);
+    if (!w) {
+      w = { slug, window: windowOf(slug), buys: 0, sells: 0, qty: 0, cost: 0, prices: [], resolved: false,
+        net_before: null, realized: null, side_from_api: null };
+      by.set(slug, w);
+    }
+    return w;
+  };
+  for (const a of acts) {
+    if (a.type === "ACTIVITY_TYPE_TRADE" && isBtc5(a.trade?.marketSlug)) {
+      const w = get(a.trade.marketSlug);
+      const q = num(a.trade.qty) ?? 0;
+      const px = num(a.trade.price);
+      const basis = num(a.trade.costBasis);
+      const pnl = num(a.trade.realizedPnl);
+      if (pnl !== null && pnl !== 0 && q < 0) w.sells += 1;
+      else w.buys += 1;
+      w.qty += Math.abs(q);
+      w.cost += basis !== null ? Math.abs(basis) : px !== null ? Math.abs(q) * px : 0;
+      if (px !== null) w.prices.push(px);
+    }
+    if (a.type === "ACTIVITY_TYPE_POSITION_RESOLUTION" && isBtc5(a.positionResolution?.marketSlug)) {
+      const pr = a.positionResolution;
+      const w = get(pr.marketSlug);
+      w.resolved = true;
+      w.net_before = num(pr.beforePosition?.netPosition);
+      const rb = num(pr.beforePosition?.realized) ?? 0;
+      const ra = num(pr.afterPosition?.realized);
+      w.realized = ra === null ? null : ra - rb;
+      w.side_from_api = pr.side ?? null;
+    }
+  }
+  // The bot's own record of which side each window bought (Polymarket's history doesn't always say Up/Down).
+  const slugs = [...by.keys()];
+  const mine = slugs.length
+    ? await db()`select market_slug, side, mode, count(*)::int as n from fadebot_trades
+        where market_slug = any(${slugs}) group by market_slug, side, mode`.catch(() => [])
+    : [];
+  const sideOf = new Map(mine.map((r) => [r.market_slug, r.side]));
+  const windows = [...by.values()]
+    .sort((a, b) => (b.window ?? 0) - (a.window ?? 0))
+    .map((w) => {
+      const pnl = w.realized !== null ? w.realized : null;
+      // Once settled, the cost follows from the P&L exactly (a win pays $1 a share): this doesn't depend on whether
+      // Polymarket reports trade prices as YES or NO prices.
+      if (w.resolved && pnl !== null && w.qty > 0) w.cost = pnl > 0 ? w.qty - pnl : -pnl;
+      return {
+        window: w.window ? new Date(w.window * 1000).toISOString() : w.slug,
+        side: sideOf.get(w.slug) ?? (w.net_before === null ? null : w.net_before > 0 ? "long (YES)" : "short (NO)"),
+        buys: w.buys,
+        shares: Number(w.qty.toFixed(3)),
+        cost: Number(w.cost.toFixed(2)),
+        avg_price: w.qty ? Number((w.cost / w.qty).toFixed(3)) : null,
+        pnl: pnl === null ? null : Number(pnl.toFixed(2)),
+        result: !w.resolved ? "open / not settled" : pnl === null ? "settled (P&L unknown)" : pnl > 0 ? "win" : pnl < 0 ? "loss" : "even",
+      };
+    });
+  const done = windows.filter((w) => w.result === "win" || w.result === "loss" || w.result === "even");
+  const wins = done.filter((w) => w.result === "win").length;
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const bucket = (lo: number, hi: number) => {
+    const xs = done.filter((w) => w.avg_price !== null && w.avg_price >= lo && w.avg_price < hi);
+    const ww = xs.filter((w) => w.result === "win").length;
+    return {
+      prices: hi > 1 ? `${Math.round(lo * 100)}¢+` : `${Math.round(lo * 100)}–${Math.round(hi * 100)}¢`,
+      trades: xs.length,
+      win_pct: xs.length ? Number(((ww / xs.length) * 100).toFixed(1)) : null,
+      pnl: Number(sum(xs.map((w) => w.pnl ?? 0)).toFixed(2)),
+    };
+  };
+  const bySide = (side: string) => {
+    const xs = done.filter((w) => w.side === side);
+    return {
+      trades: xs.length,
+      win_pct: xs.length ? Number(((xs.filter((w) => w.result === "win").length / xs.length) * 100).toFixed(1)) : null,
+      pnl: Number(sum(xs.map((w) => w.pnl ?? 0)).toFixed(2)),
+    };
+  };
+  return {
+    since: new Date(since * 1000).toISOString(),
+    pages_read: pages,
+    reached_since: reachedStart,
+    summary: {
+      settled_trades: done.length,
+      wins,
+      losses: done.filter((w) => w.result === "loss").length,
+      win_pct: done.length ? Number(((wins / done.length) * 100).toFixed(1)) : null,
+      total_pnl: Number(sum(done.map((w) => w.pnl ?? 0)).toFixed(2)),
+      total_cost: Number(sum(done.map((w) => w.cost)).toFixed(2)),
+      avg_price: done.length ? Number((sum(done.map((w) => w.cost)) / sum(done.map((w) => w.shares))).toFixed(3)) : null,
+      windows_with_more_than_one_buy: windows.filter((w) => w.buys > 1).length,
+      still_open: windows.length - done.length,
+    },
+    by_side: { up: bySide("up"), down: bySide("down") },
+    by_price: [bucket(0, 0.6), bucket(0.6, 0.65), bucket(0.65, 0.7), bucket(0.7, 0.75), bucket(0.75, 1.01)],
+    windows,
+    // A few raw entries so the numbers above can be checked against Polymarket's own fields.
+    raw_sample: {
+      trade: acts.find((a) => a.type === "ACTIVITY_TYPE_TRADE") ?? null,
+      resolution: acts.find((a) => a.type === "ACTIVITY_TYPE_POSITION_RESOLUTION") ?? null,
+    },
+  };
+}
+
+/** Monday 00:00 New York time of the current week, as unix seconds. */
+function mondayNY(): number {
+  const now = new Date();
+  const ny = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const offset = now.getTime() - ny.getTime();
+  const d = new Date(ny);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return Math.floor((d.getTime() + offset) / 1000);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    if (body?.action === "report") {
+      // Read-only: real results since Monday (or body.since, unix seconds / ISO date) from Polymarket's history.
+      const since = body.since ? (Number(body.since) || Date.parse(String(body.since)) / 1000) : mondayNY();
+      return json(await report(Math.floor(since)));
+    }
     if (body?.action === "read") {
       // Read-only: the bot's Jev read for one window, so the page shows the same call the bot bets on.
       const w = Math.floor(Number(body.window));
