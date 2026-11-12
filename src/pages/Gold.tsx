@@ -4,6 +4,7 @@ import { LightspeedPanel } from "@/gold/LightspeedPanel";
 import { ColorCount } from "@/gold/ColorCount";
 import { runTvIndicator, TV_COLORS } from "@/gold/tvIndicator";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
+import { trendRegimes } from "@/gold/trendRegime";
 import {
   minuteChoices,
   readLabel,
@@ -224,6 +225,11 @@ export default function Gold() {
     load("gold.tvindicator", isBool, false),
   );
   useEffect(() => save("gold.tvindicator", tvOn), [tvOn]);
+  // Trend shading: where the bot's auto mode would have seen a strong trend (straight with Jev) or not (flip).
+  const [shadeOn, setShadeOn] = useState<boolean>(() =>
+    load("gold.trendshade", isBool, false),
+  );
+  useEffect(() => save("gold.trendshade", shadeOn), [shadeOn]);
   const [forecastOn, setForecastOn] = useState<boolean>(() =>
     load("gold.forecast", isBool, true),
   );
@@ -248,7 +254,10 @@ export default function Gold() {
     usesMinute(arrowMode) ? callMinute : null,
   );
   const mn = g.minute;
-  const lsClosed = useMemo(() => g.bars.slice(-700).map((b) => b.candle), [g.bars]);
+  const lsClosed = useMemo(
+    () => g.bars.slice(-700).map((b) => b.candle),
+    [g.bars],
+  );
   // The TradingView indicator, run over the chart's closed candles (recomputed when a candle closes).
   const tv = useMemo(
     () =>
@@ -260,6 +269,14 @@ export default function Gold() {
         : null,
     [tvOn, g.bars],
   );
+  const regimes = useMemo(
+    () =>
+      shadeOn && g.bars.length
+        ? trendRegimes(g.bars.map((b) => b.candle))
+        : null,
+    [shadeOn, g.bars],
+  );
+
   /** Jev's minute-X reads on the chart's candles, bucketed by how sure it was, vs "holds" on the same candles. */
   const byConf = [
     [0.5, 0.6],
@@ -413,6 +430,13 @@ export default function Gold() {
           Forecast {forecastOn ? "on" : "off"}
         </button>
         <button
+          onClick={() => setShadeOn((v) => !v)}
+          className={`self-center rounded-md border px-2.5 py-1 text-xs ${shadeOn ? "border-[#d4a72c] text-[#d4a72c]" : "border-[#262c36] text-[#8b949e]"}`}
+          title="Shades each candle by the bot's auto-mode trend check at its open: strong red = strong downtrend, strong green = strong uptrend (auto mode goes straight with Jev); faint = plain trend; none = no clear trend (auto mode flips)"
+        >
+          Trend shading {shadeOn ? "on" : "off"}
+        </button>
+        <button
           onClick={() => setTvOn((v) => !v)}
           className={`self-center rounded-md border px-2.5 py-1 text-xs ${tvOn ? "border-[#d4a72c] text-[#d4a72c]" : "border-[#262c36] text-[#8b949e]"}`}
           title="The TradingView indicator: Gold Next-Candle Bias (EMAs, triangles, hit-rate table)"
@@ -463,8 +487,18 @@ export default function Gold() {
             fpVersion={g.flow.version}
             footprintMode={footprintOn && !!mk.coinbase && g.flow.on}
             tv={tv}
+            regimes={regimes}
           />
           {tv && <TvTable tv={tv} />}
+          {regimes && (
+            <div className="absolute bottom-2 left-2 z-[5] rounded bg-[#0e1116cc] px-2 py-1 text-[11px] text-[#8b949e]">
+              <span className="text-[#ef5350]">■</span> strong downtrend ·{" "}
+              <span className="text-[#26a69a]">■</span> strong uptrend → auto
+              mode goes straight with Jev · faint = plain trend, none = no clear
+              trend → auto mode flips
+              {tfMin !== 5 ? " (the bot uses 5m candles)" : ""}
+            </div>
+          )}
           {g.blocked && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-[#0e1116] p-6 text-center text-sm text-[#d4a72c]">
               <p className="max-w-md">{g.blocked}</p>

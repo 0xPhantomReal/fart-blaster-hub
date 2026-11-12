@@ -4,6 +4,7 @@ import {
   createChart,
   createSeriesMarkers,
   CrosshairMode,
+  HistogramSeries,
   LineSeries,
   TickMarkType,
   type IChartApi,
@@ -20,6 +21,7 @@ import { rows as fpRows, type Footprint } from "./orderflow";
 import type { ClosedBar } from "./useGold";
 import { TV_COLORS, TV_INPUTS, type TvResult } from "./tvIndicator";
 import { TvTriangles } from "./tvTriangles";
+import { REGIME_COLORS, type Regime } from "./trendRegime";
 
 const COLORS = {
   bg: "#0e1116",
@@ -97,7 +99,9 @@ export function GoldChart({
   fpVersion = 0,
   footprintMode = false,
   tv = null,
+  regimes = null,
 }: {
+  regimes?: Map<number, { label: Regime }> | null; // background shading: the bot's trend check per candle
   tv?: TvResult | null; //                       the TradingView indicator (closed candles), or null to hide
   footprints?: Map<number, Footprint> | null; // order flow per candle (crypto)
   fpVersion?: number; //                        bumps when footprints change
@@ -133,6 +137,7 @@ export function GoldChart({
   const formingRef = useRef<Candle | null>(null);
   const zoomed = useRef(false);
   const tvFast = useRef<ISeriesApi<"Line"> | null>(null);
+  const shade = useRef<ISeriesApi<"Histogram"> | null>(null);
   const tvSlow = useRef<ISeriesApi<"Line"> | null>(null);
   const tvTri = useRef<TvTriangles[]>([]);
 
@@ -170,6 +175,22 @@ export function GoldChart({
       },
       rightPriceScale: { borderColor: COLORS.line },
       crosshair: { mode: CrosshairMode.Normal },
+    });
+    // Trend shading: a full-height column behind each candle (own hidden scale fixed at 0–1), added first so it's at
+    // the back.
+    shade.current = c.addSeries(HistogramSeries, {
+      priceScaleId: "regime",
+      priceLineVisible: false,
+      lastValueVisible: false,
+      base: 0,
+      visible: false,
+      autoscaleInfoProvider: () => ({
+        priceRange: { minValue: 0, maxValue: 1 },
+      }),
+    });
+    c.priceScale("regime").applyOptions({
+      visible: false,
+      scaleMargins: { top: 0, bottom: 0 },
     });
     // Added first so the real forming candle draws on top of the first forecast bar.
     ghosts.current = c.addSeries(CandlestickSeries, {
@@ -359,6 +380,28 @@ export function GoldChart({
       });
     for (const t of tvTri.current) t.set(tri);
   }, [tv, bars]);
+
+  // Trend shading (the bot's auto-mode trend check per candle).
+  useEffect(() => {
+    const s = shade.current;
+    if (!s) return;
+    if (!regimes || !bars.length) {
+      s.applyOptions({ visible: false });
+      s.setData([]);
+      return;
+    }
+    s.setData(
+      bars.map((b) => {
+        const r = regimes.get(b.candle.time);
+        return {
+          time: b.candle.time as UTCTimestamp,
+          value: 1,
+          color: r ? REGIME_COLORS[r.label] : "rgba(0,0,0,0)",
+        };
+      }),
+    );
+    s.applyOptions({ visible: true });
+  }, [regimes, bars]);
 
   // The EMAs follow the forming candle's price, as TradingView plots them live.
   useEffect(() => {
