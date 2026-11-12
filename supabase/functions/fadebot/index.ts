@@ -284,9 +284,6 @@ async function setup() {
   await sql`alter table fadebot_trades add column if not exists order_type text default 'market'`;
   await sql`alter table fadebot_trades add column if not exists limit_price double precision`;
   await sql`alter table fadebot_trades add column if not exists limit_shares double precision`;
-  // Flip: both prices at the moment of Jev's call (what the trend check and the 75¢ cap go by).
-  await sql`alter table fadebot_trades add column if not exists call_up_cost double precision`;
-  await sql`alter table fadebot_trades add column if not exists call_down_cost double precision`;
   // Longshot: every window where its rule fired (bought or not), to check how often "near-certain" really wins.
   await sql`create table if not exists fadebot_longshot (
     window_start bigint primary key, at_sec double precision, side text, p double precision, cost double precision,
@@ -1700,7 +1697,6 @@ async function traderRun(start: number, minute: number, until: number) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let asks = 0;
   let limitLogged = false;
-  let lastWatchLog = 0;
   const logAsk = (row: Record<string, unknown>) =>
     sql`insert into fadebot_asks ${sql({ window_start: start, ...row })}`.catch((e) => console.error("ask log:", e.message));
 
@@ -1739,13 +1735,7 @@ async function traderRun(start: number, minute: number, until: number) {
           const watchNote = `waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢ (now ${
             c === null ? "—" : `${Math.round(c * 100)}¢`
           })`;
-          // Went by the price at the call: if the watched side was under 60¢ then, it has crossed 60¢ once it's there
-          // now — buy at whatever it costs, even if it jumped past the 75¢ cap between checks. If it was already 60¢+
-          // at the call (no cross), the 75¢ cap still applies.
-          const atCall = other === "up" ? pos.call_up_cost : pos.call_down_cost;
-          const crossed = atCall !== null && atCall !== undefined && Number(atCall) < tc.flipAt - 1e-9;
-          const capOk = crossed || (c !== null && c <= tc.flipMax + 1e-9);
-          if (c !== null && c >= tc.flipAt - 1e-9 && c < 1 && capOk && left >= tc.minLeftSec) {
+          if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
             // Size: % of the balance (default 10%), or the fixed flip bet.
             let bet = tc.flipBet;
             let sizeNote = "";
@@ -1770,19 +1760,16 @@ async function traderRun(start: number, minute: number, until: number) {
             }
             await sql`update fadebot_trades set status = 'open', side = ${buySide}, stake = ${bet}, shares = ${shares},
                 price = ${price}, fees = ${fees}, order_id = ${orderId}, opened_sec = ${Date.now() / 1000 - start},
-                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢${
-                  crossed ? ` (was ${Math.round(Number(atCall) * 100)}¢ at the call)` : ""
-                } → bought ${buySide} $${bet.toFixed(2)}${sizeNote}`}
+                reason = ${`${pos.reason}; ${other} reached ${Math.round(c * 100)}¢ → bought ${buySide} $${bet.toFixed(2)}${sizeNote}`}
               where id = ${pos.id} and status = 'watching'`;
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: buySide,
               did: `${other} reached ${Math.round(c * 100)}¢: bought ${buySide} $${bet.toFixed(2)}${sizeNote} @ ${price.toFixed(2)}` });
             continue;
           }
-          // A trail of what the bot sees while it waits (every 15 s), so a missed cross can be checked afterwards.
-          if (Date.now() - lastWatchLog >= 15000) {
-            lastWatchLog = Date.now();
+          if (!limitLogged) {
+            limitLogged = true;
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
-              did: c !== null && c > tc.flipMax && !crossed ? `${watchNote}; over ${Math.round(tc.flipMax * 100)}¢, skipped` : watchNote });
+              did: c !== null && c > tc.flipMax ? `${watchNote}; over ${Math.round(tc.flipMax * 100)}¢, skipped` : watchNote });
           }
           await sleep(1000);
           continue;
@@ -1955,13 +1942,10 @@ async function traderRun(start: number, minute: number, until: number) {
           if (tc.order === "flip") {
             let other: Side = side === "up" ? "down" : "up";
             let note = "";
-            // Prices at the moment of the call (fresh, right after Jev answered).
-            const qc = await quotes(market).catch(() => q);
-            const fmt = (x: number | null) => (x === null ? "—" : `${Math.round(x * 100)}¢`);
             // Trend-aware: if the side the flip would buy is ALREADY at 60¢+ when Jev's call comes in, and it's against
             // the trend (Up already high in a downtrend, Down in an uptrend), don't buy it straight away — watch the
             // trend's side instead and buy that once it reaches 60¢. A later cross of 60¢ is unchanged.
-            const otherNow = other === "up" ? qc.upCost : qc.downCost;
+            const otherNow = other === "up" ? q.upCost : q.downCost;
             if (tc.trend && otherNow !== null && otherNow >= tc.flipAt - 1e-9) {
               const tr = trend; // the same trend picture Jev was just given
               const want = trendFlipSide(other, tr.label);
@@ -1970,16 +1954,14 @@ async function traderRun(start: number, minute: number, until: number) {
                 other = want;
               }
             }
-            const callNote = ` (at the call: Up ${fmt(qc.upCost)}, Down ${fmt(qc.downCost)})`;
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
-                opened_sec, p_side, open_ref, reason, order_type, status, call_up_cost, call_down_cost)
+                opened_sec, p_side, open_ref, reason, order_type, status)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl}, ${1 - pSide},
                 ${before?.avg ?? null},
-                ${`Jev ${Math.round(d.p * 100)}% for ${side} at ${Math.round(nowEl)} s${callNote} → waiting for ${other} to reach ${
+                ${`Jev ${Math.round(d.p * 100)}% for ${side} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
-                }¢${note}`}, 'flip', 'watching', ${qc.upCost}, ${qc.downCost})`;
-            row = { ...row, up_cost: qc.upCost, down_cost: qc.downCost };
-            row.did = `Jev picked ${side}${callNote}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
+                }¢${note}`}, 'flip', 'watching')`;
+            row.did = `Jev picked ${side}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
             await logAsk(row);
             continue;
           }
