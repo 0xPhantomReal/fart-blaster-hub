@@ -312,6 +312,11 @@ async function setup() {
   // Every price point inside the window, [seconds into the window, Up price, Down price], so the page can check
   // whether a limit order placed at any second would have filled.
   await sql`alter table fadebot_pmhist add column if not exists pts jsonb`;
+  // Every Up/Down price the trader saw, per window and minute run: [seconds into the window, Up cost, Down cost].
+  // Much finer than Polymarket's minute history, so the regime study can tell whether a side really touched 60¢.
+  await sql`create table if not exists fadebot_path (
+    window_start bigint not null, minute int not null, pts jsonb not null, primary key (window_start, minute))`;
+  await sql`alter table fadebot_path enable row level security`;
   // Only this function (through the database connection) reads and writes these tables.
   await sql`alter table fadebot_prices enable row level security`;
   await sql`alter table fadebot_bets5 enable row level security`;
@@ -1528,6 +1533,9 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
 // ── Jev trader (FADEBOT_STRATEGY = jev-trader, the default) ────────────
 
 /** Both sides' buy and sell prices from one BBO read (prices on the book are the YES side's). */
+/** This run's price path (see fadebot_path), filled by quotes(). */
+let pathRec: { ws: number; pts: (number | null)[][] } | null = null;
+
 async function quotes(m: WindowMarket) {
   const b = await bbo(m.slug);
   const bid = b.bestBid ? Number(b.bestBid.value) : null;
@@ -1537,6 +1545,7 @@ async function quotes(m: WindowMarket) {
   const no = { cost: inv(bid), sell: inv(ask) };
   const up = m.longIs === "up" ? yes : no;
   const down = m.longIs === "up" ? no : yes;
+  if (pathRec) pathRec.pts.push([Number((Date.now() / 1000 - pathRec.ws).toFixed(1)), up.cost, down.cost]);
   return { upCost: up.cost, downCost: down.cost, upSell: up.sell, downSell: down.sell };
 }
 
@@ -1720,6 +1729,9 @@ async function traderRun(start: number, minute: number, until: number) {
   let limitLogged = false;
   const logAsk = (row: Record<string, unknown>) =>
     sql`insert into fadebot_asks ${sql({ window_start: start, ...row })}`.catch((e) => console.error("ask log:", e.message));
+
+  const myPath = { ws: start, pts: [] as (number | null)[][] };
+  pathRec = myPath;
 
   // FADEBOT_PRICE_FEED=ws: open the market's live price stream for this run (REST stays the fallback).
   let myStream: PriceStream | null = null;
@@ -2111,6 +2123,12 @@ async function traderRun(start: number, minute: number, until: number) {
   try {
     [rec] = await Promise.all([recording, asker, liveLoop]);
   } finally {
+    if (pathRec === myPath) pathRec = null;
+    if (myPath.pts.length) {
+      await sql`insert into fadebot_path ${sql({ window_start: start, minute, pts: sql.json(myPath.pts) })}
+        on conflict (window_start, minute) do update set pts = excluded.pts`.catch((e) => console.error("path:", e.message));
+      await sql`delete from fadebot_path where window_start < ${Math.floor(start - 14 * 86400)}`.catch(() => {});
+    }
     if (myStream) {
       if (stream?.s === myStream) stream = null;
       myStream.close();
@@ -2763,6 +2781,52 @@ async function autoReplayReport(days: number) {
   return { days, edge_points: Math.round(tc.edge * 100), ...out };
 }
 
+/**
+ * Everything the regime study needs for the last `days` days, in compact arrays: every Jev ask, every price the bot
+ * saw (fadebot_path) and Polymarket's minute history (fadebot_pmhist), the window outcomes, the bot's trades and
+ * 1-minute BTC candles. Read-only; the page offers it as a download.
+ */
+async function regimeExport(days: number) {
+  const tc = settings().trader;
+  const now = Math.floor(Date.now() / 1000);
+  const from = Math.floor((now - days * 86400) / TF) * TF;
+  const sql = db();
+  const r4 = (x: unknown) => (x === null || x === undefined ? null : Math.round(Number(x) * 10000) / 10000);
+  const [asks, paths, hist, reads, trades] = await Promise.all([
+    sql`select window_start, at_sec, p_up, up_cost, down_cost from fadebot_asks
+      where window_start >= ${from} and p_up is not null order by window_start, at_sec`,
+    sql`select window_start, minute, pts from fadebot_path where window_start >= ${from} order by window_start, minute`,
+    sql`select window_start, long_is, pts from fadebot_pmhist where window_start >= ${from} and pts is not null
+      order by window_start`,
+    sql`select window_start, outcome, open_ref from fadebot_reads5 where window_start >= ${from}`,
+    sql`select window_start, side, status, result, pnl, price, stake, opened_sec, p_side, mode, left(reason, 240) as reason
+      from fadebot_trades where window_start >= ${from} and coalesce(strategy, 'trader') = 'trader' order by id`,
+  ]);
+  const path: Record<string, (number | null)[][]> = {};
+  for (const p of paths) (path[String(p.window_start)] ??= []).push(...(p.pts as (number | null)[][]));
+  const c1: Candle[] = [];
+  for (let d = from - 86400; d < now; d += 86400) {
+    const r = await gold<{ candles: Candle[] }>({ action: "history", market: "btc", resolution: 1, from: d, to: Math.min(now, d + 86400) })
+      .catch(() => ({ candles: [] as Candle[] }));
+    c1.push(...r.candles);
+  }
+  c1.sort((a, b) => a.time - b.time);
+  return {
+    version: 1,
+    exported_at: now,
+    from,
+    tf: TF,
+    settings: { edge: tc.edge, flipAt: tc.flipAt, flipMax: tc.flipMax, minLeftSec: tc.minLeftSec, auto: tc.auto, trend: tc.trend },
+    asks: asks.map((a) => [Number(a.window_start), r4(a.at_sec), r4(a.p_up), r4(a.up_cost), r4(a.down_cost)]),
+    path,
+    pmhist: hist.map((h) => [Number(h.window_start), h.long_is, h.pts]),
+    outcomes: reads.map((r) => [Number(r.window_start), r.outcome, r4(r.open_ref)]),
+    trades: trades.map((t) => [Number(t.window_start), t.side, t.status, t.result, r4(t.pnl), r4(t.price), r4(t.stake),
+      r4(t.opened_sec), r4(t.p_side), t.mode, t.reason]),
+    candles1m: [...new Map(c1.map((c) => [c.time, c])).values()].map((c) => [c.time, c.open, c.high, c.low, c.close]),
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   try {
@@ -2771,6 +2835,10 @@ Deno.serve(async (req) => {
     if (body?.action === "auto-replay") {
       // Read-only: what auto mode would have chosen in past windows vs what the bot traded (up to 7 days).
       return json(await autoReplayReport(Math.min(7, Math.max(1, Number(body.days) || 7))));
+    }
+    if (body?.action === "regime-export") {
+      // Read-only: the regime study's data (up to 14 days) as one JSON download.
+      return json(await regimeExport(Math.min(14, Math.max(1, Number(body.days) || 7))));
     }
     if (body?.action === "report") {
       // Read-only: real results since Monday (or body.since, unix seconds / ISO date) from Polymarket's history.

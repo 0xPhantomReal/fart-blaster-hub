@@ -1043,3 +1043,26 @@ export async function fetchAutoReplay(days = 7): Promise<AutoReplay | null> {
   if (!res || !res.ok) return null;
   return (await res.json().catch(() => null)) as AutoReplay | null;
 }
+
+/** The regime study's raw data (fadebot "regime-export", up to 14 days), saved as a JSON file. */
+export async function downloadRegimeData(days = 7): Promise<string | null> {
+  if (!FN_URL) return "no backend configured";
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+    },
+    body: JSON.stringify({ action: "regime-export", days }),
+  }).catch(() => null);
+  if (!res || !res.ok) return `export failed${res ? ` (${res.status})` : ""}`;
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `regime-data-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  return null;
+}

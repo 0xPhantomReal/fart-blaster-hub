@@ -5,7 +5,7 @@ import { ColorCount } from "@/gold/ColorCount";
 import { runTvIndicator, TV_COLORS } from "@/gold/tvIndicator";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import { trendRegimes } from "@/gold/trendRegime";
-import { fetchAutoReplay, type AutoReplay } from "@/gold/feed";
+import { downloadRegimeData, fetchAutoReplay, type AutoReplay } from "@/gold/feed";
 import {
   minuteChoices,
   readLabel,
@@ -232,6 +232,7 @@ export default function Gold() {
   );
   useEffect(() => save("gold.trendshade", shadeOn), [shadeOn]);
   const [replay, setReplay] = useState<AutoReplay | null>(null);
+  const [exporting, setExporting] = useState<string | null>(null);
   useEffect(() => {
     if (!shadeOn || market !== "btc" || tfMin !== 5) {
       setReplay(null);
@@ -530,7 +531,19 @@ export default function Gold() {
                   auto would have gone the other way:{" "}
                   {replay.summary.trades_auto_other_side.wins}W/
                   {replay.summary.trades_auto_other_side.losses}L ($
-                  {replay.summary.trades_auto_other_side.pnl.toFixed(2)}).
+                  {replay.summary.trades_auto_other_side.pnl.toFixed(2)}).{" "}
+                  <button
+                    type="button"
+                    className="underline text-[#c9d1d9] disabled:opacity-50"
+                    disabled={exporting === "preparing…"}
+                    onClick={async () => {
+                      setExporting("preparing…");
+                      setExporting((await downloadRegimeData(7)) ?? "");
+                    }}
+                  >
+                    Download regime data
+                  </button>
+                  {exporting ? <span className="ml-1">{exporting}</span> : null}
                 </div>
               ) : null}
             </div>
