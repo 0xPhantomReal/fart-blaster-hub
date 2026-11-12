@@ -1,4 +1,8 @@
 import type { LongshotStatus, TraderStatus } from "./feed";
+
+/** Number → fixed decimals; tolerates null/undefined (old or partial rows) instead of crashing the page. */
+const fx = (v: number | null | undefined, d: number) =>
+  Number(v ?? 0).toFixed(d);
 import { useEffect, useState } from "react";
 import { FadeBacktestBox } from "./FadeBacktestBox";
 import { fadeBotFindMarket, fadeBotStatus, type FadeBotStatus } from "./feed";
@@ -240,7 +244,7 @@ export function FadeBotPanel({
                         {b.shares
                           ? ` $${b.stake?.toFixed(0)} @ ${b.price?.toFixed(2)}`
                           : b.stake
-                            ? ` $${b.stake.toFixed(0)} (no fill)`
+                            ? ` $${fx(b.stake, 0)} (no fill)`
                             : ""}
                         {b.kind === "ls-strong" && b.shares ? (
                           <span className={MUTED}> → hold</span>
@@ -249,7 +253,7 @@ export function FadeBotPanel({
                           <span className={MUTED}>
                             {" "}
                             {b.exit_price != null
-                              ? `→ sold @ ${b.exit_price.toFixed(2)}`
+                              ? `→ sold @ ${fx(b.exit_price, 2)}`
                               : b.target_price != null
                                 ? `→ sell @ ${b.target_price.toFixed(2)}${b.status === "open" ? "" : " (not reached)"}`
                                 : "→ held"}
@@ -532,9 +536,9 @@ function TraderPanel({
           </div>
           {open ? (
             <p className="text-[#c9d1d9]">
-              Holding {open.side === "up" ? "Up" : "Down"}:{" "}
-              {open.shares.toFixed(2)} shares @ {open.price.toFixed(2)} ($
-              {open.stake.toFixed(2)})
+              Holding {open.side === "up" ? "Up" : "Down"}: {fx(open.shares, 2)}{" "}
+              shares @ {fx(open.price, 2)} ($
+              {fx(open.stake, 2)})
               {last?.unrealized != null
                 ? `, unrealized ${usd(last.unrealized)}`
                 : ""}
@@ -627,11 +631,11 @@ function TraderPanel({
                       (x.status === "watching" || x.result === "not triggered")
                         ? `waiting for it to reach ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢`
                         : x.order_type === "limit"
-                          ? `limit ${x.limit_shares} @ ${Math.round((x.limit_price ?? 0) * 100)}¢, ${Number(x.shares).toFixed(0)} filled${x.shares > 0 ? ` @ ${x.price.toFixed(2)}` : ""}`
-                          : `$${x.stake.toFixed(2)} @ ${x.price.toFixed(2)}`}{" "}
+                          ? `limit ${x.limit_shares} @ ${Math.round((x.limit_price ?? 0) * 100)}¢, ${Number(x.shares).toFixed(0)} filled${x.shares > 0 ? ` @ ${fx(x.price, 2)}` : ""}`
+                          : `$${fx(x.stake, 2)} @ ${fx(x.price, 2)}`}{" "}
                       at {Math.round(x.opened_sec)} s (Jev {pct(x.p_side)}%)
                       {x.exit_price != null
-                        ? ` → sold @ ${x.exit_price.toFixed(2)} at ${Math.round(x.exit_sec ?? 0)} s`
+                        ? ` → sold @ ${fx(x.exit_price, 2)} at ${Math.round(x.exit_sec ?? 0)} s`
                         : x.status === "open"
                           ? " → holding"
                           : " → held to the end"}
@@ -743,9 +747,8 @@ function LongshotPanel({
                   <tr key={x.id}>
                     <td className="py-0.5">{hhmm(x.window_start)}</td>
                     <td className="py-0.5">
-                      {x.side === "up" ? "Up ↑" : "Down ↓"} $
-                      {x.stake.toFixed(2)} @ {x.price.toFixed(2)} at{" "}
-                      {Math.round(x.opened_sec)} s (
+                      {x.side === "up" ? "Up ↑" : "Down ↓"} ${fx(x.stake, 2)} @{" "}
+                      {fx(x.price, 2)} at {Math.round(x.opened_sec)} s (
                       {x.p_side == null ? "—" : (x.p_side * 100).toFixed(2)}%)
                       {x.mode === "dry" ? (
                         <span className={MUTED}> (test)</span>

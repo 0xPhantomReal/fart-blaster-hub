@@ -84,6 +84,7 @@ import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
+import { autoReplay } from "../_shared/autoReplay.ts";
 import { depthDollars, type LongshotCfg, longshotDecision, settleProbability } from "../_shared/longshot.ts";
 
 const TF = 300; //        5-minute windows
@@ -2681,11 +2682,57 @@ function mondayNY(): number {
   return Math.floor((d.getTime() + offset) / 1000);
 }
 
+/**
+ * Read-only replay: for each window of the last `days` days, the moment Jev's call would have triggered (first logged
+ * ask where Jev's favoured side beat its price by the current edge, before the last FADEBOT_TRADER_MIN_LEFT_SEC), what
+ * auto mode would have chosen then, and what the bot actually traded.
+ */
+async function autoReplayReport(days: number) {
+  const cfg = settings();
+  const tc = cfg.trader;
+  const now = Math.floor(Date.now() / 1000);
+  const from = Math.floor((now - days * 86400) / TF) * TF;
+  const sql = db();
+  const calls = await sql`select distinct on (window_start) window_start, at_sec, p_up from fadebot_asks
+    where window_start >= ${from} and p_up is not null and at_sec <= ${TF - tc.minLeftSec}
+      and (greatest(p_up, 1 - p_up) - case when p_up >= 0.5 then up_cost else down_cost end) >= ${tc.edge - 1e-9}
+    order by window_start, at_sec`;
+  const trades = await sql`select window_start, side, status, result, pnl from fadebot_trades
+    where window_start >= ${from} and coalesce(strategy, 'trader') = 'trader' order by id`;
+  // 5-minute candles (with a day of lead-in for the EMAs) and 1-minute candles for the price at each call.
+  const c5 = await closedCandles(Math.floor(now / TF) * TF + TF, days + 1);
+  const c1: Candle[] = [];
+  for (let d = from; d < now; d += 86400) {
+    const r = await gold<{ candles: Candle[] }>({ action: "history", market: "btc", resolution: 1, from: d, to: Math.min(now, d + 86400) })
+      .catch(() => ({ candles: [] as Candle[] }));
+    c1.push(...r.candles);
+  }
+  c1.sort((a, b) => a.time - b.time);
+  const out = autoReplay(
+    c5,
+    c1,
+    calls.map((r) => ({ window: Number(r.window_start), atSec: Number(r.at_sec), pUp: Number(r.p_up) })),
+    trades.map((t) => ({
+      window: Number(t.window_start),
+      side: t.side,
+      status: t.status,
+      result: t.result,
+      pnl: t.pnl === null ? null : Number(t.pnl),
+    })),
+    TF,
+  );
+  return { days, edge_points: Math.round(tc.edge * 100), ...out };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    if (body?.action === "auto-replay") {
+      // Read-only: what auto mode would have chosen in past windows vs what the bot traded (up to 7 days).
+      return json(await autoReplayReport(Math.min(7, Math.max(1, Number(body.days) || 7))));
+    }
     if (body?.action === "report") {
       // Read-only: real results since Monday (or body.since, unix seconds / ISO date) from Polymarket's history.
       const since = body.since ? (Number(body.since) || Date.parse(String(body.since)) / 1000) : mondayNY();

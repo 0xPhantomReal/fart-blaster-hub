@@ -811,7 +811,10 @@ export interface FadeBotStatus {
   /** Longshot mode: streak toward the goal, balance, latest check, trades and how often its calls held. */
   longshot?: LongshotStatus | null;
   /** How often candles finished the way their strength score pointed (last 7 days), by checkpoint and strength. */
-  strength?: { windows: number; rows: { at: number; from: number; n: number; theirWay: number }[] } | null;
+  strength?: {
+    windows: number;
+    rows: { at: number; from: number; n: number; theirWay: number }[];
+  } | null;
   state: {
     step: number;
     total_pnl: number;
@@ -823,7 +826,10 @@ export interface FadeBotStatus {
   bets: FadeBotBet[];
   /** Polymarket's own prices per 5-minute window (last 6 hours), from its price history (about one point a minute). */
   /** Polymarket price points per window (last 24 h): [seconds into the window, Up cost, Down cost]. */
-  pmPoints?: { window_start: number | string; pts: [number, number | null, number | null][] }[];
+  pmPoints?: {
+    window_start: number | string;
+    pts: [number, number | null, number | null][];
+  }[];
   pmHistory?: {
     window_start: string | number;
     up_low: number | null;
@@ -874,7 +880,12 @@ export async function fadeBotFindMarket(): Promise<
       how?: string;
       record?: string;
       check?: { ok: boolean | null; note: string } | null;
-      prices?: { bbo: string; book: string; market: string; used: string } | null;
+      prices?: {
+        bbo: string;
+        book: string;
+        market: string;
+        used: string;
+      } | null;
     }
   | { error: string }
 > {
@@ -946,7 +957,15 @@ export interface TraderStatus {
   trades: TraderTrade[];
   totals: { n: number; pnl: number; wins: number } | null;
   asks: TraderAsk[];
-  edge: { from: number; n: number; winPct: number | null; avgCost: number | null; returnPerDollar: number | null }[] | null;
+  edge:
+    | {
+        from: number;
+        n: number;
+        winPct: number | null;
+        avgCost: number | null;
+        returnPerDollar: number | null;
+      }[]
+    | null;
 }
 
 export interface LongshotStatus {
@@ -955,5 +974,71 @@ export interface LongshotStatus {
   balance: number | null;
   last: { v: { note: string; at: number; window: number }; at: string } | null;
   trades: TraderTrade[];
-  calibration: { n: number; wins: number; misses: { window_start: number | string; side: string; p: number; cost: number }[] } | null;
+  calibration: {
+    n: number;
+    wins: number;
+    misses: {
+      window_start: number | string;
+      side: string;
+      p: number;
+      cost: number;
+    }[];
+  } | null;
+}
+
+export interface AutoReplayRow {
+  window: number;
+  atSec: number;
+  jevPick: "up" | "down";
+  jevPct: number;
+  label: string;
+  down: number;
+  up: number;
+  auto: "straight" | "flip";
+  autoWatch: "up" | "down";
+  actual: {
+    side: "up" | "down";
+    result: string | null;
+    pnl: number | null;
+  } | null;
+  sameSide: boolean | null;
+}
+export interface AutoReplay {
+  days: number;
+  edge_points: number;
+  rows: AutoReplayRow[];
+  summary: {
+    calls: number;
+    auto_straight: number;
+    auto_flip: number;
+    trades_auto_same_side: {
+      trades: number;
+      wins: number;
+      losses: number;
+      pnl: number;
+    };
+    trades_auto_other_side: {
+      trades: number;
+      wins: number;
+      losses: number;
+      pnl: number;
+    };
+  };
+}
+
+/** What auto mode would have chosen in past windows vs what the bot traded (read-only, up to 7 days). */
+export async function fetchAutoReplay(days = 7): Promise<AutoReplay | null> {
+  if (!FN_URL) return null;
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY
+        ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY }
+        : {}),
+    },
+    body: JSON.stringify({ action: "auto-replay", days }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json().catch(() => null)) as AutoReplay | null;
 }

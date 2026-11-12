@@ -22,6 +22,7 @@ import type { ClosedBar } from "./useGold";
 import { TV_COLORS, TV_INPUTS, type TvResult } from "./tvIndicator";
 import { TvTriangles } from "./tvTriangles";
 import { REGIME_COLORS, type Regime } from "./trendRegime";
+import type { AutoReplayRow } from "./feed";
 
 const COLORS = {
   bg: "#0e1116",
@@ -100,7 +101,9 @@ export function GoldChart({
   footprintMode = false,
   tv = null,
   regimes = null,
+  replay = null,
 }: {
+  replay?: AutoReplayRow[] | null; // auto-mode replay: S/F (and ✓/✗ for real trades) above each call's candle
   regimes?: Map<number, { label: Regime }> | null; // background shading: the bot's trend check per candle
   tv?: TvResult | null; //                       the TradingView indicator (closed candles), or null to hide
   footprints?: Map<number, Footprint> | null; // order flow per candle (crypto)
@@ -138,6 +141,7 @@ export function GoldChart({
   const zoomed = useRef(false);
   const tvFast = useRef<ISeriesApi<"Line"> | null>(null);
   const shade = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const replayMarks = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const tvSlow = useRef<ISeriesApi<"Line"> | null>(null);
   const tvTri = useRef<TvTriangles[]>([]);
 
@@ -231,6 +235,8 @@ export function GoldChart({
         crosshairMarkerVisible: false,
         visible: false,
       });
+    // Auto-mode replay markers sit on the candles, alongside the signal arrows.
+    replayMarks.current = createSeriesMarkers(candles.current, []);
     tvFast.current = line(TV_COLORS.orange, "Fast EMA");
     tvSlow.current = line(TV_COLORS.blue, "Slow EMA");
     tvTri.current = [new TvTriangles(), new TvTriangles()];
@@ -380,6 +386,45 @@ export function GoldChart({
       });
     for (const t of tvTri.current) t.set(tri);
   }, [tv, bars]);
+
+  // Auto-mode replay: S (straight with Jev) / F (flip) above each call's candle, coloured by the trend at the call;
+  // ✓ / ✗ when the bot really traded that window (with whether auto mode would have been on the same side).
+  useEffect(() => {
+    const m = replayMarks.current;
+    if (!m) return;
+    if (!replay || !replay.length || !bars.length) {
+      m.setMarkers([]);
+      return;
+    }
+    const byTime = new Map(bars.map((b) => [b.candle.time, b.candle]));
+    const rows = replay
+      .filter((r) => byTime.has(r.window))
+      .sort((a, b) => a.window - b.window);
+    m.setMarkers(
+      rows.map((r) => {
+        const color = /downtrend/.test(r.label)
+          ? "#ef5350"
+          : /uptrend/.test(r.label)
+            ? "#26a69a"
+            : "#8b949e";
+        const res =
+          r.actual?.result === "win"
+            ? " ✓"
+            : r.actual?.result === "loss"
+              ? " ✗"
+              : "";
+        const diff = r.actual && r.sameSide === false && res ? "≠" : "";
+        return {
+          time: r.window as UTCTimestamp,
+          position: "aboveBar" as const,
+          shape: "circle" as const,
+          color,
+          size: 0.6,
+          text: `${r.auto === "straight" ? "S" : "F"}${res}${diff}`,
+        };
+      }),
+    );
+  }, [replay, bars]);
 
   // Trend shading (the bot's auto-mode trend check per candle).
   useEffect(() => {

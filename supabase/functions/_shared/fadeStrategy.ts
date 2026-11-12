@@ -363,6 +363,8 @@ export function trendSummary(closed: Ohlc[], price: number, emaFast: number | nu
     up >= 3 && up > down ? "uptrend" : "no clear trend";
   return {
     label,
+    down_checks: down,
+    up_checks: up,
     ema_fast_9: emaFast === null ? null : r2(emaFast),
     ema_slow_21: emaSlow === null ? null : r2(emaSlow),
     ema_direction: emaDir,

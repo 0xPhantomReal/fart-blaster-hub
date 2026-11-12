@@ -5,6 +5,7 @@ import { ColorCount } from "@/gold/ColorCount";
 import { runTvIndicator, TV_COLORS } from "@/gold/tvIndicator";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import { trendRegimes } from "@/gold/trendRegime";
+import { fetchAutoReplay, type AutoReplay } from "@/gold/feed";
 import {
   minuteChoices,
   readLabel,
@@ -230,6 +231,24 @@ export default function Gold() {
     load("gold.trendshade", isBool, false),
   );
   useEffect(() => save("gold.trendshade", shadeOn), [shadeOn]);
+  const [replay, setReplay] = useState<AutoReplay | null>(null);
+  useEffect(() => {
+    if (!shadeOn || market !== "btc" || tfMin !== 5) {
+      setReplay(null);
+      return;
+    }
+    let stop = false;
+    const load = () =>
+      fetchAutoReplay(7).then((r) => {
+        if (!stop) setReplay(r);
+      });
+    void load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => {
+      stop = true;
+      clearInterval(id);
+    };
+  }, [shadeOn, market, tfMin]);
   const [forecastOn, setForecastOn] = useState<boolean>(() =>
     load("gold.forecast", isBool, true),
   );
@@ -488,6 +507,7 @@ export default function Gold() {
             footprintMode={footprintOn && !!mk.coinbase && g.flow.on}
             tv={tv}
             regimes={regimes}
+            replay={replay?.rows ?? null}
           />
           {tv && <TvTable tv={tv} />}
           {regimes && (
@@ -497,6 +517,22 @@ export default function Gold() {
               mode goes straight with Jev · faint = plain trend, none = no clear
               trend → auto mode flips
               {tfMin !== 5 ? " (the bot uses 5m candles)" : ""}
+              {replay ? (
+                <div className="mt-0.5">
+                  Markers: auto mode at the moment of each call (last{" "}
+                  {replay.days} days, edge {replay.edge_points}): <b>S</b>{" "}
+                  straight with Jev · <b>F</b> flip · ✓/✗ the bot's real result
+                  · ≠ auto mode would have been on the other side. Real trades
+                  where auto agreed: {replay.summary.trades_auto_same_side.wins}
+                  W/
+                  {replay.summary.trades_auto_same_side.losses}L ($
+                  {replay.summary.trades_auto_same_side.pnl.toFixed(2)}); where
+                  auto would have gone the other way:{" "}
+                  {replay.summary.trades_auto_other_side.wins}W/
+                  {replay.summary.trades_auto_other_side.losses}L ($
+                  {replay.summary.trades_auto_other_side.pnl.toFixed(2)}).
+                </div>
+              ) : null}
             </div>
           )}
           {g.blocked && (
