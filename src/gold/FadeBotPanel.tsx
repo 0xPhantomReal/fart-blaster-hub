@@ -839,6 +839,14 @@ function ModeBox({
                 : "Dip rule off",
             )
           : null}
+        {order === "flip" && (tc?.betPct ?? 0) > 0
+          ? chip(
+              tc?.sizeForm !== false,
+              tc?.sizeForm !== false
+                ? `Flip size: ${tc?.betPctHot ?? 5}% when Jev ${tc?.sizeHot ?? 4}+/${tc?.sizeCalls ?? 6} right, else ${tc?.betPct}%`
+                : "Form sizing off",
+            )
+          : null}
         {chip(tc?.feed === "ws", `Prices: ${tc?.feed === "ws" ? "websocket" : "polling"}`)}
         {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
         {order === "flip"

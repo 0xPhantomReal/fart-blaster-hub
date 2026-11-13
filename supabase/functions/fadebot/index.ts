@@ -212,6 +212,13 @@ const settings = () => ({
     dip: env("FADEBOT_TRADER_DIP") !== "off",
     dipReset: Number(env("FADEBOT_TRADER_DIP_RESET") || 55) / 100,
     dipBuy: Number(env("FADEBOT_TRADER_DIP_BUY") || 65) / 100,
+    // Form sizing (Nov 13, on unless FADEBOT_TRADER_SIZE_FORM=off): on a FLIP (betting against Jev), if he got
+    // FADEBOT_TRADER_SIZE_HOT (4) or more of his last FADEBOT_TRADER_SIZE_CALLS (6) calls right, bet
+    // FADEBOT_TRADER_BET_PCT_HOT % (5) of the balance instead of FADEBOT_TRADER_BET_PCT. Straight trades keep the normal %.
+    sizeForm: env("FADEBOT_TRADER_SIZE_FORM") !== "off",
+    sizeCalls: Math.max(1, Math.round(Number(env("FADEBOT_TRADER_SIZE_CALLS") || 6))),
+    sizeHot: Math.round(Number(env("FADEBOT_TRADER_SIZE_HOT") || 4)),
+    betPctHot: Number(env("FADEBOT_TRADER_BET_PCT_HOT") || 5),
     form: env("FADEBOT_TRADER_FORM") === "on",
     formCalls: Math.max(1, Math.round(Number(env("FADEBOT_TRADER_FORM_CALLS") || 20))),
     formMin: Number(env("FADEBOT_TRADER_FORM_MIN") || 55) / 100,
@@ -316,6 +323,9 @@ async function setup() {
   // Dip rule state for a flip watch: 'above' (came in over the range) / 'high' (came in inside it), then 'armed' /
   // 'armed60' once it has dropped below the reset.
   await sql`alter table fadebot_trades add column if not exists dip text`;
+  // Jev's pick behind a watch, and the bet % chosen for it at the call (form sizing).
+  await sql`alter table fadebot_trades add column if not exists jev_pick text`;
+  await sql`alter table fadebot_trades add column if not exists bet_pct double precision`;
   // Longshot: every window where its rule fired (bought or not), to check how often "near-certain" really wins.
   await sql`create table if not exists fadebot_longshot (
     window_start bigint primary key, at_sec double precision, side text, p double precision, cost double precision,
@@ -1725,6 +1735,10 @@ async function traderRun(start: number, minute: number, until: number) {
     dip: boolean;
     dipReset: number;
     dipBuy: number;
+    sizeForm: boolean;
+    sizeCalls: number;
+    sizeHot: number;
+    betPctHot: number;
     form: boolean;
     formCalls: number;
     formMin: number;
@@ -1871,9 +1885,11 @@ async function traderRun(start: number, minute: number, until: number) {
             let bet = tc.flipBet;
             let sizeNote = "";
             if (tc.betPct > 0) {
+              // Form sizing picked this watch's % at the call (a lower % on flips while Jev is hot).
+              const pct = pos.bet_pct !== null && pos.bet_pct !== undefined ? Number(pos.bet_pct) : tc.betPct;
               const bal = await traderBalance(live, tc.bankroll);
-              bet = Math.max(1, Math.floor(bal * (tc.betPct / 100) * 100) / 100);
-              sizeNote = ` (${tc.betPct}% of $${bal.toFixed(2)})`;
+              bet = Math.max(1, Math.floor(bal * (pct / 100) * 100) / 100);
+              sizeNote = ` (${pct}% of $${bal.toFixed(2)})`;
             }
             const buySide: Side = other;
             const cost = c;
@@ -2120,14 +2136,24 @@ async function traderRun(start: number, minute: number, until: number) {
                 Math.round(tc.dipReset * 100)
               }¢, buy when it climbs back to ${back}`;
             }
+            // Form sizing: flipping against a hot Jev → the smaller bet %.
+            let betPctRow: number | null = null;
+            if (tc.sizeForm && tc.betPct > 0 && other !== d.buy) {
+              const f = await jevFormNow(start, { ...tc, formCalls: tc.sizeCalls });
+              if (f.total >= tc.sizeCalls) {
+                const hot = f.right >= tc.sizeHot;
+                betPctRow = hot ? tc.betPctHot : tc.betPct;
+                note += `; Jev ${f.right}/${f.total} right lately → ${hot ? `hot, bet ${tc.betPctHot}%` : `cold, bet ${tc.betPct}%`}`;
+              }
+            }
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
-                opened_sec, p_side, open_ref, reason, order_type, status, dip)
+                opened_sec, p_side, open_ref, reason, order_type, status, dip, jev_pick, bet_pct)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl},
                 ${other === d.buy ? d.p : 1 - d.p},
                 ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
-                }¢${note}`}, 'flip', 'watching', ${dipState})`;
+                }¢${note}`}, 'flip', 'watching', ${dipState}, ${d.buy}, ${betPctRow})`;
             row.did = `Jev picked ${d.buy}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
             await logAsk(row);
             continue;
