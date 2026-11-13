@@ -424,6 +424,7 @@ export type Database = {
       }
       fadebot_trades: {
         Row: {
+          bet_pct: number | null
           closed_at: string | null
           dip: string | null
           exit_order_id: string | null
@@ -431,6 +432,7 @@ export type Database = {
           exit_sec: number | null
           fees: number | null
           id: number
+          jev_pick: string | null
           limit_price: number | null
           limit_shares: number | null
           long_is: string | null
@@ -454,6 +456,7 @@ export type Database = {
           window_start: number
         }
         Insert: {
+          bet_pct?: number | null
           closed_at?: string | null
           dip?: string | null
           exit_order_id?: string | null
@@ -461,6 +464,7 @@ export type Database = {
           exit_sec?: number | null
           fees?: number | null
           id?: number
+          jev_pick?: string | null
           limit_price?: number | null
           limit_shares?: number | null
           long_is?: string | null
@@ -484,6 +488,7 @@ export type Database = {
           window_start: number
         }
         Update: {
+          bet_pct?: number | null
           closed_at?: string | null
           dip?: string | null
           exit_order_id?: string | null
@@ -491,6 +496,7 @@ export type Database = {
           exit_sec?: number | null
           fees?: number | null
           id?: number
+          jev_pick?: string | null
           limit_price?: number | null
           limit_shares?: number | null
           long_is?: string | null
