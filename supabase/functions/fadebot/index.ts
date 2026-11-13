@@ -204,6 +204,14 @@ const settings = () => ({
     // (default 20; the first ask per window that cleared the edge, settled on BRTI). If he got
     // FADEBOT_TRADER_FORM_MIN % or more right (default 55 = 11 of 20), go straight with him; otherwise flip.
     // Takes the place of auto mode while it's on.
+    // Dip rule (Nov 13, on unless FADEBOT_TRADER_DIP=off): if the side to buy already costs FADEBOT_TRADER_FLIP_AT
+    // (60¢) or more when Jev's call comes in, don't buy it then. Wait until it drops below FADEBOT_TRADER_DIP_RESET
+    // (55¢), then buy when it climbs back: to FADEBOT_TRADER_DIP_BUY (65¢) if it came in above the range (over
+    // FADEBOT_TRADER_FLIP_MAX), or back into the range (60–75¢) if it came in inside it. A side that starts below 60¢
+    // and breaks up into the range is bought as before.
+    dip: env("FADEBOT_TRADER_DIP") !== "off",
+    dipReset: Number(env("FADEBOT_TRADER_DIP_RESET") || 55) / 100,
+    dipBuy: Number(env("FADEBOT_TRADER_DIP_BUY") || 65) / 100,
     form: env("FADEBOT_TRADER_FORM") === "on",
     formCalls: Math.max(1, Math.round(Number(env("FADEBOT_TRADER_FORM_CALLS") || 20))),
     formMin: Number(env("FADEBOT_TRADER_FORM_MIN") || 55) / 100,
@@ -305,6 +313,9 @@ async function setup() {
   await sql`alter table fadebot_trades add column if not exists order_type text default 'market'`;
   await sql`alter table fadebot_trades add column if not exists limit_price double precision`;
   await sql`alter table fadebot_trades add column if not exists limit_shares double precision`;
+  // Dip rule state for a flip watch: 'above' (came in over the range) / 'high' (came in inside it), then 'armed' /
+  // 'armed60' once it has dropped below the reset.
+  await sql`alter table fadebot_trades add column if not exists dip text`;
   // Longshot: every window where its rule fired (bought or not), to check how often "near-certain" really wins.
   await sql`create table if not exists fadebot_longshot (
     window_start bigint primary key, at_sec double precision, side text, p double precision, cost double precision,
@@ -1711,6 +1722,9 @@ async function traderRun(start: number, minute: number, until: number) {
     auto: boolean;
     feed: string;
     wsMaxAgeSec: number;
+    dip: boolean;
+    dipReset: number;
+    dipBuy: number;
     form: boolean;
     formCalls: number;
     formMin: number;
@@ -1831,10 +1845,28 @@ async function traderRun(start: number, minute: number, until: number) {
           const other = pos.side as Side;
           const c = other === "up" ? q.upCost : q.downCost;
           const left = TF - (Date.now() / 1000 - start);
-          const watchNote = `waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢ (now ${
-            c === null ? "—" : `${Math.round(c * 100)}¢`
-          })`;
-          if (c !== null && c >= tc.flipAt - 1e-9 && c <= tc.flipMax + 1e-9 && left >= tc.minLeftSec) {
+          const cents = (x: number) => `${Math.round(x * 100)}¢`;
+          const nowTxt = `(now ${c === null ? "—" : cents(c)})`;
+          // Dip rule: a side that came in above the range must drop below the reset, then climb back to the buy level.
+          let dip = tc.dip ? ((pos.dip as string | null) ?? null) : null;
+          const waiting = dip === "above" || dip === "high";
+          if (waiting && c !== null && c < tc.dipReset - 1e-9) {
+            dip = dip === "above" ? "armed" : "armed60";
+            const back = dip === "armed" ? cents(tc.dipBuy) : `${cents(tc.flipAt)}–${cents(tc.flipMax)}`;
+            const why = `; ${other} dropped to ${cents(c)} → buying when it climbs back to ${back}`;
+            limitLogged = false;
+            await sql`update fadebot_trades set dip = ${dip}, reason = ${pos.reason + why}
+              where id = ${pos.id} and status = 'watching'`;
+            pos.reason = pos.reason + why;
+          }
+          const watchNote = waiting
+            ? `${other} came in at ${cents(tc.flipAt)}+: waiting for it to drop below ${cents(tc.dipReset)} ${nowTxt}`
+            : dip === "armed"
+              ? `waiting for ${other} to climb back to ${cents(tc.dipBuy)} ${nowTxt}`
+              : `waiting for ${other} to reach ${cents(tc.flipAt)} ${nowTxt}`;
+          const lo = dip === "armed" ? tc.dipBuy : tc.flipAt;
+          const hi = dip === "armed" ? Math.max(tc.flipMax, tc.dipBuy) : tc.flipMax;
+          if (!waiting && c !== null && c >= lo - 1e-9 && c <= hi + 1e-9 && left >= tc.minLeftSec) {
             // Size: % of the balance (default 10%), or the fixed flip bet.
             let bet = tc.flipBet;
             let sizeNote = "";
@@ -1868,7 +1900,7 @@ async function traderRun(start: number, minute: number, until: number) {
           if (!limitLogged) {
             limitLogged = true;
             await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: other,
-              did: c !== null && c > tc.flipMax ? `${watchNote}; over ${Math.round(tc.flipMax * 100)}¢, skipped` : watchNote });
+              did: !waiting && c !== null && c > hi ? `${watchNote}; over ${cents(hi)}, skipped` : watchNote });
           }
           // With the live stream, check again as soon as a new price is pushed (at most a second's wait).
           if (stream?.s.connected) await stream.s.next(1000);
@@ -2075,14 +2107,27 @@ async function traderRun(start: number, minute: number, until: number) {
                 other = want;
               }
             }
+            // Dip rule: the side to buy already costs 60¢+ at the call → don't buy it now; wait for a drop below 55¢.
+            const watchNow = other === "up" ? q.upCost : q.downCost;
+            const dipState = !tc.dip || watchNow === null || watchNow < tc.flipAt - 1e-9
+              ? null
+              : watchNow > tc.flipMax + 1e-9 ? "above" : "high";
+            if (dipState) {
+              const back = dipState === "above"
+                ? `${Math.round(tc.dipBuy * 100)}¢`
+                : `${Math.round(tc.flipAt * 100)}–${Math.round(tc.flipMax * 100)}¢`;
+              note += `; ${other} already ${Math.round(watchNow! * 100)}¢ → wait for it to drop below ${
+                Math.round(tc.dipReset * 100)
+              }¢, buy when it climbs back to ${back}`;
+            }
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
-                opened_sec, p_side, open_ref, reason, order_type, status)
+                opened_sec, p_side, open_ref, reason, order_type, status, dip)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${other}, 0, 0, 0, 0, ${nowEl},
                 ${other === d.buy ? d.p : 1 - d.p},
                 ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${d.buy} at ${Math.round(nowEl)} s → waiting for ${other} to reach ${
                   Math.round(tc.flipAt * 100)
-                }¢${note}`}, 'flip', 'watching')`;
+                }¢${note}`}, 'flip', 'watching', ${dipState})`;
             row.did = `Jev picked ${d.buy}: waiting for ${other} to reach ${Math.round(tc.flipAt * 100)}¢${note}`;
             await logAsk(row);
             continue;

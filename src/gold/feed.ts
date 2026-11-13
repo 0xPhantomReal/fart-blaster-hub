@@ -802,6 +802,9 @@ export interface FadeBotStatus {
       auto?: boolean;
       feed?: string;
       form?: boolean;
+      dip?: boolean;
+      dipReset?: number;
+      dipBuy?: number;
       formCalls?: number;
       formMin?: number;
     };

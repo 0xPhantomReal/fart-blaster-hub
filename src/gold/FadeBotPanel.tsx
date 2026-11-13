@@ -831,6 +831,14 @@ function ModeBox({
         {order === "flip" && tc?.auto === false && !tc?.form
           ? chip(!!tc?.invert, `Invert ${tc?.invert ? "on" : "off"}`)
           : null}
+        {order === "flip"
+          ? chip(
+              tc?.dip !== false,
+              tc?.dip !== false
+                ? `Dip rule on (came in at 60¢+: wait for <${Math.round((tc?.dipReset ?? 0.55) * 100)}¢, then buy back in)`
+                : "Dip rule off",
+            )
+          : null}
         {chip(tc?.feed === "ws", `Prices: ${tc?.feed === "ws" ? "websocket" : "polling"}`)}
         {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
         {order === "flip"
