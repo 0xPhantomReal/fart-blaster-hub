@@ -236,6 +236,24 @@ export type Database = {
         }
         Relationships: []
       }
+      fadebot_path: {
+        Row: {
+          minute: number
+          pts: Json
+          window_start: number
+        }
+        Insert: {
+          minute: number
+          pts: Json
+          window_start: number
+        }
+        Update: {
+          minute?: number
+          pts?: Json
+          window_start?: number
+        }
+        Relationships: []
+      }
       fadebot_pmhist: {
         Row: {
           down_low: number | null
