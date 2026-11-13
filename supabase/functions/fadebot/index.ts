@@ -2040,6 +2040,8 @@ async function traderRun(start: number, minute: number, until: number) {
               ? `ALL-IN: every buy uses the whole balance (a loss empties the account); only with ${
                 Math.round(tc.edge * 100)
               }+ points of edge`
+              : tc.betPct > 0 && tc.order !== "limit"
+              ? `the bot sizes buys itself: ${tc.betPct}% of the balance per buy, only with ${Math.round(tc.edge * 100)}+ points of edge`
               : `the bot sizes buys itself: ${tc.kelly} Kelly of $${tc.bankroll}, at most $${tc.maxBet}, only with ${
                 Math.round(tc.edge * 100)
               }+ points of edge`,
@@ -2206,6 +2208,13 @@ async function traderRun(start: number, minute: number, until: number) {
             await logAsk(row);
             continue;
           }
+          // FADEBOT_TRADER_BET_PCT (Nov 13): market buys bet that % of the real balance, like flip; 0 = Kelly sizing.
+          let pctNote = "";
+          if (!tc.allIn && tc.betPct > 0) {
+            const bal = await traderBalance(live, tc.bankroll);
+            d.stake = Math.max(1, Math.floor(bal * tc.betPct) / 100);
+            pctNote = ` (${tc.betPct}% of $${bal.toFixed(2)})`;
+          }
           let shares = d.stake / cost;
           let price = cost;
           let fees = 0;
@@ -2224,8 +2233,8 @@ async function traderRun(start: number, minute: number, until: number) {
               ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
               ${`${tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`} (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)
-              }¢) at ${Math.round(nowEl)} s`})`;
-          row.did = `${tc.invert ? `faded Jev's ${d.buy}: ` : ""}bought ${side} $${d.stake.toFixed(2)} @ ${price.toFixed(2)}`;
+              }¢) at ${Math.round(nowEl)} s${pctNote}`})`;
+          row.did = `${tc.invert ? `faded Jev's ${d.buy}: ` : ""}bought ${side} $${d.stake.toFixed(2)}${pctNote} @ ${price.toFixed(2)}`;
         } else if ("sell" in d && pos) {
           let exit = sellNow;
           let fees = Number(pos.fees ?? 0);

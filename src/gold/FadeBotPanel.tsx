@@ -514,7 +514,7 @@ function TraderPanel({
           </>
         ) : null}
         {tc
-          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; ${tc.order === "flip" ? `but it doesn't buy that side: it waits for the OTHER side to reach ${Math.round((tc.flipAt ?? 0.6) * 100)}¢, then buys ${tc.betPct ? `${tc.betPct}% of the balance` : `$${tc.flipBet ?? 5}`} of the other side at market (if it costs no more than ${Math.round((tc.flipMax ?? 0.75) * 100)}¢), held to settlement; if the other side never gets there, nothing is bought` : tc.order === "limit" ? `instead of buying at market it places a limit order for ${tc.limitShares} shares at ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢ on that side, good until the window ends (the edge is measured against what it would pay: ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, or less if the side is already cheaper), and unfilled orders cost nothing. If the side already costs under ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, it buys $${tc.cheapBet ?? 1} at market instead` : `size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
+          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; ${tc.order === "flip" ? `but it doesn't buy that side: it waits for the OTHER side to reach ${Math.round((tc.flipAt ?? 0.6) * 100)}¢, then buys ${tc.betPct ? `${tc.betPct}% of the balance` : `$${tc.flipBet ?? 5}`} of the other side at market (if it costs no more than ${Math.round((tc.flipMax ?? 0.75) * 100)}¢), held to settlement; if the other side never gets there, nothing is bought` : tc.order === "limit" ? `instead of buying at market it places a limit order for ${tc.limitShares} shares at ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢ on that side, good until the window ends (the edge is measured against what it would pay: ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, or less if the side is already cheaper), and unfilled orders cost nothing. If the side already costs under ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, it buys $${tc.cheapBet ?? 1} at market instead` : `size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : tc.betPct ? `${tc.betPct}% of the balance per buy` : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (
@@ -852,11 +852,15 @@ function ModeBox({
           `Prices: ${tc?.feed === "ws" ? "websocket" : tc?.feed === "hybrid" ? "polling for calls, websocket for buys" : "polling"}`,
         )}
         {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
-        {order === "flip"
+        {order === "flip" || order === "market"
           ? chip(
               true,
-              tc?.betPct
+              tc?.allIn && order === "market"
+                ? "All-in"
+                : tc?.betPct
                 ? `${tc.betPct}% of balance`
+                : order === "market"
+                ? `${tc?.kelly} Kelly of $${tc?.bankroll}`
                 : `$${tc?.flipBet ?? 5} per buy`,
             )
           : null}
