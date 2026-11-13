@@ -425,6 +425,7 @@ export type Database = {
       fadebot_trades: {
         Row: {
           closed_at: string | null
+          dip: string | null
           exit_order_id: string | null
           exit_price: number | null
           exit_sec: number | null
@@ -454,6 +455,7 @@ export type Database = {
         }
         Insert: {
           closed_at?: string | null
+          dip?: string | null
           exit_order_id?: string | null
           exit_price?: number | null
           exit_sec?: number | null
@@ -483,6 +485,7 @@ export type Database = {
         }
         Update: {
           closed_at?: string | null
+          dip?: string | null
           exit_order_id?: string | null
           exit_price?: number | null
           exit_sec?: number | null
