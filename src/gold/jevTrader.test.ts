@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { kellyStake, traderDecision } from "../../supabase/functions/_shared/fadeStrategy";
+import { formChoice, jevForm, kellyStake, traderDecision, type FormCall } from "../../supabase/functions/_shared/fadeStrategy";
 
 const CFG = { edge: 0.05, bankroll: 100, kelly: 0.25, maxBet: 10, minBet: 1, minLeftSec: 10, maxEntries: 3 };
 const ctx = { secondsLeft: 200, entries: 0, lossLimitHit: false };
@@ -78,5 +78,24 @@ describe("trend-aware flip", () => {
     expect(trendFlipSide("up", "strong uptrend")).toBe("up");
     expect(trendFlipSide("up", "no clear trend")).toBe("up");
     expect(trendFlipSide("down", null)).toBe("down");
+  });
+});
+
+
+describe("Jev's form (straight while he's right, flip while he's wrong)", () => {
+  const call = (i: number, pick: "up" | "down", outcome: "up" | "down" | null): FormCall => ({ window: 1000 - i * 300, pick, outcome });
+  it("scores the last n settled calls, newest first, skipping unsettled ones", () => {
+    const calls = [call(0, "up", null), call(1, "up", "up"), call(2, "down", "up"), call(3, "down", "down"), call(4, "up", "down")];
+    expect(jevForm(calls, 3)).toEqual({ right: 2, total: 3, pct: 2 / 3 });
+    expect(jevForm(calls, 10)).toEqual({ right: 2, total: 4, pct: 0.5 });
+  });
+  it("goes straight at 11 of 20 (55%) and flips at 10 of 20", () => {
+    expect(formChoice({ right: 11, total: 20, pct: 0.55 }, 20, 0.55)).toBe("straight");
+    expect(formChoice({ right: 10, total: 20, pct: 0.5 }, 20, 0.55)).toBe("flip");
+    expect(formChoice({ right: 12, total: 20, pct: 0.6 }, 20, 0.55)).toBe("straight");
+  });
+  it("has no form until enough calls are scored", () => {
+    expect(formChoice({ right: 15, total: 15, pct: 1 }, 20, 0.55)).toBeNull();
+    expect(formChoice(jevForm([], 20), 20, 0.55)).toBeNull();
   });
 });

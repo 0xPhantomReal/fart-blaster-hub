@@ -391,3 +391,31 @@ export function trendFlipSide(trigger: Side, trendLabel: string | null | undefin
   if (/uptrend/.test(label) && trigger === "down") return "up";
   return trigger;
 }
+
+// ── Jev's form: straight while he's been right, flip while he's been wrong (FADEBOT_TRADER_FORM) ──
+
+/** One of Jev's past calls: the window, the side he picked, and the side that won (null while unknown). */
+export type FormCall = { window: number; pick: Side; outcome: Side | null };
+
+/**
+ * How many of Jev's last `n` scored calls were right. `calls` is newest first; calls without an outcome are
+ * skipped (a window that couldn't be settled doesn't count either way).
+ */
+export function jevForm(calls: FormCall[], n: number): { right: number; total: number; pct: number | null } {
+  const scored = calls.filter((c) => c.outcome === "up" || c.outcome === "down").slice(0, n);
+  const right = scored.filter((c) => c.pick === c.outcome).length;
+  return { right, total: scored.length, pct: scored.length ? right / scored.length : null };
+}
+
+/**
+ * Straight with Jev when he got at least `minPct` of his last `n` calls right, flip otherwise. Until `n` calls are
+ * scored there's no form yet: null (the bot flips as before).
+ */
+export function formChoice(
+  form: { right: number; total: number; pct: number | null },
+  n: number,
+  minPct: number,
+): "straight" | "flip" | null {
+  if (form.total < n || form.pct === null) return null;
+  return form.pct >= minPct - 1e-9 ? "straight" : "flip";
+}

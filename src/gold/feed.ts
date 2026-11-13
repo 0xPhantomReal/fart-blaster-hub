@@ -801,6 +801,9 @@ export interface FadeBotStatus {
       trend?: boolean;
       auto?: boolean;
       feed?: string;
+      form?: boolean;
+      formCalls?: number;
+      formMin?: number;
     };
     lsFade?: boolean;
     strongBet?: number;

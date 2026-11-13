@@ -66,6 +66,9 @@ import {
   regimeOf,
   REGIME_N,
   winner,
+  jevForm,
+  formChoice,
+  type FormCall,
   type JevHit,
   type Side,
 } from "../_shared/fadeStrategy.ts";
@@ -197,6 +200,13 @@ const settings = () => ({
     // Auto mode (Nov 12): each window, in a STRONG downtrend/uptrend go straight with Jev's pick; otherwise flip
     // against it. Overrides FADEBOT_TRADER_INVERT. FADEBOT_TRADER_AUTO=off = flip (or INVERT) as set.
     auto: env("FADEBOT_TRADER_AUTO") !== "off",
+    // Form (Nov 12): FADEBOT_TRADER_FORM=on → before each flip watch, score Jev's last FADEBOT_TRADER_FORM_CALLS calls
+    // (default 20; the first ask per window that cleared the edge, settled on BRTI). If he got
+    // FADEBOT_TRADER_FORM_MIN % or more right (default 55 = 11 of 20), go straight with him; otherwise flip.
+    // Takes the place of auto mode while it's on.
+    form: env("FADEBOT_TRADER_FORM") === "on",
+    formCalls: Math.max(1, Math.round(Number(env("FADEBOT_TRADER_FORM_CALLS") || 20))),
+    formMin: Number(env("FADEBOT_TRADER_FORM_MIN") || 55) / 100,
     // Price feed (Nov 12): "poll" (default) asks Polymarket's REST API for the price on every check; "ws" also opens
     // Polymarket's markets websocket for the window's market and uses its pushed best bid/ask while it's fresh
     // (FADEBOT_WS_MAX_AGE_SEC, default 3), falling back to the REST call otherwise. While watching for the flip price,
@@ -1640,6 +1650,47 @@ async function settleTrades() {
   }
 }
 
+/**
+ * Jev's recent form before window `start`: his last calls (the first ask per window that cleared the edge, as the
+ * bot triggers on), each scored by the side that won. The winner comes from the bot's own settled trade when there
+ * is one, otherwise from BRTI the way Polymarket settles (last minute's average vs the minute before the window).
+ */
+async function jevFormNow(start: number, tc: { edge: number; minLeftSec: number; formCalls: number }) {
+  const sql = db();
+  const now = Math.floor(Date.now() / 1000);
+  const calls = await sql`select * from (
+      select distinct on (window_start) window_start, p_up from fadebot_asks
+      where window_start < ${start} and window_start >= ${start - 3 * 86400} and window_start + ${TF} <= ${now}
+        and p_up is not null and at_sec <= ${TF - tc.minLeftSec}
+        and (greatest(p_up, 1 - p_up) - case when p_up >= 0.5 then up_cost else down_cost end) >= ${tc.edge - 1e-9}
+      order by window_start, at_sec) c
+    order by window_start desc limit ${tc.formCalls * 2 + 10}`;
+  if (!calls.length) return jevForm([], tc.formCalls);
+  const ws = calls.map((c) => Number(c.window_start));
+  const [tr, px] = await Promise.all([
+    sql`select window_start, side, result from fadebot_trades where window_start in ${sql(ws)}
+      and status = 'settled' and result in ('win', 'loss')`,
+    sql`select period_start, avg, n from fadebot_prices
+      where period_start in ${sql([...ws.map((w) => w - 60), ...ws.map((w) => w + TF - 60)])}`,
+  ]);
+  const won = new Map<number, Side>();
+  for (const t of tr) {
+    won.set(Number(t.window_start), t.result === "win" ? (t.side as Side) : t.side === "up" ? "down" : "up");
+  }
+  const avg = new Map<number, number>();
+  for (const p of px) if (Number(p.n) >= 20) avg.set(Number(p.period_start), Number(p.avg));
+  const list: FormCall[] = calls.map((c) => {
+    const w = Number(c.window_start);
+    let outcome: Side | null = won.get(w) ?? null;
+    if (!outcome) {
+      const a = avg.get(w - 60), b = avg.get(w + TF - 60);
+      if (a !== undefined && b !== undefined) outcome = winner(a, b);
+    }
+    return { window: w, pick: Number(c.p_up) >= 0.5 ? "up" : "down", outcome };
+  });
+  return jevForm(list, tc.formCalls);
+}
+
 /** One minute of the Jev trader for window `start`: record BRTI and ask Jev again and again until `until`. */
 async function traderRun(start: number, minute: number, until: number) {
   const sql = db();
@@ -1660,6 +1711,9 @@ async function traderRun(start: number, minute: number, until: number) {
     auto: boolean;
     feed: string;
     wsMaxAgeSec: number;
+    form: boolean;
+    formCalls: number;
+    formMin: number;
     limitPrice: number;
     limitShares: number;
     cheapBet: number;
@@ -1989,8 +2043,22 @@ async function traderRun(start: number, minute: number, until: number) {
           if (tc.order === "flip") {
             let other: Side = side === "up" ? "down" : "up";
             let note = "";
-            // Auto: strong trend → straight with Jev (watch his pick); anything else → flip (watch the other side).
-            if (tc.auto) {
+            // Form: straight with Jev while he's been right on enough of his recent calls, flip otherwise.
+            if (tc.form) {
+              const f = await jevFormNow(start, tc);
+              const pick = formChoice(f, tc.formCalls, tc.formMin);
+              const tally = `Jev ${f.right}/${f.total} right`;
+              if (pick === "straight") {
+                other = d.buy;
+                note = ` [form: ${tally} → straight with Jev]`;
+              } else {
+                other = d.buy === "up" ? "down" : "up";
+                note = pick === "flip"
+                  ? ` [form: ${tally} → flip]`
+                  : ` [form: only ${f.total} of ${tc.formCalls} past calls scored yet → flip]`;
+              }
+            } else if (tc.auto) {
+              // Auto: strong trend → straight with Jev (watch his pick); anything else → flip (watch the other side).
               const strong = /^strong (down|up)trend$/.test(trend.label);
               other = strong ? d.buy : d.buy === "up" ? "down" : "up";
               note = strong ? ` [auto: ${trend.label} → straight with Jev]` : ` [auto: ${trend.label} → flip]`;

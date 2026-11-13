@@ -785,14 +785,16 @@ function ModeBox({
       ? "Market buys on Jev's pick"
       : order === "limit"
         ? `Limit ${tc?.limitShares ?? 15} @ ${Math.round((tc?.limitPrice ?? 0.33) * 100)}¢ on Jev's pick`
-        : tc?.auto !== false
+        : tc?.form
+          ? `Form — straight when Jev got ${Math.ceil((tc.formMin ?? 0.55) * (tc.formCalls ?? 20) - 1e-9)}+ of his last ${tc.formCalls ?? 20} right · otherwise: flip`
+          : tc?.auto !== false
           ? "Auto — strong trend: straight with Jev · otherwise: flip"
           : tc?.invert
             ? "Straight with Jev (flip mechanics)"
             : "Flip — against Jev";
   // The latest window's choice, from its trade note ("[auto: strong downtrend → straight with Jev]").
   const latest = t?.trades[0];
-  const auto = latest?.reason?.match(/\[auto: ([^\]]+)\]/)?.[1] ?? null;
+  const auto = latest?.reason?.match(/\[(?:auto|form): ([^\]]+)\]/)?.[1] ?? null;
   const watching =
     latest && (latest.status === "watching" || latest.status === "open");
   const chip = (on: boolean | undefined, label: string) => (
@@ -813,7 +815,8 @@ function ModeBox({
         <span className="font-semibold text-[#c9d1d9]">{mode}</span>
       </div>
       <div className="mb-1 flex flex-wrap gap-1.5">
-        {order === "flip"
+        {order === "flip" ? chip(!!tc?.form, `Form ${tc?.form ? "on" : "off"}`) : null}
+        {order === "flip" && !tc?.form
           ? chip(
               tc?.auto !== false,
               `Auto ${tc?.auto !== false ? "on" : "off"}`,
@@ -825,7 +828,7 @@ function ModeBox({
               `Trend rule ${tc?.trend !== false ? "on" : "off"}`,
             )
           : null}
-        {order === "flip" && tc?.auto === false
+        {order === "flip" && tc?.auto === false && !tc?.form
           ? chip(!!tc?.invert, `Invert ${tc?.invert ? "on" : "off"}`)
           : null}
         {chip(tc?.feed === "ws", `Prices: ${tc?.feed === "ws" ? "websocket" : "polling"}`)}
