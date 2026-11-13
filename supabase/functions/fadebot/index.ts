@@ -226,7 +226,9 @@ const settings = () => ({
     // Polymarket's markets websocket for the window's market and uses its pushed best bid/ask while it's fresh
     // (FADEBOT_WS_MAX_AGE_SEC, default 3), falling back to the REST call otherwise. While watching for the flip price,
     // "ws" wakes on each pushed price instead of sleeping a second. Set FADEBOT_PRICE_FEED=ws to try it.
-    feed: (env("FADEBOT_PRICE_FEED") || "poll").toLowerCase() === "ws" ? "ws" : "poll",
+    // "hybrid": REST prices for Jev's asks and the edge check, the websocket only once the bot is watching for its buy
+    // price (60¢, the dip rule's levels), so it reacts the moment the price gets there.
+    feed: ((f) => (f === "ws" || f === "hybrid" ? f : "poll"))((env("FADEBOT_PRICE_FEED") || "poll").toLowerCase()),
     wsMaxAgeSec: Number(env("FADEBOT_WS_MAX_AGE_SEC") || 3),
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
@@ -711,9 +713,9 @@ let stream: { s: PriceStream; maxAgeMs: number } | null = null;
  * Best bid/ask (YES side). Tries the BBO (prices nested under `marketData`), then the full book, then the market
  * record itself, since the BBO has answered "market not found" for these 5-minute markets.
  */
-async function bbo(slug: string): Promise<{ bestBid?: Px; bestAsk?: Px }> {
+async function bbo(slug: string, useStream = true): Promise<{ bestBid?: Px; bestAsk?: Px }> {
   const errs: string[] = [];
-  const pushed = stream && stream.s.slug === slug ? stream.s.fresh(stream.maxAgeMs) : null;
+  const pushed = useStream && stream && stream.s.slug === slug ? stream.s.fresh(stream.maxAgeMs) : null;
   if (pushed && (pushed.bid !== null || pushed.ask !== null)) {
     lastQuoteVia = "live stream";
     return { bestBid: pxOf(pushed.bid ?? undefined), bestAsk: pxOf(pushed.ask ?? undefined) };
@@ -1567,8 +1569,8 @@ async function lightspeedWatch(start: number, minute: number, until: number) {
 /** This run's price path (see fadebot_path), filled by quotes(). */
 let pathRec: { ws: number; pts: (number | null)[][] } | null = null;
 
-async function quotes(m: WindowMarket) {
-  const b = await bbo(m.slug);
+async function quotes(m: WindowMarket, useStream = true) {
+  const b = await bbo(m.slug, useStream);
   const bid = b.bestBid ? Number(b.bestBid.value) : null;
   const ask = b.bestAsk ? Number(b.bestAsk.value) : null;
   const inv = (x: number | null) => (x === null ? null : Number((1 - x).toFixed(4)));
@@ -1817,7 +1819,7 @@ async function traderRun(start: number, minute: number, until: number) {
 
   // FADEBOT_PRICE_FEED=ws: open the market's live price stream for this run (REST stays the fallback).
   let myStream: PriceStream | null = null;
-  if (tc.feed === "ws" && forming && market) {
+  if ((tc.feed === "ws" || tc.feed === "hybrid") && forming && market) {
     myStream = new PriceStream(market.slug);
     const ok = await myStream.open(() => pm().ws.markets() as unknown as MarketsSocket);
     if (ok) stream = { s: myStream, maxAgeMs: tc.wsMaxAgeSec * 1000 };
@@ -1838,6 +1840,8 @@ async function traderRun(start: number, minute: number, until: number) {
       return;
     }
     await sleep(1500); // let the first ticks and the live block arrive
+    // Hybrid feed: REST until this window has a watch, then the stream.
+    const feedState = { watching: false };
     while (Date.now() / 1000 < until - 1) {
       const t0 = Date.now();
       const elapsed = t0 / 1000 - start;
@@ -1846,7 +1850,7 @@ async function traderRun(start: number, minute: number, until: number) {
       let row: Record<string, unknown> = { at_sec: elapsed };
       try {
         const [q, posRows, nRows, today] = await Promise.all([
-          quotes(market),
+          quotes(market, tc.feed !== "hybrid" || feedState.watching),
           sql`select * from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader' order by id desc limit 1`,
           sql`select count(*)::int as n from fadebot_trades where window_start = ${start}
@@ -1854,6 +1858,7 @@ async function traderRun(start: number, minute: number, until: number) {
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
+        feedState.watching = pos?.status === "watching";
         if (pos && pos.status === "watching") {
           // Flip: Jev's pick triggered; buy the other side once it costs FADEBOT_TRADER_FLIP_AT or more.
           const other = pos.side as Side;

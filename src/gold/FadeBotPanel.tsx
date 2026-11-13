@@ -847,7 +847,10 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
-        {chip(tc?.feed === "ws", `Prices: ${tc?.feed === "ws" ? "websocket" : "polling"}`)}
+        {chip(
+          tc?.feed === "ws" || tc?.feed === "hybrid",
+          `Prices: ${tc?.feed === "ws" ? "websocket" : tc?.feed === "hybrid" ? "polling for calls, websocket for buys" : "polling"}`,
+        )}
         {chip(true, `Edge ${Math.round((tc?.edge ?? 0) * 100)} pts`)}
         {order === "flip"
           ? chip(
