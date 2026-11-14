@@ -216,6 +216,10 @@ const settings = () => ({
     // Swap (Nov 13, on unless FADEBOT_TRADER_SWAP=off): when a buy (market or flip) would pay a price inside one of
     // FADEBOT_TRADER_SWAP_RANGES (cents, e.g. "40-50,69-99"; default: FADEBOT_TRADER_SWAP_AT (69) and up), buy the
     // OTHER side instead, same dollars, at its own price.
+    // Skip (Nov 14): FADEBOT_TRADER_SKIP_RANGES (cents, e.g. "45-55,66-68"; unset = none). When the price the bot is
+    // about to pay (market buy, or the flip buy once its trigger hits) is inside one of them, it doesn't buy: that
+    // window's call is skipped and the bot waits for the next window's call. Checked before the swap rule.
+    skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
     swap: env("FADEBOT_TRADER_SWAP") !== "off",
     swapAt: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100,
     swapRanges: parseRanges(env("FADEBOT_TRADER_SWAP_RANGES"), [{ lo: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100, hi: 0.99 }]),
@@ -1744,6 +1748,7 @@ async function traderRun(start: number, minute: number, until: number) {
     auto: boolean;
     feed: string;
     wsMaxAgeSec: number;
+    skipRanges: PriceRange[];
     swap: boolean;
     swapAt: number;
     swapRanges: PriceRange[];
@@ -1866,12 +1871,17 @@ async function traderRun(start: number, minute: number, until: number) {
           quotes(market, tc.feed !== "hybrid" || feedState.watching),
           sql`select * from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader' order by id desc limit 1`,
-          sql`select count(*)::int as n from fadebot_trades where window_start = ${start}
-            and coalesce(strategy, 'trader') = 'trader'`,
+          sql`select count(*)::int as n, count(*) filter (where status = 'skipped')::int as skipped
+            from fadebot_trades where window_start = ${start} and coalesce(strategy, 'trader') = 'trader'`,
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
         feedState.watching = pos?.status === "watching";
+        // A skipped call (skip ranges) ends this window: no more Jev asks or buys until the next one.
+        if (!pos && Number(nRows[0].skipped) > 0) {
+          await sleep(1000);
+          continue;
+        }
         if (pos && pos.status === "watching") {
           // Flip: Jev's pick triggered; buy the other side once it costs FADEBOT_TRADER_FLIP_AT or more.
           const other = pos.side as Side;
@@ -1909,7 +1919,17 @@ async function traderRun(start: number, minute: number, until: number) {
               bet = Math.max(1, Math.floor(bal * (pct / 100) * 100) / 100);
               sizeNote = ` (${pct}% of $${bal.toFixed(2)})`;
             }
-            // Swap: the watched side costs 69¢+ → buy the other side instead.
+            // Skip: the buy price is in a skip range → drop this window's call, wait for the next window.
+            const skipR = inRanges(c, tc.skipRanges);
+            if (skipR) {
+              const why = `; ${other} reached ${cents(c)}, in the ${rangesText([skipR])} skip range → skipped, waiting for the next call`;
+              await sql`update fadebot_trades set status = 'skipped', price = ${c}, reason = ${pos.reason + why}
+                where id = ${pos.id} and status = 'watching'`;
+              await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: null,
+                did: `${other} reached ${cents(c)}: in the ${rangesText([skipR])} skip range, skipped this window` });
+              continue;
+            }
+            // Swap: the watched side is in a swap range → buy the other side instead.
             const opp: Side = other === "up" ? "down" : "up";
             const oppCost = opp === "up" ? q.upCost : q.downCost;
             const swapRange = tc.swap ? inRanges(c, tc.swapRanges) : null;
@@ -2114,6 +2134,19 @@ async function traderRun(start: number, minute: number, until: number) {
           let pSide = tc.invert ? 1 - d.p : d.p;
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
           let swapNote = "";
+          // Skip (market buys): the price is in a skip range → no buy; this window's call is skipped.
+          const skipR = tc.order === "market" ? inRanges(cost, tc.skipRanges) : null;
+          if (skipR) {
+            await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+                opened_sec, p_side, open_ref, reason, status, jev_pick)
+              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, 0, 0, ${cost}, 0, ${nowEl}, ${pSide},
+                ${before?.avg ?? null}, ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} costs ${Math.round(cost * 100)}¢ at ${
+                  Math.round(nowEl)
+                } s: in the ${rangesText([skipR])} skip range → skipped, waiting for the next call`}, 'skipped', ${d.buy})`;
+            row.did = `${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([skipR])} skip range: skipped this window`;
+            await logAsk(row);
+            continue;
+          }
           const swapRange = tc.swap && tc.order === "market" ? inRanges(cost, tc.swapRanges) : null;
           if (swapRange) {
             const opp: Side = side === "up" ? "down" : "up";

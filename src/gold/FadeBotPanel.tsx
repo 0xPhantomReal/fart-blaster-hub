@@ -627,7 +627,9 @@ function TraderPanel({
                     <td className="py-0.5">{hhmm(x.window_start)}</td>
                     <td className="py-0.5">
                       {x.side === "up" ? "Up ↑" : "Down ↓"}{" "}
-                      {x.order_type === "flip" &&
+                      {x.status === "skipped"
+                        ? `skipped at ${Math.round((x.price ?? 0) * 100)}¢ (skip range)`
+                        : x.order_type === "flip" &&
                       (x.status === "watching" || x.result === "not triggered")
                         ? `waiting for it to reach ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢`
                         : x.order_type === "limit"
@@ -847,6 +849,12 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
+        {(order === "flip" || order === "market") && tc?.skipRanges?.length
+          ? chip(
+              true,
+              `Skip: no buy at ${tc.skipRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")}`,
+            )
+          : null}
         {order === "flip" || order === "market"
           ? chip(
               tc?.swap !== false,
@@ -891,7 +899,9 @@ function ModeBox({
               ? `waiting for ${latest.side === "up" ? "Up" : "Down"} to reach ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢`
               : latest.status === "open"
                 ? `holding ${latest.side === "up" ? "Up" : "Down"}`
-                : latest.result === "not triggered"
+                : latest.status === "skipped"
+                  ? `skipped (${latest.side === "up" ? "Up" : "Down"} hit a skip-range price) — waiting for the next call`
+                  : latest.result === "not triggered"
                   ? `no buy (${latest.side === "up" ? "Up" : "Down"} never reached ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢)`
                   : `${latest.side === "up" ? "Up" : "Down"} — ${latest.result ?? latest.status}`}
           </span>
