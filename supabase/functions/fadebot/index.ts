@@ -219,6 +219,9 @@ const settings = () => ({
     // Skip (Nov 14): FADEBOT_TRADER_SKIP_RANGES (cents, e.g. "45-55,66-68"; unset = none). When the price the bot is
     // about to pay (market buy, or the flip buy once its trigger hits) is inside one of them, it doesn't buy: that
     // window's call is skipped and the bot waits for the next window's call. Checked before the swap rule.
+    // FADEBOT_TRADER_MIN_SEC (Nov 14, default 0 = off): ignore calls in the first N seconds of a window (no buy, no
+    // flip watch). Jev is still asked, so the ask log stays complete; the first call after N seconds can trade.
+    minSec: Math.max(0, Number(env("FADEBOT_TRADER_MIN_SEC") || 0)),
     skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
     // FADEBOT_TRADER_SKIP_REASK=on: after a skip, keep asking Jev in the same window; the next call that clears the
     // edge at a price outside the skip ranges can buy. Market skips don't count toward FADEBOT_TRADER_MAX_ENTRIES (one
@@ -1752,6 +1755,7 @@ async function traderRun(start: number, minute: number, until: number) {
     auto: boolean;
     feed: string;
     wsMaxAgeSec: number;
+    minSec: number;
     skipRanges: PriceRange[];
     skipReask: boolean;
     swap: boolean;
@@ -2135,8 +2139,11 @@ async function traderRun(start: number, minute: number, until: number) {
         const raced = "buy" in d &&
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
+        const tooEarly = "buy" in d && nowEl < tc.minSec;
         if (raced) row.did = "another run just bought: skipped";
-        else if ("buy" in d) {
+        else if (tooEarly) {
+          row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
+        } else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
           let side: Side = tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
           let cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;

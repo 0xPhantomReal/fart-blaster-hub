@@ -849,6 +849,7 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
+        {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
         {(order === "flip" || order === "market") && tc?.skipRanges?.length
           ? chip(
               true,

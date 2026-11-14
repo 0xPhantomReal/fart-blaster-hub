@@ -802,6 +802,7 @@ export interface FadeBotStatus {
       auto?: boolean;
       feed?: string;
       form?: boolean;
+      minSec?: number;
       skipRanges?: { lo: number; hi: number }[];
       skipReask?: boolean;
       swap?: boolean;
