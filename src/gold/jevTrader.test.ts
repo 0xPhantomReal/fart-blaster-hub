@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formChoice, jevForm, kellyStake, traderDecision, type FormCall } from "../../supabase/functions/_shared/fadeStrategy";
+import { formChoice, inRanges, jevForm, kellyStake, parseRanges, rangesText, traderDecision, type FormCall } from "../../supabase/functions/_shared/fadeStrategy";
 
 const CFG = { edge: 0.05, bankroll: 100, kelly: 0.25, maxBet: 10, minBet: 1, minLeftSec: 10, maxEntries: 3 };
 const ctx = { secondsLeft: 200, entries: 0, lossLimitHit: false };
@@ -97,5 +97,25 @@ describe("Jev's form (straight while he's right, flip while he's wrong)", () => 
   it("has no form until enough calls are scored", () => {
     expect(formChoice({ right: 15, total: 15, pct: 1 }, 20, 0.55)).toBeNull();
     expect(formChoice(jevForm([], 20), 20, 0.55)).toBeNull();
+  });
+});
+
+
+describe("swap ranges", () => {
+  const def = [{ lo: 0.69, hi: 0.99 }];
+  it("parses cents ranges, single prices as 'and up', and skips junk", () => {
+    expect(parseRanges("40-50, 69-99", def)).toEqual([{ lo: 0.4, hi: 0.5 }, { lo: 0.69, hi: 0.99 }]);
+    expect(parseRanges("72", def)).toEqual([{ lo: 0.72, hi: 0.99 }]);
+    expect(parseRanges("50–40, abc, 20 to 30¢", def)).toEqual([{ lo: 0.4, hi: 0.5 }, { lo: 0.2, hi: 0.3 }]);
+    expect(parseRanges("", def)).toEqual(def);
+    expect(parseRanges(undefined, def)).toEqual(def);
+  });
+  it("matches prices inside any range, ends included", () => {
+    const r = parseRanges("40-50,69-99", def);
+    expect(inRanges(0.4, r)).toEqual({ lo: 0.4, hi: 0.5 });
+    expect(inRanges(0.5, r)).toEqual({ lo: 0.4, hi: 0.5 });
+    expect(inRanges(0.55, r)).toBeNull();
+    expect(inRanges(0.69, r)).toEqual({ lo: 0.69, hi: 0.99 });
+    expect(rangesText(r)).toBe("40–50¢, 69–99¢");
   });
 });

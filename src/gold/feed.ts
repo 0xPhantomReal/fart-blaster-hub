@@ -804,6 +804,7 @@ export interface FadeBotStatus {
       form?: boolean;
       swap?: boolean;
       swapAt?: number;
+      swapRanges?: { lo: number; hi: number }[];
       dip?: boolean;
       sizeForm?: boolean;
       sizeCalls?: number;

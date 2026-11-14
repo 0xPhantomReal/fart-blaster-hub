@@ -851,7 +851,10 @@ function ModeBox({
           ? chip(
               tc?.swap !== false,
               tc?.swap !== false
-                ? `Swap on: a buy at ${Math.round((tc?.swapAt ?? 0.69) * 100)}¢+ buys the other side`
+                ? `Swap on: a buy at ${
+                  (tc?.swapRanges?.length ? tc.swapRanges : [{ lo: tc?.swapAt ?? 0.69, hi: 0.99 }])
+                    .map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
+                } buys the other side`
                 : "Swap off",
             )
           : null}

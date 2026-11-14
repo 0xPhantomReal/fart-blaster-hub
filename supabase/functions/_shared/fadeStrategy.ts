@@ -419,3 +419,40 @@ export function formChoice(
   if (form.total < n || form.pct === null) return null;
   return form.pct >= minPct - 1e-9 ? "straight" : "flip";
 }
+
+// ── Swap ranges (FADEBOT_TRADER_SWAP_RANGES) ──
+
+/** A price range in dollars, both ends included. */
+export type PriceRange = { lo: number; hi: number };
+
+/**
+ * Parse "40-50,69-99" (cents) into ranges. A single number ("69") means that price and up. Bad pieces are skipped;
+ * nothing usable → `fallback`.
+ */
+export function parseRanges(text: string | undefined, fallback: PriceRange[]): PriceRange[] {
+  const out: PriceRange[] = [];
+  for (const raw of (text ?? "").split(",")) {
+    const part = raw.trim().replace(/¢/g, "");
+    if (!part) continue;
+    const m = part.match(/^(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)$/i);
+    const one = part.match(/^(\d+(?:\.\d+)?)\+?$/);
+    let lo: number, hi: number;
+    if (m) [lo, hi] = [Number(m[1]), Number(m[2])];
+    else if (one) [lo, hi] = [Number(one[1]), 99];
+    else continue;
+    if (lo > hi) [lo, hi] = [hi, lo];
+    if (!(lo >= 0 && hi <= 100)) continue;
+    out.push({ lo: lo / 100, hi: hi / 100 });
+  }
+  return out.length ? out : fallback;
+}
+
+/** The range `price` falls in (ends included), or null. */
+export function inRanges(price: number, ranges: PriceRange[]): PriceRange | null {
+  return ranges.find((r) => price >= r.lo - 1e-9 && price <= r.hi + 1e-9) ?? null;
+}
+
+/** "40–50¢, 69–99¢" */
+export function rangesText(ranges: PriceRange[]): string {
+  return ranges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(", ");
+}

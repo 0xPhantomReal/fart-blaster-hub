@@ -68,6 +68,10 @@ import {
   winner,
   jevForm,
   formChoice,
+  parseRanges,
+  inRanges,
+  rangesText,
+  type PriceRange,
   type FormCall,
   type JevHit,
   type Side,
@@ -209,10 +213,12 @@ const settings = () => ({
     // (55¢), then buy when it climbs back: to FADEBOT_TRADER_DIP_BUY (65¢) if it came in above the range (over
     // FADEBOT_TRADER_FLIP_MAX), or back into the range (60–75¢) if it came in inside it. A side that starts below 60¢
     // and breaks up into the range is bought as before.
-    // Swap (Nov 13, on unless FADEBOT_TRADER_SWAP=off): when a buy (market or flip) would pay
-    // FADEBOT_TRADER_SWAP_AT (69¢) or more, buy the OTHER side instead, same dollars, at its own price.
+    // Swap (Nov 13, on unless FADEBOT_TRADER_SWAP=off): when a buy (market or flip) would pay a price inside one of
+    // FADEBOT_TRADER_SWAP_RANGES (cents, e.g. "40-50,69-99"; default: FADEBOT_TRADER_SWAP_AT (69) and up), buy the
+    // OTHER side instead, same dollars, at its own price.
     swap: env("FADEBOT_TRADER_SWAP") !== "off",
     swapAt: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100,
+    swapRanges: parseRanges(env("FADEBOT_TRADER_SWAP_RANGES"), [{ lo: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100, hi: 0.99 }]),
     dip: env("FADEBOT_TRADER_DIP") !== "off",
     dipReset: Number(env("FADEBOT_TRADER_DIP_RESET") || 55) / 100,
     dipBuy: Number(env("FADEBOT_TRADER_DIP_BUY") || 65) / 100,
@@ -1740,6 +1746,7 @@ async function traderRun(start: number, minute: number, until: number) {
     wsMaxAgeSec: number;
     swap: boolean;
     swapAt: number;
+    swapRanges: PriceRange[];
     dip: boolean;
     dipReset: number;
     dipBuy: number;
@@ -1905,11 +1912,12 @@ async function traderRun(start: number, minute: number, until: number) {
             // Swap: the watched side costs 69¢+ → buy the other side instead.
             const opp: Side = other === "up" ? "down" : "up";
             const oppCost = opp === "up" ? q.upCost : q.downCost;
-            const swapped = tc.swap && c >= tc.swapAt - 1e-9 && oppCost !== null && oppCost > 0 && oppCost < 1;
+            const swapRange = tc.swap ? inRanges(c, tc.swapRanges) : null;
+            const swapped = !!swapRange && oppCost !== null && oppCost > 0 && oppCost < 1;
             const buySide: Side = swapped ? opp : other;
             const cost = swapped ? oppCost! : c;
             const swapNote = swapped
-              ? ` (${other} at ${Math.round(c * 100)}¢ is ${Math.round(tc.swapAt * 100)}¢+ → swapped to ${opp} at ${Math.round(cost * 100)}¢)`
+              ? ` (${other} at ${Math.round(c * 100)}¢ is in the ${rangesText([swapRange!])} swap range → swapped to ${opp} at ${Math.round(cost * 100)}¢)`
               : "";
             const pSideNow = swapped && pos.p_side !== null ? 1 - Number(pos.p_side) : pos.p_side;
             let shares = bet / cost;
@@ -2106,11 +2114,12 @@ async function traderRun(start: number, minute: number, until: number) {
           let pSide = tc.invert ? 1 - d.p : d.p;
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
           let swapNote = "";
-          if (tc.swap && tc.order === "market" && cost >= tc.swapAt - 1e-9) {
+          const swapRange = tc.swap && tc.order === "market" ? inRanges(cost, tc.swapRanges) : null;
+          if (swapRange) {
             const opp: Side = side === "up" ? "down" : "up";
             const oc = opp === "up" ? q.upCost : q.downCost;
             if (oc !== null && oc > 0 && oc < 1) {
-              swapNote = ` (${side} at ${Math.round(cost * 100)}¢ is ${Math.round(tc.swapAt * 100)}¢+ → swapped to ${opp} at ${
+              swapNote = ` (${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([swapRange])} swap range → swapped to ${opp} at ${
                 Math.round(oc * 100)
               }¢)`;
               side = opp;
