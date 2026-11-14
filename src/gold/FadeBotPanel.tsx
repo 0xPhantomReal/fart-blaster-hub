@@ -847,6 +847,14 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
+        {order === "flip" || order === "market"
+          ? chip(
+              tc?.swap !== false,
+              tc?.swap !== false
+                ? `Swap on: a buy at ${Math.round((tc?.swapAt ?? 0.69) * 100)}¢+ buys the other side`
+                : "Swap off",
+            )
+          : null}
         {chip(
           tc?.feed === "ws" || tc?.feed === "hybrid",
           `Prices: ${tc?.feed === "ws" ? "websocket" : tc?.feed === "hybrid" ? "polling for calls, websocket for buys" : "polling"}`,
