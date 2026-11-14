@@ -220,6 +220,10 @@ const settings = () => ({
     // about to pay (market buy, or the flip buy once its trigger hits) is inside one of them, it doesn't buy: that
     // window's call is skipped and the bot waits for the next window's call. Checked before the swap rule.
     skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
+    // FADEBOT_TRADER_SKIP_REASK=on: after a skip, keep asking Jev in the same window; the next call that clears the
+    // edge at a price outside the skip ranges can buy. Market skips don't count toward FADEBOT_TRADER_MAX_ENTRIES (one
+    // 'skipped' row per window); skipped flip watches do, so a window can't churn through endless watches.
+    skipReask: env("FADEBOT_TRADER_SKIP_REASK") === "on",
     swap: env("FADEBOT_TRADER_SWAP") !== "off",
     swapAt: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100,
     swapRanges: parseRanges(env("FADEBOT_TRADER_SWAP_RANGES"), [{ lo: Number(env("FADEBOT_TRADER_SWAP_AT") || 69) / 100, hi: 0.99 }]),
@@ -1749,6 +1753,7 @@ async function traderRun(start: number, minute: number, until: number) {
     feed: string;
     wsMaxAgeSec: number;
     skipRanges: PriceRange[];
+    skipReask: boolean;
     swap: boolean;
     swapAt: number;
     swapRanges: PriceRange[];
@@ -1871,14 +1876,15 @@ async function traderRun(start: number, minute: number, until: number) {
           quotes(market, tc.feed !== "hybrid" || feedState.watching),
           sql`select * from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader' order by id desc limit 1`,
-          sql`select count(*)::int as n, count(*) filter (where status = 'skipped')::int as skipped
+          sql`select count(*) filter (where status <> 'skipped' or order_type = 'flip')::int as n,
+              count(*) filter (where status = 'skipped')::int as skipped
             from fadebot_trades where window_start = ${start} and coalesce(strategy, 'trader') = 'trader'`,
           traderToday(),
         ]);
         const pos = posRows[0] ?? null;
         feedState.watching = pos?.status === "watching";
         // A skipped call (skip ranges) ends this window: no more Jev asks or buys until the next one.
-        if (!pos && Number(nRows[0].skipped) > 0) {
+        if (!pos && Number(nRows[0].skipped) > 0 && !tc.skipReask) {
           await sleep(1000);
           continue;
         }
@@ -1922,11 +1928,15 @@ async function traderRun(start: number, minute: number, until: number) {
             // Skip: the buy price is in a skip range → drop this window's call, wait for the next window.
             const skipR = inRanges(c, tc.skipRanges);
             if (skipR) {
-              const why = `; ${other} reached ${cents(c)}, in the ${rangesText([skipR])} skip range → skipped, waiting for the next call`;
+              const why = `; ${other} reached ${cents(c)}, in the ${rangesText([skipR])} skip range → skipped, ${
+                tc.skipReask ? "asking Jev again" : "waiting for the next call"
+              }`;
               await sql`update fadebot_trades set status = 'skipped', price = ${c}, reason = ${pos.reason + why}
                 where id = ${pos.id} and status = 'watching'`;
               await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: null,
-                did: `${other} reached ${cents(c)}: in the ${rangesText([skipR])} skip range, skipped this window` });
+                did: `${other} reached ${cents(c)}: in the ${rangesText([skipR])} skip range, skipped${
+                  tc.skipReask ? " — asking again" : " this window"
+                }` });
               continue;
             }
             // Swap: the watched side is in a swap range → buy the other side instead.
@@ -2136,14 +2146,24 @@ async function traderRun(start: number, minute: number, until: number) {
           let swapNote = "";
           // Skip (market buys): the price is in a skip range → no buy; this window's call is skipped.
           const skipR = tc.order === "market" ? inRanges(cost, tc.skipRanges) : null;
+          if (skipR && tc.skipReask && Number(nRows[0].skipped) > 0) {
+            // Re-asking: this window already has its 'skipped' row; just note the ask and keep going.
+            row.did = `${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([skipR])} skip range: skipped, asking again`;
+            await logAsk(row);
+            continue;
+          }
           if (skipR) {
             await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
                 opened_sec, p_side, open_ref, reason, status, jev_pick)
               values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, 0, 0, ${cost}, 0, ${nowEl}, ${pSide},
                 ${before?.avg ?? null}, ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} costs ${Math.round(cost * 100)}¢ at ${
                   Math.round(nowEl)
-                } s: in the ${rangesText([skipR])} skip range → skipped, waiting for the next call`}, 'skipped', ${d.buy})`;
-            row.did = `${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([skipR])} skip range: skipped this window`;
+                } s: in the ${rangesText([skipR])} skip range → skipped, ${
+                  tc.skipReask ? "asking again" : "waiting for the next call"
+                }`}, 'skipped', ${d.buy})`;
+            row.did = `${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([skipR])} skip range: skipped ${
+              tc.skipReask ? "— asking again" : "this window"
+            }`;
             await logAsk(row);
             continue;
           }

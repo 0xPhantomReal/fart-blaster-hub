@@ -852,7 +852,9 @@ function ModeBox({
         {(order === "flip" || order === "market") && tc?.skipRanges?.length
           ? chip(
               true,
-              `Skip: no buy at ${tc.skipRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")}`,
+              `Skip: no buy at ${tc.skipRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")}${
+                tc.skipReask ? " (re-asks)" : " (rest of window)"
+              }`,
             )
           : null}
         {order === "flip" || order === "market"
@@ -900,7 +902,7 @@ function ModeBox({
               : latest.status === "open"
                 ? `holding ${latest.side === "up" ? "Up" : "Down"}`
                 : latest.status === "skipped"
-                  ? `skipped (${latest.side === "up" ? "Up" : "Down"} hit a skip-range price) — waiting for the next call`
+                  ? `skipped (${latest.side === "up" ? "Up" : "Down"} hit a skip-range price) — ${tc?.skipReask ? "asking Jev again" : "waiting for the next call"}`
                   : latest.result === "not triggered"
                   ? `no buy (${latest.side === "up" ? "Up" : "Down"} never reached ${Math.round((tc?.flipAt ?? 0.6) * 100)}¢)`
                   : `${latest.side === "up" ? "Up" : "Down"} — ${latest.result ?? latest.status}`}
