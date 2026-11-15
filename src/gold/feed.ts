@@ -807,6 +807,7 @@ export interface FadeBotStatus {
       stats?: boolean;
       statsInvert?: boolean;
       statsMaxAgainst?: number;
+      statsSwapAbove?: number;
       statsCandles?: number;
       statsMinN?: number;
       statsSlip?: number;

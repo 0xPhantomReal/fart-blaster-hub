@@ -239,6 +239,9 @@ const settings = () => ({
     // FADEBOT_TRADER_STATS_MAX_AGAINST (Nov 15, dollars; unset/0 = off): skip a stats buy when BTC is more than this
     // far on the wrong side of the window's start price for the side it would buy (after any stats invert).
     statsMaxAgainst: Math.max(0, Number(env("FADEBOT_TRADER_STATS_MAX_AGAINST") || 0)),
+    // FADEBOT_TRADER_STATS_SWAP_ABOVE (Nov 15, cents; unset/0 = off): when the side stats mode would buy (after any
+    // stats invert) costs more than this, buy the other, cheaper side instead. The wrong-side skip is checked after.
+    statsSwapAbove: Math.max(0, Number(env("FADEBOT_TRADER_STATS_SWAP_ABOVE") || 0)) / 100,
     statsCandles: Math.max(12, Math.round(Number(env("FADEBOT_TRADER_STATS_CANDLES") || 288))),
     statsMinN: Math.max(3, Math.round(Number(env("FADEBOT_TRADER_STATS_MIN_N") || 15))),
     statsSlip: Number(env("FADEBOT_TRADER_STATS_SLIP") || 9) / 100,
@@ -1849,6 +1852,7 @@ async function traderRun(start: number, minute: number, until: number) {
     stats: boolean;
     statsInvert: boolean;
     statsMaxAgainst: number;
+    statsSwapAbove: number;
     statsCandles: number;
     statsMinN: number;
     statsSlip: number;
@@ -2290,16 +2294,7 @@ async function traderRun(start: number, minute: number, until: number) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
         } else if (statsD && statsD.choice === "skip" && "buy" in d) {
           row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${statsD.why}, asking again`;
-        } else if (
-          statsD && "buy" in d && tc.statsMaxAgainst > 0 && statsDist !== null &&
-          (((statsD.choice === "against") !== tc.statsInvert) ? -statsDist : statsDist) < -tc.statsMaxAgainst
-        ) {
-          // Stats would buy a side BTC is already well past the start line against: those mostly lose.
-          const buySide = ((statsD.choice === "against") !== tc.statsInvert) ? (d.buy === "up" ? "down" : "up") : d.buy;
-          const off = Math.abs(((statsD.choice === "against") !== tc.statsInvert) ? -statsDist : statsDist);
-          row.did = `stats would buy ${buySide}, but BTC is $${off.toFixed(0)} on the wrong side of the start (more than $${
-            tc.statsMaxAgainst
-          }): skipped, asking again`;
+
         } else if (jevPctHit && "buy" in d) {
           row.did = `Jev ${Math.round(d.p * 100)}% for ${d.buy}: in the ${
             Math.round(jevPctHit.lo * 100)
@@ -2316,6 +2311,31 @@ async function traderRun(start: number, minute: number, until: number) {
             : tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           let pSide = (statsD ? statsAgainst : tc.invert) ? 1 - d.p : d.p;
+          // Stats swap: the side to buy costs more than FADEBOT_TRADER_STATS_SWAP_ABOVE → buy the cheaper side.
+          let statsSwapNote = "";
+          if (statsD && tc.statsSwapAbove > 0 && cost > tc.statsSwapAbove + 1e-9) {
+            const opp: Side = side === "up" ? "down" : "up";
+            const oc = opp === "up" ? q.upCost : q.downCost;
+            if (oc !== null && oc > 0 && oc < 1) {
+              statsSwapNote = ` (${side} at ${Math.round(cost * 100)}¢ is over ${Math.round(tc.statsSwapAbove * 100)}¢ → swapped to ${opp} at ${
+                Math.round(oc * 100)
+              }¢)`;
+              side = opp;
+              cost = oc;
+              pSide = 1 - pSide;
+            }
+          }
+          // Stats wrong-side skip, on the side actually being bought: BTC well past the start line against it.
+          if (statsD && tc.statsMaxAgainst > 0 && statsDist !== null) {
+            const sideDist = side === d.buy ? statsDist : -statsDist;
+            if (sideDist < -tc.statsMaxAgainst) {
+              row.did = `stats would buy ${side}${statsSwapNote}, but BTC is $${Math.abs(sideDist).toFixed(0)} on the wrong side of the start (more than $${
+                tc.statsMaxAgainst
+              }): skipped, asking again`;
+              await logAsk(row);
+              continue;
+            }
+          }
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
           let swapNote = "";
           // Skip (market buys): the price is in a skip range → no buy; this window's call is skipped.
@@ -2504,10 +2524,10 @@ async function traderRun(start: number, minute: number, until: number) {
                   : tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`
               } (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)
-              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}${liveTag}${statsD ? ` [stats: ${statsD.bands}: ${statsD.why}]` : ""}`})`;
+              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}${statsSwapNote}${liveTag}${statsD ? ` [stats: ${statsD.bands}: ${statsD.why}]` : ""}`})`;
           row.did = `${
             statsD ? `stats ${statsAgainst ? "AGAINST" : "WITH"} Jev's ${d.buy}: ` : tc.invert ? `faded Jev's ${d.buy}: ` : ""
-          }bought ${side} $${d.stake.toFixed(2)}${pctNote}${swapNote}${liveTag} @ ${price.toFixed(2)}`;
+          }bought ${side} $${d.stake.toFixed(2)}${pctNote}${swapNote}${statsSwapNote}${liveTag} @ ${price.toFixed(2)}`;
         } else if ("sell" in d && pos) {
           let exit = sellNow;
           let fees = Number(pos.fees ?? 0);
