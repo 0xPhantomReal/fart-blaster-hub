@@ -9,6 +9,7 @@ import { lazy, Suspense } from "react";
 
 // Loaded on demand so the chart library stays out of the main site bundle.
 const Gold = lazy(() => import("./pages/Gold.tsx"));
+const Bot = lazy(() => import("./pages/Bot.tsx"));
 
 const queryClient = new QueryClient();
 
@@ -25,6 +26,14 @@ const App = () => (
             element={
               <Suspense fallback={<div className="h-screen bg-[#0e1116]" />}>
                 <Gold />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/bot"
+            element={
+              <Suspense fallback={<div className="h-screen bg-[#0e1116]" />}>
+                <Bot />
               </Suspense>
             }
           />

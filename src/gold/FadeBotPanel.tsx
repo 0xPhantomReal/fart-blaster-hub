@@ -18,15 +18,24 @@ export function FadeBotPanel({
   readSec,
   readLabel,
   pastIsLive,
+  status,
+  botOnly = false,
 }: {
   bars: ClosedBar[];
   readSec: number | null;
   readLabel: string;
   pastIsLive: boolean;
+  /** Status loaded by the page (the /bot page): the panel then doesn't fetch its own. */
+  status?: FadeBotStatus | null;
+  /** The /bot page: no chart, so the chart backtest box is left out. */
+  botOnly?: boolean;
 }) {
-  const [s, setS] = useState<FadeBotStatus | null | undefined>(undefined);
+  const [own, setS] = useState<FadeBotStatus | null | undefined>(undefined);
+  const external = status !== undefined;
+  const s = external ? status : own;
   const [check, setCheck] = useState<string | null>(null);
   useEffect(() => {
+    if (external) return;
     let alive = true;
     const load = () => fadeBotStatus().then((r) => alive && setS(r));
     void load();
@@ -35,7 +44,7 @@ export function FadeBotPanel({
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [external]);
   const bt = (
     botReadSec: number,
     limitPrice: number,
@@ -43,7 +52,7 @@ export function FadeBotPanel({
     emaTf: number,
     emaGap: number,
     flipNeedsRegime: boolean,
-  ) => (
+  ) => botOnly ? null : (
     <FadeBacktestBox
       bars={bars}
       readSec={readSec}

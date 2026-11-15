@@ -979,6 +979,7 @@ export interface TraderAsk {
 }
 export interface TraderStatus {
   live: boolean;
+  balance?: number | null;
   today: number;
   trades: TraderTrade[];
   totals: { n: number; pnl: number; wins: number } | null;

@@ -2998,6 +2998,8 @@ async function status() {
     trader: cfg.strategy === "jev-trader"
       ? {
         live: cfg.mode === "live" && cfg.trader.live,
+        // The balance the bot sizes its bets from: Polymarket buying power when live, the paper balance otherwise.
+        balance: await traderBalance(cfg.mode === "live" && cfg.trader.live, cfg.trader.bankroll).catch(() => null),
         today: await traderToday().catch(() => 0),
         trades: await sql`select * from fadebot_trades where coalesce(strategy, 'trader') = 'trader'
             order by id desc limit 40`.catch(() => []),
