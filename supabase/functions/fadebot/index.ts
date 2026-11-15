@@ -53,7 +53,14 @@
 import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { PriceStream, type MarketsSocket } from "../_shared/priceStream.ts";
-import { statsDecide, type StatsDecision, type StatsSample } from "../_shared/statsMode.ts";
+import {
+  distBand,
+  pctBand,
+  priceBand,
+  statsDecide,
+  type StatsDecision,
+  type StatsSample,
+} from "../_shared/statsMode.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
@@ -1732,8 +1739,10 @@ async function settleTrades() {
  */
 /**
  * Stats mode's history: Jev's past calls (asks that cleared the edge, after FADEBOT_TRADER_MIN_SEC and before the
- * last FADEBOT_TRADER_MIN_LEFT_SEC) in the last `statsCandles` windows, one per window per set of conditions, each
- * with its two quotes, BTC vs the start price in Jev's direction, and the side that won. Cached per window.
+ * last FADEBOT_TRADER_MIN_LEFT_SEC) in the last `statsCandles` windows, each with its two quotes, BTC vs the start
+ * price in Jev's direction, and the side that won. ONE sample per window per bucket (Jev % band × price band × BTC
+ * band) — the first such ask — exactly as the backtest counts them: a window with dozens of similar asks has one
+ * result, so it must count once, not dozens of times. Cached per window.
  */
 let statsCache: { start: number; key: string; samples: StatsSample[] } | null = null;
 async function statsHistory(
@@ -1777,12 +1786,13 @@ async function statsHistory(
     const pick: Side = pUp >= 0.5 ? "up" : "down";
     const jevCost = Number(pick === "up" ? a.up_cost : a.down_cost);
     const otherCost = Number(pick === "up" ? a.down_cost : a.up_cost);
+    if (!(jevCost > 0.02 && jevCost < 0.98 && otherCost > 0.02 && otherCost < 0.98)) continue;
     // BTC vs start: recorded on newer asks; older ones use the last BRTI price of the minute before the ask.
     const ref = a.ref !== null ? Number(a.ref) : per.get(w - 60)?.avg ?? null;
     const btc = a.btc !== null ? Number(a.btc) : per.get(Math.floor((w + Number(a.at_sec)) / 60) * 60 - 60)?.last ?? null;
     const dist = ref !== null && btc !== null ? (pick === "up" ? 1 : -1) * (btc - ref) : null;
     const sample: StatsSample = { window: w, pick, pct: Math.max(pUp, 1 - pUp), jevCost, otherCost, dist, winner: win };
-    const k = `${w}|${Math.round(sample.pct * 100)}|${Math.round(jevCost * 100)}|${dist === null ? "x" : Math.sign(dist) * Math.min(2, Math.floor(Math.abs(dist) / 25))}`;
+    const k = `${w}|${pctBand(sample.pct)}|${priceBand(jevCost)}|${distBand(dist) ?? "x"}`;
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(sample);
