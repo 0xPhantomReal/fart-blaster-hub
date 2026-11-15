@@ -222,9 +222,9 @@ const settings = () => ({
     // FADEBOT_TRADER_MIN_SEC (Nov 14, default 0 = off): ignore calls in the first N seconds of a window (no buy, no
     // flip watch). Jev is still asked, so the ask log stays complete; the first call after N seconds can trade.
     minSec: Math.max(0, Number(env("FADEBOT_TRADER_MIN_SEC") || 0)),
-    // Hybrid feed, market buys (Nov 15): the edge is measured on REST prices, but the ban, skip and swap checks use the
-    // live websocket price read right before buying (REST if no pushed price in the last few seconds).
-    // FADEBOT_TRADER_RULES_LIVE=off keeps those checks on the REST quote too.
+    // Hybrid feed, market buys (Nov 15): the BAN is checked on the live websocket price read right before buying (REST
+    // if no pushed price in the last few seconds); the edge, invert, skip and swap stay on the REST quote.
+    // FADEBOT_TRADER_RULES_LIVE=off keeps the ban on the REST quote too.
     rulesLive: env("FADEBOT_TRADER_RULES_LIVE") !== "off",
     skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
     // FADEBOT_TRADER_SKIP_REASK=on: after a skip, keep asking Jev in the same window; the next call that clears the
@@ -2147,17 +2147,15 @@ async function traderRun(start: number, minute: number, until: number) {
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
-        // Live price for the ban/skip/swap checks (hybrid + market), read right before buying.
-        let lq: typeof q | null = null;
+        // Live price for the ban check (hybrid + market), read right before buying.
         let liveTag = "";
         let liveBanned = "";
         if ("buy" in d && liveRules && !raced && !tooEarly) {
           const fresh = await quotes(market, true);
           const via = lastQuoteVia === "live stream" ? "live" : "REST";
           if (fresh.upCost !== null && fresh.downCost !== null) {
-            lq = fresh;
             const jl = d.buy === "up" ? fresh.upCost : fresh.downCost;
-            liveTag = ` [rules on ${via} price: ${d.buy} ${Math.round(jl * 100)}¢, REST said ${Math.round(d.cost * 100)}¢]`;
+            liveTag = ` [ban checked on ${via} price: ${d.buy} ${Math.round(jl * 100)}¢, REST said ${Math.round(d.cost * 100)}¢]`;
             if (tc.banLo !== undefined && tc.banHi !== undefined && jl >= tc.banLo - 1e-9 && jl <= tc.banHi + 1e-9) {
               liveBanned = `${d.buy} costs ${Math.round(jl * 100)}¢ (${via}; REST said ${Math.round(d.cost * 100)}¢): no buys from ${
                 Math.round(tc.banLo * 100)
@@ -2169,7 +2167,6 @@ async function traderRun(start: number, minute: number, until: number) {
             }–${Math.round(tc.banHi * 100)}¢`;
           }
         }
-        const qq = lq ?? q;
         if (raced) row.did = "another run just bought: skipped";
         else if (tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
@@ -2178,7 +2175,7 @@ async function traderRun(start: number, minute: number, until: number) {
         } else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
           let side: Side = tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
-          let cost = lq || tc.invert ? (side === "up" ? qq.upCost : qq.downCost) : d.cost;
+          let cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           let pSide = tc.invert ? 1 - d.p : d.p;
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
@@ -2209,7 +2206,7 @@ async function traderRun(start: number, minute: number, until: number) {
           const swapRange = tc.swap && tc.order === "market" ? inRanges(cost, tc.swapRanges) : null;
           if (swapRange) {
             const opp: Side = side === "up" ? "down" : "up";
-            const oc = opp === "up" ? qq.upCost : qq.downCost;
+            const oc = opp === "up" ? q.upCost : q.downCost;
             if (oc !== null && oc > 0 && oc < 1) {
               swapNote = ` (${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([swapRange])} swap range → swapped to ${opp} at ${
                 Math.round(oc * 100)
