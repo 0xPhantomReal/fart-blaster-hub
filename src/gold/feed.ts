@@ -806,6 +806,7 @@ export interface FadeBotStatus {
       skipJevPct?: { lo: number; hi: number }[];
       stats?: boolean;
       statsInvert?: boolean;
+      statsMaxAgainst?: number;
       statsCandles?: number;
       statsMinN?: number;
       statsSlip?: number;

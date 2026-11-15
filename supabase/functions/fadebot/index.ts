@@ -236,6 +236,9 @@ const settings = () => ({
     // FADEBOT_TRADER_STATS_INVERT=1 (Nov 15): swap stats mode's WITH and AGAINST before buying (SKIP stays a skip).
     // Separate from FADEBOT_TRADER_INVERT so an old invert setting can't flip stats mode by surprise.
     statsInvert: env("FADEBOT_TRADER_STATS_INVERT") === "1",
+    // FADEBOT_TRADER_STATS_MAX_AGAINST (Nov 15, dollars; unset/0 = off): skip a stats buy when BTC is more than this
+    // far on the wrong side of the window's start price for the side it would buy (after any stats invert).
+    statsMaxAgainst: Math.max(0, Number(env("FADEBOT_TRADER_STATS_MAX_AGAINST") || 0)),
     statsCandles: Math.max(12, Math.round(Number(env("FADEBOT_TRADER_STATS_CANDLES") || 288))),
     statsMinN: Math.max(3, Math.round(Number(env("FADEBOT_TRADER_STATS_MIN_N") || 15))),
     statsSlip: Number(env("FADEBOT_TRADER_STATS_SLIP") || 9) / 100,
@@ -1845,6 +1848,7 @@ async function traderRun(start: number, minute: number, until: number) {
     skipJevPct: PriceRange[];
     stats: boolean;
     statsInvert: boolean;
+    statsMaxAgainst: number;
     statsCandles: number;
     statsMinN: number;
     statsSlip: number;
@@ -2246,10 +2250,12 @@ async function traderRun(start: number, minute: number, until: number) {
         const tooEarly = "buy" in d && nowEl < tc.minSec;
         // Stats mode (market buys): with Jev, against him, or skip, from past calls in the same conditions.
         let statsD: StatsDecision | null = null;
+        let statsDist: number | null = null; // BTC vs start, in the direction of Jev's pick ($)
         if ("buy" in d && tc.stats && tc.order === "market" && !raced && !tooEarly) {
           const hist = await statsHistory(start, tc);
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
+          statsDist = dist;
           const otherNow = d.buy === "up" ? q.downCost : q.upCost;
           statsD = statsDecide({ pct: d.p, jevCost: d.cost, otherCost: otherNow ?? 1 - d.cost, dist }, hist, {
             minN: tc.statsMinN,
@@ -2284,6 +2290,16 @@ async function traderRun(start: number, minute: number, until: number) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
         } else if (statsD && statsD.choice === "skip" && "buy" in d) {
           row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${statsD.why}, asking again`;
+        } else if (
+          statsD && "buy" in d && tc.statsMaxAgainst > 0 && statsDist !== null &&
+          (((statsD.choice === "against") !== tc.statsInvert) ? -statsDist : statsDist) < -tc.statsMaxAgainst
+        ) {
+          // Stats would buy a side BTC is already well past the start line against: those mostly lose.
+          const buySide = ((statsD.choice === "against") !== tc.statsInvert) ? (d.buy === "up" ? "down" : "up") : d.buy;
+          const off = Math.abs(((statsD.choice === "against") !== tc.statsInvert) ? -statsDist : statsDist);
+          row.did = `stats would buy ${buySide}, but BTC is $${off.toFixed(0)} on the wrong side of the start (more than $${
+            tc.statsMaxAgainst
+          }): skipped, asking again`;
         } else if (jevPctHit && "buy" in d) {
           row.did = `Jev ${Math.round(d.p * 100)}% for ${d.buy}: in the ${
             Math.round(jevPctHit.lo * 100)

@@ -858,6 +858,9 @@ function ModeBox({
             )
           : null}
         {order === "market" && tc?.stats && tc?.statsInvert ? chip(true, "Stats INVERTED: buys the opposite of what stats picks") : null}
+        {order === "market" && tc?.stats && tc?.statsMaxAgainst
+          ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
+          : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
         {tc?.skipJevPct?.length
           ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)
