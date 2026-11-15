@@ -233,6 +233,9 @@ const settings = () => ({
     // skip and keep asking. Needs FADEBOT_TRADER_STATS_MIN_N past calls (15), widening the bands if needed. While on,
     // it replaces Invert, the ban, the skip and swap ranges and the Jev % skip.
     stats: env("FADEBOT_TRADER_STATS") === "on",
+    // FADEBOT_TRADER_STATS_INVERT=1 (Nov 15): swap stats mode's WITH and AGAINST before buying (SKIP stays a skip).
+    // Separate from FADEBOT_TRADER_INVERT so an old invert setting can't flip stats mode by surprise.
+    statsInvert: env("FADEBOT_TRADER_STATS_INVERT") === "1",
     statsCandles: Math.max(12, Math.round(Number(env("FADEBOT_TRADER_STATS_CANDLES") || 288))),
     statsMinN: Math.max(3, Math.round(Number(env("FADEBOT_TRADER_STATS_MIN_N") || 15))),
     statsSlip: Number(env("FADEBOT_TRADER_STATS_SLIP") || 9) / 100,
@@ -1841,6 +1844,7 @@ async function traderRun(start: number, minute: number, until: number) {
     minSec: number;
     skipJevPct: PriceRange[];
     stats: boolean;
+    statsInvert: boolean;
     statsCandles: number;
     statsMinN: number;
     statsSlip: number;
@@ -2288,7 +2292,8 @@ async function traderRun(start: number, minute: number, until: number) {
           row.did = liveBanned;
         } else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
-          const statsAgainst = statsD?.choice === "against";
+          // Stats picks with/against; FADEBOT_TRADER_STATS_INVERT=1 swaps the two.
+          const statsAgainst = (statsD?.choice === "against") !== (!!statsD && tc.statsInvert);
           let side: Side = statsD ? (statsAgainst ? (d.buy === "up" ? "down" : "up") : d.buy)
             : tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
           let cost = statsD ? (side === "up" ? q.upCost : q.downCost)
@@ -2477,7 +2482,9 @@ async function traderRun(start: number, minute: number, until: number) {
               ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
               ${`${
                 statsD
-                  ? `stats ${statsAgainst ? `AGAINST Jev: he wanted ${d.buy}` : "WITH Jev"}`
+                  ? `stats${tc.statsInvert ? ` (inverted from ${statsD.choice.toUpperCase()})` : ""} ${
+                    statsAgainst ? `AGAINST Jev: he wanted ${d.buy}` : "WITH Jev"
+                  }`
                   : tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`
               } (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)

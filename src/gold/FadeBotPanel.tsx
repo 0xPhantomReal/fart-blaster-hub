@@ -857,6 +857,7 @@ function ModeBox({
               }¢ gap) — overrides invert/ban/skip/swap`,
             )
           : null}
+        {order === "market" && tc?.stats && tc?.statsInvert ? chip(true, "Stats INVERTED: buys the opposite of what stats picks") : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
         {tc?.skipJevPct?.length
           ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)
