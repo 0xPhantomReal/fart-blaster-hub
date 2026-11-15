@@ -18,6 +18,7 @@ export type Database = {
         Row: {
           action: string | null
           at_sec: number | null
+          btc: number | null
           created_at: string | null
           did: string | null
           down_cost: number | null
@@ -27,6 +28,7 @@ export type Database = {
           p_up: number | null
           pos_side: string | null
           probs: Json | null
+          ref: number | null
           unrealized: number | null
           up_cost: number | null
           up_sell: number | null
@@ -35,6 +37,7 @@ export type Database = {
         Insert: {
           action?: string | null
           at_sec?: number | null
+          btc?: number | null
           created_at?: string | null
           did?: string | null
           down_cost?: number | null
@@ -44,6 +47,7 @@ export type Database = {
           p_up?: number | null
           pos_side?: string | null
           probs?: Json | null
+          ref?: number | null
           unrealized?: number | null
           up_cost?: number | null
           up_sell?: number | null
@@ -52,6 +56,7 @@ export type Database = {
         Update: {
           action?: string | null
           at_sec?: number | null
+          btc?: number | null
           created_at?: string | null
           did?: string | null
           down_cost?: number | null
@@ -61,6 +66,7 @@ export type Database = {
           p_up?: number | null
           pos_side?: string | null
           probs?: Json | null
+          ref?: number | null
           unrealized?: number | null
           up_cost?: number | null
           up_sell?: number | null
