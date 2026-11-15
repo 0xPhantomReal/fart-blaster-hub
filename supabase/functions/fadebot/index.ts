@@ -222,6 +222,10 @@ const settings = () => ({
     // FADEBOT_TRADER_MIN_SEC (Nov 14, default 0 = off): ignore calls in the first N seconds of a window (no buy, no
     // flip watch). Jev is still asked, so the ask log stays complete; the first call after N seconds can trade.
     minSec: Math.max(0, Number(env("FADEBOT_TRADER_MIN_SEC") || 0)),
+    // Hybrid feed, market buys (Nov 15): the edge is measured on REST prices, but the ban, skip and swap checks use the
+    // live websocket price read right before buying (REST if no pushed price in the last few seconds).
+    // FADEBOT_TRADER_RULES_LIVE=off keeps those checks on the REST quote too.
+    rulesLive: env("FADEBOT_TRADER_RULES_LIVE") !== "off",
     skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
     // FADEBOT_TRADER_SKIP_REASK=on: after a skip, keep asking Jev in the same window; the next call that clears the
     // edge at a price outside the skip ranges can buy. Market skips don't count toward FADEBOT_TRADER_MAX_ENTRIES (one
@@ -1756,6 +1760,7 @@ async function traderRun(start: number, minute: number, until: number) {
     feed: string;
     wsMaxAgeSec: number;
     minSec: number;
+    rulesLive: boolean;
     skipRanges: PriceRange[];
     skipReask: boolean;
     swap: boolean;
@@ -2128,25 +2133,52 @@ async function traderRun(start: number, minute: number, until: number) {
             downCost: q.downCost === null ? tc.limitPrice : Math.min(q.downCost, tc.limitPrice),
           }
           : q;
+        // Hybrid + market: the ban moves to the live price below, so the REST-based decision leaves it out.
+        const liveRules = tc.feed === "hybrid" && tc.rulesLive && tc.order === "market" && !!stream?.s.connected;
         const d = traderDecision(
           { action: jev.action, pUp: jev.pUp },
           lim,
           pos ? { side: pos.side } : null,
           { secondsLeft: TF - nowEl, entries: nRows[0].n, lossLimitHit: today <= -tc.dailyLoss },
-          tc.order === "limit" ? { ...tc, minBet: 0 } : tc,
+          tc.order === "limit" ? { ...tc, minBet: 0 } : liveRules ? { ...tc, banLo: undefined, banHi: undefined } : tc,
         );
         // Runs overlap for a moment at each minute: never buy if another run just opened a position.
         const raced = "buy" in d &&
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
+        // Live price for the ban/skip/swap checks (hybrid + market), read right before buying.
+        let lq: typeof q | null = null;
+        let liveTag = "";
+        let liveBanned = "";
+        if ("buy" in d && liveRules && !raced && !tooEarly) {
+          const fresh = await quotes(market, true);
+          const via = lastQuoteVia === "live stream" ? "live" : "REST";
+          if (fresh.upCost !== null && fresh.downCost !== null) {
+            lq = fresh;
+            const jl = d.buy === "up" ? fresh.upCost : fresh.downCost;
+            liveTag = ` [rules on ${via} price: ${d.buy} ${Math.round(jl * 100)}¢, REST said ${Math.round(d.cost * 100)}¢]`;
+            if (tc.banLo !== undefined && tc.banHi !== undefined && jl >= tc.banLo - 1e-9 && jl <= tc.banHi + 1e-9) {
+              liveBanned = `${d.buy} costs ${Math.round(jl * 100)}¢ (${via}; REST said ${Math.round(d.cost * 100)}¢): no buys from ${
+                Math.round(tc.banLo * 100)
+              }–${Math.round(tc.banHi * 100)}¢`;
+            }
+          } else if (tc.banLo !== undefined && tc.banHi !== undefined && d.cost >= tc.banLo - 1e-9 && d.cost <= tc.banHi + 1e-9) {
+            liveBanned = `${d.buy} costs ${Math.round(d.cost * 100)}¢ (REST; no live price): no buys from ${
+              Math.round(tc.banLo * 100)
+            }–${Math.round(tc.banHi * 100)}¢`;
+          }
+        }
+        const qq = lq ?? q;
         if (raced) row.did = "another run just bought: skipped";
         else if (tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
+        } else if (liveBanned) {
+          row.did = liveBanned;
         } else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
           let side: Side = tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
-          let cost = tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
+          let cost = lq || tc.invert ? (side === "up" ? qq.upCost : qq.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           let pSide = tc.invert ? 1 - d.p : d.p;
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
@@ -2177,7 +2209,7 @@ async function traderRun(start: number, minute: number, until: number) {
           const swapRange = tc.swap && tc.order === "market" ? inRanges(cost, tc.swapRanges) : null;
           if (swapRange) {
             const opp: Side = side === "up" ? "down" : "up";
-            const oc = opp === "up" ? q.upCost : q.downCost;
+            const oc = opp === "up" ? qq.upCost : qq.downCost;
             if (oc !== null && oc > 0 && oc < 1) {
               swapNote = ` (${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([swapRange])} swap range → swapped to ${opp} at ${
                 Math.round(oc * 100)
@@ -2331,8 +2363,8 @@ async function traderRun(start: number, minute: number, until: number) {
               ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
               ${`${tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`} (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)
-              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}`})`;
-          row.did = `${tc.invert ? `faded Jev's ${d.buy}: ` : ""}bought ${side} $${d.stake.toFixed(2)}${pctNote}${swapNote} @ ${price.toFixed(2)}`;
+              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}${liveTag}`})`;
+          row.did = `${tc.invert ? `faded Jev's ${d.buy}: ` : ""}bought ${side} $${d.stake.toFixed(2)}${pctNote}${swapNote}${liveTag} @ ${price.toFixed(2)}`;
         } else if ("sell" in d && pos) {
           let exit = sellNow;
           let fees = Number(pos.fees ?? 0);
