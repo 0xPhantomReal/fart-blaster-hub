@@ -222,6 +222,9 @@ const settings = () => ({
     // FADEBOT_TRADER_MIN_SEC (Nov 14, default 0 = off): ignore calls in the first N seconds of a window (no buy, no
     // flip watch). Jev is still asked, so the ask log stays complete; the first call after N seconds can trade.
     minSec: Math.max(0, Number(env("FADEBOT_TRADER_MIN_SEC") || 0)),
+    // FADEBOT_TRADER_SKIP_JEV_PCT (Nov 15, e.g. "61-70"; unset = none): ignore calls where Jev's % for his pick (as
+    // shown in the notes, rounded) is inside one of these ranges. No buy at that ask; the bot keeps asking.
+    skipJevPct: parseRanges(env("FADEBOT_TRADER_SKIP_JEV_PCT"), []),
     // Hybrid feed, market buys (Nov 15): the BAN is checked on the live websocket price read right before buying (REST
     // if no pushed price in the last few seconds); the edge, invert, skip and swap stay on the REST quote.
     // FADEBOT_TRADER_RULES_LIVE=off keeps the ban on the REST quote too.
@@ -1760,6 +1763,7 @@ async function traderRun(start: number, minute: number, until: number) {
     feed: string;
     wsMaxAgeSec: number;
     minSec: number;
+    skipJevPct: PriceRange[];
     rulesLive: boolean;
     skipRanges: PriceRange[];
     skipReask: boolean;
@@ -2147,10 +2151,11 @@ async function traderRun(start: number, minute: number, until: number) {
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
+        const jevPctHit = "buy" in d ? inRanges(Math.round(d.p * 100) / 100, tc.skipJevPct) : null;
         // Live price for the ban check (hybrid + market), read right before buying.
         let liveTag = "";
         let liveBanned = "";
-        if ("buy" in d && liveRules && !raced && !tooEarly) {
+        if ("buy" in d && liveRules && !raced && !tooEarly && !jevPctHit) {
           const fresh = await quotes(market, true);
           const via = lastQuoteVia === "live stream" ? "live" : "REST";
           if (fresh.upCost !== null && fresh.downCost !== null) {
@@ -2170,6 +2175,10 @@ async function traderRun(start: number, minute: number, until: number) {
         if (raced) row.did = "another run just bought: skipped";
         else if (tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
+        } else if (jevPctHit && "buy" in d) {
+          row.did = `Jev ${Math.round(d.p * 100)}% for ${d.buy}: in the ${
+            Math.round(jevPctHit.lo * 100)
+          }–${Math.round(jevPctHit.hi * 100)}% skip range (FADEBOT_TRADER_SKIP_JEV_PCT), asking again`;
         } else if (liveBanned) {
           row.did = liveBanned;
         } else if ("buy" in d) {

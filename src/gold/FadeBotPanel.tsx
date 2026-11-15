@@ -850,6 +850,9 @@ function ModeBox({
             )
           : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
+        {tc?.skipJevPct?.length
+          ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)
+          : null}
         {(order === "flip" || order === "market") && tc?.skipRanges?.length
           ? chip(
               true,

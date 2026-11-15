@@ -803,6 +803,7 @@ export interface FadeBotStatus {
       feed?: string;
       form?: boolean;
       minSec?: number;
+      skipJevPct?: { lo: number; hi: number }[];
       skipRanges?: { lo: number; hi: number }[];
       skipReask?: boolean;
       swap?: boolean;
