@@ -804,6 +804,11 @@ export interface FadeBotStatus {
       form?: boolean;
       minSec?: number;
       skipJevPct?: { lo: number; hi: number }[];
+      stats?: boolean;
+      statsCandles?: number;
+      statsMinN?: number;
+      statsSlip?: number;
+      statsMinEdge?: number;
       skipRanges?: { lo: number; hi: number }[];
       skipReask?: boolean;
       swap?: boolean;

@@ -849,6 +849,14 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
+        {order === "market" && tc?.stats
+          ? chip(
+              true,
+              `Stats mode ON: with/against/skip from the last ${tc.statsCandles ?? 288} windows (min ${tc.statsMinN ?? 15} calls, +${
+                Math.round((tc.statsSlip ?? 0.09) * 100)
+              }¢ gap) — overrides invert/ban/skip/swap`,
+            )
+          : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
         {tc?.skipJevPct?.length
           ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)
