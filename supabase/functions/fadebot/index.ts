@@ -3273,7 +3273,7 @@ async function regimeExport(days: number) {
   const sql = db();
   const r4 = (x: unknown) => (x === null || x === undefined ? null : Math.round(Number(x) * 10000) / 10000);
   const [asks, paths, hist, reads, trades] = await Promise.all([
-    sql`select window_start, at_sec, p_up, up_cost, down_cost from fadebot_asks
+    sql`select window_start, at_sec, p_up, up_cost, down_cost, btc, ref from fadebot_asks
       where window_start >= ${from} and p_up is not null order by window_start, at_sec`,
     sql`select window_start, minute, pts from fadebot_path where window_start >= ${from} order by window_start, minute`,
     sql`select window_start, long_is, pts from fadebot_pmhist where window_start >= ${from} and pts is not null
@@ -3292,12 +3292,15 @@ async function regimeExport(days: number) {
   }
   c1.sort((a, b) => a.time - b.time);
   return {
-    version: 1,
+    version: 2,
     exported_at: now,
     from,
     tf: TF,
     settings: { edge: tc.edge, flipAt: tc.flipAt, flipMax: tc.flipMax, minLeftSec: tc.minLeftSec, auto: tc.auto, trend: tc.trend },
-    asks: asks.map((a) => [Number(a.window_start), r4(a.at_sec), r4(a.p_up), r4(a.up_cost), r4(a.down_cost)]),
+    // [window, sec, Jev P(up), Up cost, Down cost, BTC at the ask, window start price] — the last two as the live bot
+    // saw them (BRTI), recorded since Nov 15; null on older asks.
+    asks: asks.map((a) => [Number(a.window_start), r4(a.at_sec), r4(a.p_up), r4(a.up_cost), r4(a.down_cost),
+      a.btc === null ? null : Math.round(Number(a.btc) * 100) / 100, a.ref === null ? null : Math.round(Number(a.ref) * 100) / 100]),
     path,
     pmhist: hist.map((h) => [Number(h.window_start), h.long_is, h.pts]),
     outcomes: reads.map((r) => [Number(r.window_start), r.outcome, r4(r.open_ref)]),
