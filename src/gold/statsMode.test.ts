@@ -96,4 +96,14 @@ describe("statsPick", () => {
     const k = statsPick(call, c, { ...cfg, invert: true, swapAbove: 0, maxAgainst: 5 });
     expect(k.buy).toBe(false);
   });
+  it("swaps when the price is in a stats swap range", () => {
+    const c = countSamples(mk(20, {}, 12));
+    const base = { ...cfg, invert: false, swapAbove: 0, maxAgainst: 0 };
+    const r = statsPick(call, c, { ...base, swapRanges: [{ lo: 0.25, hi: 0.35 }] });
+    expect(r.buy && r.side).toBe("down");
+    expect(r.buy && r.cost).toBe(0.7);
+    expect(r.note).toContain("stats swap range");
+    const n = statsPick(call, c, { ...base, swapRanges: [{ lo: 0.4, hi: 0.5 }] });
+    expect(n.buy && n.side).toBe("up");
+  });
 });

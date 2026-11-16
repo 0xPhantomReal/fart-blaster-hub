@@ -10,6 +10,8 @@
  * bands it widens step by step; with too few even then, it skips.
  */
 
+import { inRanges, type PriceRange, rangesText } from "./fadeStrategy.ts";
+
 export type Side = "up" | "down";
 
 /** One past call: Jev's pick, his %, the two quotes at the call, BTC vs start (his direction, $) and the winner. */
@@ -217,7 +219,7 @@ export function statsDecide(call: StatsCall, counts: StatsCounts, cfg: StatsCfg)
 }
 
 /** Stats mode's extra rules on top of the decision (all optional). */
-export type PickCfg = StatsCfg & { invert: boolean; swapAbove: number; maxAgainst: number };
+export type PickCfg = StatsCfg & { invert: boolean; swapAbove: number; swapRanges?: PriceRange[]; maxAgainst: number };
 
 export type StatsPick =
   | { buy: false; decision: StatsDecision; note: string }
@@ -225,7 +227,7 @@ export type StatsPick =
 
 /**
  * The whole stats-mode pick for one call, in the live bot's order: decide (with / against / skip) → stats invert →
- * swap a side over `swapAbove` to the cheaper side → skip if BTC is more than `maxAgainst` past the start line
+ * swap to the other side when the price is over `swapAbove` or in `swapRanges` → skip if BTC is more than `maxAgainst` past the start line
  * against the side actually being bought.
  */
 export function statsPick(call: StatsCall & { pick: Side }, counts: StatsCounts, cfg: PickCfg): StatsPick {
@@ -237,9 +239,12 @@ export function statsPick(call: StatsCall & { pick: Side }, counts: StatsCounts,
   let cost = against ? call.otherCost : call.jevCost;
   let note = "";
   if (cfg.invert) note += ` (inverted from ${decision.choice.toUpperCase()})`;
-  if (cfg.swapAbove > 0 && cost > cfg.swapAbove + 1e-9) {
+  const over = cfg.swapAbove > 0 && cost > cfg.swapAbove + 1e-9;
+  const inR = over ? null : inRanges(cost, cfg.swapRanges ?? []);
+  if (over || inR) {
     const oc = against ? call.jevCost : call.otherCost;
-    note += ` (${side} at ${Math.round(cost * 100)}¢ is over ${Math.round(cfg.swapAbove * 100)}¢ → swapped to ${
+    const why = over ? `is over ${Math.round(cfg.swapAbove * 100)}¢` : `is in the ${rangesText([inR!])} stats swap range`;
+    note += ` (${side} at ${Math.round(cost * 100)}¢ ${why} → swapped to ${
       side === "up" ? "down" : "up"
     } at ${Math.round(oc * 100)}¢)`;
     against = !against;

@@ -870,6 +870,11 @@ function ModeBox({
         {order === "market" && tc?.stats && tc?.statsSwapAbove
           ? chip(true, `Stats swaps buys over ${Math.round(tc.statsSwapAbove * 100)}¢ to the cheaper side`)
           : null}
+        {order === "market" && tc?.stats && tc?.statsSwapRanges?.length
+          ? chip(true, `Stats swap: a buy at ${
+            tc.statsSwapRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
+          } buys the other side`)
+          : null}
         {order === "market" && tc?.stats && tc?.statsMaxAgainst
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}
