@@ -17,6 +17,7 @@ const FIELDS: { group: string; fields: Field[] }[] = [
     fields: [
       { key: "edge", label: "Edge (pts)", hint: "FADEBOT_TRADER_EDGE" },
       { key: "minSec", label: "No calls before (s)", hint: "FADEBOT_TRADER_MIN_SEC" },
+      { key: "confirmSec", label: "Confirm after (s, 0 = off)", hint: "FADEBOT_TRADER_CONFIRM_SEC" },
       { key: "skipJevPct", label: "Skip Jev % (e.g. 50-55,61-70)", hint: "FADEBOT_TRADER_SKIP_JEV_PCT" },
     ],
   },
@@ -63,6 +64,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
   return {
     edge: c100(t.edge),
     minSec: String(t.minSec ?? 0),
+    confirmSec: String(t.confirmSec ?? 0),
     skipJevPct: rng(t.skipJevPct),
     invert: yn(t.invert),
     ban: t.banLo !== undefined && t.banHi !== undefined ? rng([{ lo: t.banLo, hi: t.banHi }]) : "",
@@ -93,6 +95,7 @@ function secretsFor(f: Record<string, string>): string[] {
   put("FADEBOT_TRADER_ORDER", "market");
   put("FADEBOT_TRADER_EDGE", f.edge);
   put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
+  put("FADEBOT_TRADER_CONFIRM_SEC", f.confirmSec || "0");
   put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
   put("FADEBOT_TRADER_STATS", f.stats === "on" ? "on" : "off");
   if (f.stats === "on") {

@@ -58,6 +58,7 @@ import {
   type AskRow,
   buildSamples,
   callOf,
+  isCall,
   countSamples,
   perDollar,
   type StatsCounts,
@@ -235,6 +236,10 @@ const settings = () => ({
     // FADEBOT_TRADER_MIN_SEC (Nov 14, default 0 = off): ignore calls in the first N seconds of a window (no buy, no
     // flip watch). Jev is still asked, so the ask log stays complete; the first call after N seconds can trade.
     minSec: Math.max(0, Number(env("FADEBOT_TRADER_MIN_SEC") || 0)),
+    // Bias + confirmation (market buys; FADEBOT_TRADER_CONFIRM_SEC, e.g. 60): the window's first call (edge cleared,
+    // after MIN_SEC) sets the bias and is not bought; the first call at least this many seconds later confirms it
+    // (same side → buy) or becomes the new bias (other side) and the wait starts again. 0 / unset = off.
+    confirmSec: Math.max(0, Number(env("FADEBOT_TRADER_CONFIRM_SEC") || 0)),
     // FADEBOT_TRADER_SKIP_JEV_PCT (Nov 15, e.g. "61-70"; unset = none): ignore calls where Jev's % for his pick (as
     // shown in the notes, rounded) is inside one of these ranges. No buy at that ask; the bot keeps asking.
     skipJevPct: parseRanges(env("FADEBOT_TRADER_SKIP_JEV_PCT"), []),
@@ -1827,6 +1832,7 @@ async function statsHistory(
 /** The market-buy settings marketPick needs, from the trader settings (live, or the replay's edited copy). */
 function marketCfg(tc: {
   minSec: number;
+  confirmSec: number;
   stats: boolean;
   statsMinN: number;
   statsSlip: number;
@@ -1843,6 +1849,7 @@ function marketCfg(tc: {
 }): MarketCfg {
   return {
     minSec: tc.minSec,
+    confirmSec: tc.confirmSec,
     stats: tc.stats,
     statsCfg: {
       minN: tc.statsMinN,
@@ -1878,6 +1885,7 @@ function replaySettings(o: Record<string, unknown>) {
   };
   set("edge", num("edge", 0, 99) !== undefined ? num("edge", 0, 99)! / 100 : undefined);
   set("minSec", num("minSec", 0, 299));
+  set("confirmSec", num("confirmSec", 0, 299));
   set("minLeftSec", num("minLeftSec", 0, 299));
   if (o.trigger === "choice" || o.trigger === "probability") tc.trigger = o.trigger;
   set("invert", on("invert"));
@@ -1962,8 +1970,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     const dm = dayMap.get(day) ?? { trades: 0, won: 0, pnl: 0, startBal: bal, endBal: bal };
     dayMap.set(day, dm);
     let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
+    const earlier: { at: number; pick: Side }[] = [];
     for (const a of byWindow.get(w)!) {
       if (!(a.upCost > 0 && a.upCost < 1 && a.downCost > 0 && a.downCost < 1)) continue;
+      const callNow = isCall(a, f);
       const action = (a.action ?? (a.pUp >= 0.5 ? "buy_up" : "buy_down")) as TraderAction;
       const d = traderDecision(
         { action, pUp: a.pUp },
@@ -1972,14 +1982,18 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         { secondsLeft: TF - a.at, entries: 0, lossLimitHit: dm.pnl <= -tc.dailyLoss },
         decideCfg,
       );
-      if (!("buy" in d)) continue;
+      if (!("buy" in d)) {
+        if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
+        continue;
+      }
       const c = callOf(a, data.refFallback, data.btcFallback);
       const dist = c.dist === null ? null : (d.buy === c.pick ? 1 : -1) * c.dist;
       const mp = marketPick(
-        { buy: d.buy, p: d.p, cost: d.cost, at: a.at, upCost: a.upCost, downCost: a.downCost, dist },
+        { buy: d.buy, p: d.p, cost: d.cost, at: a.at, upCost: a.upCost, downCost: a.downCost, dist, earlier: [...earlier] },
         mcfg,
         tc.stats ? counts : null,
       );
+      if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
       if (mp.kind === "wait") continue;
       if (mp.kind === "skip") {
         if (tc.skipReask) continue;
@@ -2044,6 +2058,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     used: {
       edge: Math.round(tc.edge * 100),
       minSec: tc.minSec,
+      confirmSec: tc.confirmSec,
       minLeftSec: tc.minLeftSec,
       trigger: tc.trigger,
       invert: tc.invert,
@@ -2146,6 +2161,7 @@ async function traderRun(start: number, minute: number, until: number) {
     feed: string;
     wsMaxAgeSec: number;
     minSec: number;
+    confirmSec: number;
     skipJevPct: PriceRange[];
     stats: boolean;
     statsInvert: boolean;
@@ -2600,8 +2616,24 @@ async function traderRun(start: number, minute: number, until: number) {
           const counts = tc.stats && !tooEarly ? await statsHistory(start, tc) : null;
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
+          // Bias + confirmation: this window's earlier calls, judged exactly as the replay judges them.
+          const earlier = tc.confirmSec > 0 && !tooEarly
+            ? (await sql`select at_sec, p_up, up_cost, down_cost from fadebot_asks where window_start = ${start}
+                and p_up is not null and up_cost is not null and down_cost is not null order by at_sec`)
+              .map((a): AskRow => ({
+                window: start,
+                at: Number(a.at_sec),
+                pUp: Number(a.p_up),
+                upCost: Number(a.up_cost),
+                downCost: Number(a.down_cost),
+                btc: null,
+                ref: null,
+              }))
+              .filter((a) => a.at < nowEl && isCall(a, { edge: tc.edge, minSec: tc.minSec, maxSec: TF - tc.minLeftSec }))
+              .map((a) => ({ at: a.at, pick: (a.pUp >= 0.5 ? "up" : "down") as Side }))
+            : [];
           mp = marketPick(
-            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned },
+            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned, earlier },
             marketCfg(tc),
             counts,
           );

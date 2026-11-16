@@ -879,6 +879,9 @@ function ModeBox({
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
+        {order === "market" && tc?.confirmSec
+          ? chip(true, `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree`)
+          : null}
         {tc?.skipJevPct?.length
           ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)
           : null}
