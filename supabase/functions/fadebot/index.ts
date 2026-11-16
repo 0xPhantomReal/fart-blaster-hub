@@ -54,11 +54,17 @@ import postgres from "npm:postgres@3.4.9";
 import { PolymarketUS } from "npm:polymarket-us@0.1.1";
 import { PriceStream, type MarketsSocket } from "../_shared/priceStream.ts";
 import {
-  distBand,
-  pctBand,
-  priceBand,
-  statsDecide,
+  addSample,
+  type AskRow,
+  buildSamples,
+  callOf,
+  countSamples,
+  isCall,
+  perDollar,
+  type StatsCounts,
   type StatsDecision,
+  statsPick,
+  type StatsPick,
   type StatsSample,
 } from "../_shared/statsMode.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
@@ -1748,25 +1754,22 @@ async function settleTrades() {
  * band) — the first such ask — exactly as the backtest counts them: a window with dozens of similar asks has one
  * result, so it must count once, not dozens of times. Cached per window.
  */
-let statsCache: { start: number; key: string; samples: StatsSample[] } | null = null;
-async function statsHistory(
-  start: number,
-  tc: { edge: number; minSec: number; minLeftSec: number; statsCandles: number },
-): Promise<StatsSample[]> {
-  const key = `${tc.edge}|${tc.minSec}|${tc.minLeftSec}|${tc.statsCandles}`;
-  if (statsCache && statsCache.start === start && statsCache.key === key) return statsCache.samples;
+/**
+ * Everything stats mode needs from the database for windows in [from, to): the recorded asks (as AskRows, in
+ * window/second order), the winner of each window (the bot's own settled trade, else BRTI the way Polymarket settles),
+ * and fallbacks for asks recorded before BTC/start price were stored (the minute-before average as the start price,
+ * the last BRTI price of the minute before the ask as BTC). Shared by the live bot and the replay.
+ */
+async function loadStatsData(from: number, to: number) {
   const sql = db();
-  const from = start - tc.statsCandles * TF;
   const [asksRows, tr, px] = await Promise.all([
     sql`select window_start, at_sec, p_up, up_cost, down_cost, btc, ref from fadebot_asks
-      where window_start >= ${from} and window_start < ${start} and p_up is not null
+      where window_start >= ${from} and window_start < ${to} and p_up is not null
         and up_cost is not null and down_cost is not null
-        and at_sec >= ${tc.minSec} and at_sec <= ${TF - tc.minLeftSec}
-        and (greatest(p_up, 1 - p_up) - case when p_up >= 0.5 then up_cost else down_cost end) >= ${tc.edge - 1e-9}
       order by window_start, at_sec`,
-    sql`select window_start, side, result from fadebot_trades where window_start >= ${from} and window_start < ${start}
+    sql`select window_start, side, result from fadebot_trades where window_start >= ${from} and window_start < ${to}
       and status = 'settled' and result in ('win', 'loss')`,
-    sql`select period_start, avg, last, n from fadebot_prices where period_start >= ${from - 120} and period_start < ${start + 60}`,
+    sql`select period_start, avg, last, n from fadebot_prices where period_start >= ${from - 120} and period_start < ${to + 60}`,
   ]);
   const won = new Map<number, Side>();
   for (const t of tr) {
@@ -1780,29 +1783,184 @@ async function statsHistory(
     const a = per.get(w - 60), b = per.get(w + TF - 60);
     return a && b && a.n >= 20 && b.n >= 20 ? winner(a.avg, b.avg) : null;
   };
-  const out: StatsSample[] = [];
-  const seen = new Set<string>();
-  for (const a of asksRows) {
-    const w = Number(a.window_start);
-    const win = winnerOf(w);
-    if (!win) continue;
-    const pUp = Number(a.p_up);
-    const pick: Side = pUp >= 0.5 ? "up" : "down";
-    const jevCost = Number(pick === "up" ? a.up_cost : a.down_cost);
-    const otherCost = Number(pick === "up" ? a.down_cost : a.up_cost);
-    if (!(jevCost > 0.02 && jevCost < 0.98 && otherCost > 0.02 && otherCost < 0.98)) continue;
-    // BTC vs start: recorded on newer asks; older ones use the last BRTI price of the minute before the ask.
-    const ref = a.ref !== null ? Number(a.ref) : per.get(w - 60)?.avg ?? null;
-    const btc = a.btc !== null ? Number(a.btc) : per.get(Math.floor((w + Number(a.at_sec)) / 60) * 60 - 60)?.last ?? null;
-    const dist = ref !== null && btc !== null ? (pick === "up" ? 1 : -1) * (btc - ref) : null;
-    const sample: StatsSample = { window: w, pick, pct: Math.max(pUp, 1 - pUp), jevCost, otherCost, dist, winner: win };
-    const k = `${w}|${pctBand(sample.pct)}|${priceBand(jevCost)}|${distBand(dist) ?? "x"}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(sample);
+  const refFallback = (w: number) => per.get(w - 60)?.avg ?? null;
+  const btcFallback = (w: number, at: number) => per.get(Math.floor((w + at) / 60) * 60 - 60)?.last ?? null;
+  const asks: AskRow[] = asksRows.map((a) => ({
+    window: Number(a.window_start),
+    at: Number(a.at_sec),
+    pUp: Number(a.p_up),
+    upCost: Number(a.up_cost),
+    downCost: Number(a.down_cost),
+    btc: a.btc === null ? null : Number(a.btc),
+    ref: a.ref === null ? null : Number(a.ref),
+  }));
+  return { asks, winnerOf, refFallback, btcFallback };
+}
+
+/**
+ * Stats mode's history for window `start`: Jev's past calls in the last `statsCandles` windows, ONE sample per
+ * window per bucket (see buildSamples), tallied per bucket. Cached per window.
+ */
+let statsCache: { start: number; key: string; counts: StatsCounts } | null = null;
+async function statsHistory(
+  start: number,
+  tc: { edge: number; minSec: number; minLeftSec: number; statsCandles: number },
+): Promise<StatsCounts> {
+  const key = `${tc.edge}|${tc.minSec}|${tc.minLeftSec}|${tc.statsCandles}`;
+  if (statsCache && statsCache.start === start && statsCache.key === key) return statsCache.counts;
+  const data = await loadStatsData(start - tc.statsCandles * TF, start);
+  const samples = buildSamples(
+    data.asks,
+    { edge: tc.edge, minSec: tc.minSec, maxSec: TF - tc.minLeftSec },
+    data.winnerOf,
+    data.refFallback,
+    data.btcFallback,
+  );
+  const counts = countSamples(samples);
+  statsCache = { start, key, counts };
+  return counts;
+}
+
+/**
+ * Stats replay (read-only): run stats mode exactly as the live bot does — the same history, the same statsPick, the
+ * same settings — over the last `days` days of the bot's own stored asks. In each window the asks that would have
+ * been calls are tried in order; skips ask again, the first buy is the trade. Each trade is scored on the window's
+ * real winner at its quote plus `gap` (the usual quote-to-fill gap), sized at FADEBOT_TRADER_BET_PCT of a balance
+ * that starts at `startBal`. The bot's real trade in each window is listed beside it.
+ */
+async function statsReplay(days: number, gap: number, startBal: number) {
+  const tc = settings().trader;
+  const now = Math.floor(Date.now() / 1000);
+  const to = Math.floor(now / TF) * TF - TF; // last finished window + 1
+  const from = to - days * 86400;
+  const data = await loadStatsData(from - tc.statsCandles * TF, to);
+  const f = { edge: tc.edge, minSec: tc.minSec, maxSec: TF - tc.minLeftSec };
+  const samples = buildSamples(data.asks, f, data.winnerOf, data.refFallback, data.btcFallback);
+  const real = await db()`select window_start, side, price, result, pnl, stake from fadebot_trades
+    where window_start >= ${from} and window_start < ${to} and coalesce(strategy, 'trader') = 'trader'
+    order by window_start`;
+  const realBy = new Map<number, { side: string; price: number; result: string | null; pnl: number | null }>();
+  for (const r of real) {
+    realBy.set(Number(r.window_start), {
+      side: String(r.side),
+      price: Number(r.price),
+      result: r.result ?? null,
+      pnl: r.pnl === null ? null : Number(r.pnl),
+    });
   }
-  statsCache = { start, key, samples: out };
-  return out;
+  const byWindow = new Map<number, AskRow[]>();
+  for (const a of data.asks) {
+    if (a.window < from) continue;
+    const l = byWindow.get(a.window) ?? [];
+    l.push(a);
+    byWindow.set(a.window, l);
+  }
+  const cfg = {
+    minN: tc.statsMinN,
+    slip: tc.statsSlip,
+    minEdge: tc.statsMinEdge,
+    fee: 0.095,
+    invert: tc.statsInvert,
+    swapAbove: tc.statsSwapAbove,
+    maxAgainst: tc.statsMaxAgainst,
+  };
+  const pct = tc.betPct > 0 ? tc.betPct / 100 : 0.05;
+  const counts: StatsCounts = new Map();
+  let lo = 0, hi = 0; // samples[lo, hi) are in the history window
+  let bal = startBal, peak = startBal, worstDrop = 0, won = 0, lost = 0, same = 0, compared = 0;
+  const trades: unknown[] = [];
+  const dayMap = new Map<string, { trades: number; won: number; pnl: number; startBal: number; endBal: number }>();
+  const windows = [...byWindow.keys()].sort((a, b) => a - b);
+  for (const w of windows) {
+    while (hi < samples.length && samples[hi].window < w) addSample(counts, samples[hi++]);
+    while (lo < hi && samples[lo].window < w - tc.statsCandles * TF) addSample(counts, samples[lo++], -1);
+    const win = data.winnerOf(w);
+    if (!win) continue;
+    let pick: StatsPick | null = null, at = 0, call: ReturnType<typeof callOf> | null = null;
+    for (const a of byWindow.get(w)!) {
+      if (!isCall(a, f)) continue;
+      const c = callOf(a, data.refFallback, data.btcFallback);
+      const sp = statsPick(c, counts, cfg);
+      if (sp.buy) {
+        pick = sp;
+        at = a.at;
+        call = c;
+        break;
+      }
+    }
+    if (!pick || !pick.buy || !call) continue;
+    const price = Math.min(0.99, pick.cost + gap);
+    const stake = Math.max(1, Math.round(bal * pct * 100) / 100);
+    const ok = pick.side === win;
+    const pnl = stake * perDollar(price, ok, 0.095);
+    const day = new Date(w * 1000).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const dm = dayMap.get(day) ?? { trades: 0, won: 0, pnl: 0, startBal: bal, endBal: bal };
+    bal += pnl;
+    dm.trades++;
+    if (ok) dm.won++;
+    dm.pnl += pnl;
+    dm.endBal = bal;
+    dayMap.set(day, dm);
+    if (ok) won++;
+    else lost++;
+    peak = Math.max(peak, bal);
+    worstDrop = Math.min(worstDrop, bal / peak - 1);
+    const r = realBy.get(w);
+    if (r) {
+      compared++;
+      if (r.side === pick.side) same++;
+    }
+    trades.push({
+      window: w,
+      at,
+      jev: call.pick,
+      pct: Math.round(call.pct * 100),
+      side: pick.side,
+      against: pick.against,
+      quote: Math.round(pick.cost * 100),
+      paid: Math.round(price * 100),
+      winner: win,
+      won: ok,
+      stake: Math.round(stake * 100) / 100,
+      pnl: Math.round(pnl * 100) / 100,
+      balance: Math.round(bal * 100) / 100,
+      note: `${pick.decision.bands}: ${pick.decision.why}${pick.note}`,
+      real: r ? { side: r.side, paid: Math.round(r.price * 100), result: r.result, pnl: r.pnl } : null,
+    });
+  }
+  const realWindows = real.filter((r) => r.result === "win" || r.result === "loss");
+  return {
+    days,
+    gap,
+    betPct: pct * 100,
+    settings: {
+      edge: tc.edge,
+      minSec: tc.minSec,
+      minLeftSec: tc.minLeftSec,
+      candles: tc.statsCandles,
+      minN: tc.statsMinN,
+      slip: tc.statsSlip,
+      minEdge: tc.statsMinEdge,
+      invert: tc.statsInvert,
+      swapAbove: tc.statsSwapAbove,
+      maxAgainst: tc.statsMaxAgainst,
+      statsOn: tc.stats,
+    },
+    totals: {
+      trades: won + lost,
+      won,
+      lost,
+      startBal,
+      endBal: Math.round(bal * 100) / 100,
+      worstDrop: Math.round(worstDrop * 1000) / 10,
+      realTrades: realWindows.length,
+      realPnl: Math.round(realWindows.reduce((x, r) => x + Number(r.pnl ?? 0), 0) * 100) / 100,
+      bothTraded: compared,
+      sameSide: same,
+    },
+    byDay: [...dayMap.entries()].map(([day, d]) => ({ day, ...d, pnl: Math.round(d.pnl * 100) / 100 })),
+    trades: trades.slice(-400),
+  };
 }
 
 async function jevFormNow(start: number, tc: { edge: number; minLeftSec: number; formCalls: number }) {
@@ -2285,20 +2443,29 @@ async function traderRun(start: number, minute: number, until: number) {
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
         // Stats mode (market buys): with Jev, against him, or skip, from past calls in the same conditions.
+        // The whole pick (decide → stats invert → swap → wrong-side skip) is statsPick, the same function the
+        // replay (backtest) runs, so live and replay decide alike.
         let statsD: StatsDecision | null = null;
-        let statsDist: number | null = null; // BTC vs start, in the direction of Jev's pick ($)
+        let sp: StatsPick | null = null;
         if ("buy" in d && tc.stats && tc.order === "market" && !raced && !tooEarly) {
-          const hist = await statsHistory(start, tc);
+          const counts = await statsHistory(start, tc);
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
-          statsDist = dist;
           const otherNow = d.buy === "up" ? qd.downCost : qd.upCost;
-          statsD = statsDecide({ pct: d.p, jevCost: d.cost, otherCost: otherNow ?? 1 - d.cost, dist }, hist, {
-            minN: tc.statsMinN,
-            slip: tc.statsSlip,
-            minEdge: tc.statsMinEdge,
-            fee: 0.095,
-          });
+          sp = statsPick(
+            { pick: d.buy, pct: d.p, jevCost: d.cost, otherCost: otherNow ?? 1 - d.cost, dist },
+            counts,
+            {
+              minN: tc.statsMinN,
+              slip: tc.statsSlip,
+              minEdge: tc.statsMinEdge,
+              fee: 0.095,
+              invert: tc.statsInvert,
+              swapAbove: tc.statsSwapAbove,
+              maxAgainst: tc.statsMaxAgainst,
+            },
+          );
+          statsD = sp.decision;
         }
         const jevPctHit = "buy" in d && !statsD ? inRanges(Math.round(d.p * 100) / 100, tc.skipJevPct) : null;
         // Live price for the ban check (hybrid + market), read right before buying.
@@ -2324,8 +2491,8 @@ async function traderRun(start: number, minute: number, until: number) {
         if (raced) row.did = "another run just bought: skipped";
         else if (tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
-        } else if (statsD && statsD.choice === "skip" && "buy" in d) {
-          row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${statsD.why}, asking again${recheckTag}`;
+        } else if (sp && !sp.buy && statsD && "buy" in d) {
+          row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${sp.note}, asking again${recheckTag}`;
 
         } else if (jevPctHit && "buy" in d) {
           row.did = `Jev ${Math.round(d.p * 100)}% for ${d.buy}: in the ${
@@ -2336,38 +2503,12 @@ async function traderRun(start: number, minute: number, until: number) {
         } else if ("buy" in d) {
           // Jev's trade, or (fading Jev) the other side for the same dollars.
           // Stats picks with/against; FADEBOT_TRADER_STATS_INVERT=1 swaps the two.
-          const statsAgainst = (statsD?.choice === "against") !== (!!statsD && tc.statsInvert);
-          let side: Side = statsD ? (statsAgainst ? (d.buy === "up" ? "down" : "up") : d.buy)
-            : tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
-          let cost = statsD ? (side === "up" ? qd.upCost : qd.downCost)
-            : tc.invert ? (side === "up" ? qd.upCost : qd.downCost) : d.cost;
+          const statsAgainst = !!(sp && sp.buy && sp.against);
+          let side: Side = sp && sp.buy ? sp.side : tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
+          let cost = sp && sp.buy ? sp.cost : tc.invert ? (side === "up" ? qd.upCost : qd.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
-          let pSide = (statsD ? statsAgainst : tc.invert) ? 1 - d.p : d.p;
-          // Stats swap: the side to buy costs more than FADEBOT_TRADER_STATS_SWAP_ABOVE → buy the cheaper side.
-          let statsSwapNote = "";
-          if (statsD && tc.statsSwapAbove > 0 && cost > tc.statsSwapAbove + 1e-9) {
-            const opp: Side = side === "up" ? "down" : "up";
-            const oc = opp === "up" ? qd.upCost : qd.downCost;
-            if (oc !== null && oc > 0 && oc < 1) {
-              statsSwapNote = ` (${side} at ${Math.round(cost * 100)}¢ is over ${Math.round(tc.statsSwapAbove * 100)}¢ → swapped to ${opp} at ${
-                Math.round(oc * 100)
-              }¢)`;
-              side = opp;
-              cost = oc;
-              pSide = 1 - pSide;
-            }
-          }
-          // Stats wrong-side skip, on the side actually being bought: BTC well past the start line against it.
-          if (statsD && tc.statsMaxAgainst > 0 && statsDist !== null) {
-            const sideDist = side === d.buy ? statsDist : -statsDist;
-            if (sideDist < -tc.statsMaxAgainst) {
-              row.did = `stats would buy ${side}${statsSwapNote}, but BTC is $${Math.abs(sideDist).toFixed(0)} on the wrong side of the start (more than $${
-                tc.statsMaxAgainst
-              }): skipped, asking again${recheckTag}`;
-              await logAsk(row);
-              continue;
-            }
-          }
+          let pSide = (sp && sp.buy ? statsAgainst : tc.invert) ? 1 - d.p : d.p;
+          const statsSwapNote = sp && sp.buy ? sp.note : "";
           // Swap (market buys): the side to buy costs 69¢+ → buy the other side instead, same dollars.
           let swapNote = "";
           // Skip (market buys): the price is in a skip range → no buy; this window's call is skipped.
@@ -2550,9 +2691,7 @@ async function traderRun(start: number, minute: number, until: number) {
               ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
               ${`${
                 statsD
-                  ? `stats${tc.statsInvert ? ` (inverted from ${statsD.choice.toUpperCase()})` : ""} ${
-                    statsAgainst ? `AGAINST Jev: he wanted ${d.buy}` : "WITH Jev"
-                  }`
+                  ? `stats ${statsAgainst ? `AGAINST Jev: he wanted ${d.buy}` : "WITH Jev"}`
                   : tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`
               } (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)
@@ -3318,6 +3457,16 @@ Deno.serve(async (req) => {
     if (body?.action === "auto-replay") {
       // Read-only: what auto mode would have chosen in past windows vs what the bot traded (up to 7 days).
       return json(await autoReplayReport(Math.min(7, Math.max(1, Number(body.days) || 7))));
+    }
+    if (body?.action === "stats-replay") {
+      // Read-only: stats mode replayed with the live bot's own code and settings over its stored asks.
+      return json(
+        await statsReplay(
+          Math.min(7, Math.max(1, Number(body.days) || 7)),
+          Math.min(0.3, Math.max(0, Number(body.gap ?? 10) / 100)),
+          Math.max(1, Number(body.start) || 100),
+        ),
+      );
     }
     if (body?.action === "regime-export") {
       // Read-only: the regime study's data (up to 14 days) as one JSON download.

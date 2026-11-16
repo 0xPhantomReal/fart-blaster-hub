@@ -1070,6 +1070,60 @@ export async function fetchAutoReplay(days = 7): Promise<AutoReplay | null> {
   return (await res.json().catch(() => null)) as AutoReplay | null;
 }
 
+export type StatsReplayTrade = {
+  window: number;
+  at: number;
+  jev: "up" | "down";
+  pct: number;
+  side: "up" | "down";
+  against: boolean;
+  quote: number;
+  paid: number;
+  winner: "up" | "down";
+  won: boolean;
+  stake: number;
+  pnl: number;
+  balance: number;
+  note: string;
+  real: { side: string; paid: number; result: string | null; pnl: number | null } | null;
+};
+export type StatsReplay = {
+  days: number;
+  gap: number;
+  betPct: number;
+  settings: Record<string, number | boolean>;
+  totals: {
+    trades: number;
+    won: number;
+    lost: number;
+    startBal: number;
+    endBal: number;
+    worstDrop: number;
+    realTrades: number;
+    realPnl: number;
+    bothTraded: number;
+    sameSide: number;
+  };
+  byDay: { day: string; trades: number; won: number; pnl: number; startBal: number; endBal: number }[];
+  trades: StatsReplayTrade[];
+  error?: string;
+};
+
+/** Stats mode replayed with the live bot's own code and settings over its stored asks (read-only, up to 7 days). */
+export async function fetchStatsReplay(days: number, gapCents: number, start: number): Promise<StatsReplay | null> {
+  if (!FN_URL) return null;
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+    },
+    body: JSON.stringify({ action: "stats-replay", days, gap: gapCents, start }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json().catch(() => null)) as StatsReplay | null;
+}
+
 /** The regime study's raw data (fadebot "regime-export", up to 14 days), saved as a JSON file. */
 export async function downloadRegimeData(days = 7): Promise<string | null> {
   if (!FN_URL) return "no backend configured";
