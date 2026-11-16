@@ -101,6 +101,20 @@ export type MarketPick =
     note: string;
   };
 
+/**
+ * 15-minute streak block (FADEBOT_TRADER_STREAK15): `results` are the latest finished 15-minute BTC markets, newest
+ * first. When the newest `n` all settled the same way, no trades. A missing result never blocks.
+ */
+export function streak15Block(results: (Side | null)[], n: number): { blocked: boolean; side: Side | null; run: number } {
+  let run = 0;
+  const first = results[0] ?? null;
+  for (const r of results) {
+    if (!first || r !== first) break;
+    run++;
+  }
+  return { blocked: n > 0 && !!first && run >= n, side: first, run };
+}
+
 const opp = (s: Side): Side => (s === "up" ? "down" : "up");
 
 export function marketPick(call: MarketCall, cfg: MarketCfg, counts: StatsCounts | null): MarketPick {

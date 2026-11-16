@@ -879,6 +879,21 @@ function ModeBox({
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
+        {tc?.streak15
+          ? chip(
+            true,
+            `No trades after ${tc.streak15} same 15m results in a row${
+              t?.streak15
+                ? ` · last 15m: ${
+                  t.streak15.results
+                    .slice(0, Math.max(tc.streak15, 3))
+                    .map((r) => (r.result === "up" ? "Up" : r.result === "down" ? "Down" : "?") + (r.source === "BRTI" ? "*" : ""))
+                    .join(" ")
+                }${t.streak15.blocked ? " → BLOCKING" : ""}${t.streak15.results.some((r) => r.source === "BRTI") ? " (* not settled yet: BRTI)" : ""}`
+                : ""
+            }`,
+          )
+          : null}
         {order === "market" && tc?.confirmSec
           ? chip(true, `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree`)
           : null}

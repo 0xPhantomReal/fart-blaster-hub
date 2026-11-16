@@ -65,7 +65,7 @@ import {
   type StatsDecision,
   type StatsSample,
 } from "../_shared/statsMode.ts";
-import { type MarketCfg, type MarketPick, marketPick } from "../_shared/marketPick.ts";
+import { type MarketCfg, type MarketPick, marketPick, streak15Block } from "../_shared/marketPick.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
@@ -240,6 +240,9 @@ const settings = () => ({
     // after MIN_SEC) sets the bias and is not bought; the first call at least this many seconds later confirms it
     // (same side → buy) or becomes the new bias (other side) and the wait starts again. 0 / unset = off.
     confirmSec: Math.max(0, Number(env("FADEBOT_TRADER_CONFIRM_SEC") || 0)),
+    // 15-minute streak block (FADEBOT_TRADER_STREAK15, e.g. 3): when the latest this-many finished 15-minute BTC
+    // markets on Polymarket all settled the same way, no new buys. 0 / unset = off.
+    streak15: Math.max(0, Math.round(Number(env("FADEBOT_TRADER_STREAK15") || 0))),
     // FADEBOT_TRADER_SKIP_JEV_PCT (Nov 15, e.g. "61-70"; unset = none): ignore calls where Jev's % for his pick (as
     // shown in the notes, rounded) is inside one of these ranges. No buy at that ask; the bot keeps asking.
     skipJevPct: parseRanges(env("FADEBOT_TRADER_SKIP_JEV_PCT"), []),
@@ -423,6 +426,9 @@ async function setup() {
   await sql`alter table fadebot_pmhist add column if not exists pts jsonb`;
   // Every Up/Down price the trader saw, per window and minute run: [seconds into the window, Up cost, Down cost].
   // Much finer than Polymarket's minute history, so the regime study can tell whether a side really touched 60¢.
+  await sql`create table if not exists fadebot_15m (
+    period_start bigint primary key, result text not null, source text not null, at timestamptz default now())`;
+  await sql`alter table fadebot_15m enable row level security`;
   await sql`create table if not exists fadebot_path (
     window_start bigint not null, minute int not null, pts jsonb not null, primary key (window_start, minute))`;
   await sql`alter table fadebot_path enable row level security`;
@@ -765,6 +771,70 @@ async function checkLong(start: number, longIs: Side): Promise<{ ok: boolean | n
     ok: null,
     note: `not confirmed yet (${agree} settled window${agree === 1 ? "" : "s"} checked${note ? `: ${note}` : ""}${whyText ? `; skipped: ${whyText}` : ""}${firstErr ? `; e.g. ${firstErr}` : ""})`,
   };
+}
+
+// ── 15-minute BTC markets: settled results, for the streak block ──
+
+const TF15 = 900;
+
+/**
+ * How the 15-minute BTC market for [ps, ps + 900) settled. Polymarket's own settlement when it has one (looked up by
+ * slug, like the 5-minute markets, with the bot's own Polymarket keys), saved in fadebot_15m; until it settles, the
+ * BRTI rule Polymarket settles on (the 60-second average before the start vs the last 60 seconds). Null if neither.
+ */
+async function result15(ps: number): Promise<{ result: Side; source: "polymarket" | "BRTI" } | null> {
+  const sql = db();
+  const have = await sql`select result, source from fadebot_15m where period_start = ${ps}`.catch(() => []);
+  if (have.length && have[0].source === "polymarket") return { result: have[0].result as Side, source: "polymarket" };
+  const client = pm();
+  for (const slug of [`btc-updown-15m-${slugTime(ps)}`, `btc-updown-15m-${ps}`]) {
+    const r = await client.events.retrieveBySlug(slug).catch(() => null);
+    const ev = (r as { event?: Ev } | null)?.event;
+    if (!ev) continue;
+    for (const m of await marketsOf(ev)) {
+      let ls = longSide(m);
+      if (!ls) {
+        const full = await client.markets.retrieveBySlug(m.slug).catch(() => null);
+        // deno-lint-ignore no-explicit-any
+        const fm = (full as any)?.market ?? full;
+        if (fm) ls = longSide(fm);
+      }
+      const v = settleValue(await client.markets.settlement(m.slug).catch(() => null));
+      if (!ls || !Number.isFinite(v)) continue;
+      const result: Side = v >= 0.5 ? ls.side : ls.side === "up" ? "down" : "up";
+      await sql`insert into fadebot_15m (period_start, result, source) values (${ps}, ${result}, 'polymarket')
+        on conflict (period_start) do update set result = ${result}, source = 'polymarket', at = now()`.catch(() => {});
+      return { result, source: "polymarket" };
+    }
+    break;
+  }
+  const [a, b] = await Promise.all([period(ps - 60), period(ps + TF15 - 60)]);
+  if (!a || !b || Number(a.n) < 20 || Number(b.n) < 20) return null;
+  return { result: winner(Number(a.avg), Number(b.avg)), source: "BRTI" };
+}
+
+/** The latest `n` finished 15-minute results before `start` (newest first) and whether they block trading. */
+const streakCache = new Map<string, { at: number; v: Streak15 }>();
+type Streak15 = {
+  blocked: boolean;
+  side: Side | null;
+  run: number;
+  n: number;
+  results: { period: number; result: Side | null; source: string }[];
+};
+async function streak15(start: number, n: number): Promise<Streak15> {
+  const ps = Math.floor(start / TF15) * TF15;
+  const key = `${ps}|${n}`;
+  const c = streakCache.get(key);
+  const now = Date.now() / 1000;
+  // Re-check every 60 s while any result is still provisional (BRTI) or missing.
+  if (c && (now - c.at < 60 || c.v.results.every((r) => r.source === "polymarket"))) return c.v;
+  const periods = Array.from({ length: Math.max(n, 1) + 2 }, (_, i) => ps - (i + 1) * TF15);
+  const got = await Promise.all(periods.map((p) => result15(p)));
+  const results = periods.map((p, i) => ({ period: p, result: got[i]?.result ?? null, source: got[i]?.source ?? "none" }));
+  const v = { ...streak15Block(results.map((r) => r.result), n), n, results };
+  streakCache.set(key, { at: now, v });
+  return v;
 }
 
 /** Polymarket US settlement value (1 = YES won, 0 = YES lost), from either response shape. */
@@ -1886,6 +1956,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("edge", num("edge", 0, 99) !== undefined ? num("edge", 0, 99)! / 100 : undefined);
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
+  set("streak15", num("streak15", 0, 20));
   set("minLeftSec", num("minLeftSec", 0, 299));
   if (o.trigger === "choice" || o.trigger === "probability") tc.trigger = o.trigger;
   set("invert", on("invert"));
@@ -1950,6 +2021,26 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     l.push(a);
     byWindow.set(a.window, l);
   }
+  // 15-minute streak block: Polymarket's settlements the live bot saved, else the BRTI rule (as the live bot does
+  // before a market settles).
+  const res15 = new Map<number, Side | null>();
+  let blocked15 = 0;
+  if (tc.streak15 > 0) {
+    const lo15 = Math.floor(from / TF15) * TF15 - (tc.streak15 + 2) * TF15;
+    const [saved, px15] = await Promise.all([
+      db()`select period_start, result from fadebot_15m where period_start >= ${lo15} and period_start < ${to}`.catch(() => []),
+      db()`select period_start, avg, n from fadebot_prices where period_start >= ${lo15 - 60} and period_start < ${to + 60}
+        and period_start % 60 = 0`,
+    ]);
+    const pxm = new Map<number, { avg: number; n: number }>();
+    for (const p of px15) pxm.set(Number(p.period_start), { avg: Number(p.avg), n: Number(p.n) });
+    for (const r of saved) res15.set(Number(r.period_start), r.result as Side);
+    for (let p = lo15; p < to; p += TF15) {
+      if (res15.has(p)) continue;
+      const a = pxm.get(p - 60), b = pxm.get(p + TF15 - 60);
+      res15.set(p, a && b && a.n >= 20 && b.n >= 20 ? winner(a.avg, b.avg) : null);
+    }
+  }
   const mcfg = marketCfg(tc);
   const decideCfg = tc.stats ? { ...tc, banLo: undefined, banHi: undefined } : tc;
   const pct = tc.betPct > 0 ? tc.betPct / 100 : 0.05;
@@ -1966,6 +2057,14 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     }
     const win = data.winnerOf(w);
     if (!win) continue;
+    if (tc.streak15 > 0) {
+      const ps = Math.floor(w / TF15) * TF15;
+      const recent = Array.from({ length: tc.streak15 + 2 }, (_, i) => res15.get(ps - (i + 1) * TF15) ?? null);
+      if (streak15Block(recent, tc.streak15).blocked) {
+        blocked15++;
+        continue;
+      }
+    }
     const day = dayOf(w);
     const dm = dayMap.get(day) ?? { trades: 0, won: 0, pnl: 0, startBal: bal, endBal: bal };
     dayMap.set(day, dm);
@@ -2059,6 +2158,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       edge: Math.round(tc.edge * 100),
       minSec: tc.minSec,
       confirmSec: tc.confirmSec,
+      streak15: tc.streak15,
       minLeftSec: tc.minLeftSec,
       trigger: tc.trigger,
       invert: tc.invert,
@@ -2088,6 +2188,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       endBal: Math.round(bal * 100) / 100,
       worstDrop: Math.round(worstDrop * 1000) / 10,
       worstStreak,
+      blocked15,
       realTrades: settled.length,
       realPnl: Math.round(settled.reduce((x, r) => x + Number(r.pnl ?? 0), 0) * 100) / 100,
       bothTraded: compared,
@@ -2162,6 +2263,7 @@ async function traderRun(start: number, minute: number, until: number) {
     wsMaxAgeSec: number;
     minSec: number;
     confirmSec: number;
+    streak15: number;
     skipJevPct: PriceRange[];
     stats: boolean;
     statsInvert: boolean;
@@ -2586,6 +2688,8 @@ async function traderRun(start: number, minute: number, until: number) {
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
         const isMarket = tc.order === "market";
+        // 15-minute streak block: the latest FADEBOT_TRADER_STREAK15 finished 15-minute markets all settled one way.
+        const s15 = "buy" in d && tc.streak15 > 0 && !raced ? await streak15(start, tc.streak15) : null;
         // Live price for the ban check (hybrid + market, stats off), read right before buying.
         let liveTag = "";
         let liveBanned = "";
@@ -2642,7 +2746,11 @@ async function traderRun(start: number, minute: number, until: number) {
         // Other orders (flip / limit): the too-early and Jev % rules still apply here.
         const jevPctHit = "buy" in d && !isMarket ? inRanges(Math.round(d.p * 100) / 100, tc.skipJevPct) : null;
         if (raced) row.did = "another run just bought: skipped";
-        else if (mp && mp.kind === "wait") {
+        else if (s15?.blocked) {
+          row.did = `15-minute streak: the last ${s15.run} BTC 15m markets settled ${s15.side} (${
+            s15.results.slice(0, s15.run).map((r) => r.source).join(", ")
+          }) — no trades (FADEBOT_TRADER_STREAK15=${tc.streak15})`;
+        } else if (mp && mp.kind === "wait") {
           row.did = `${mp.why}, asking again${recheckTag}`;
         } else if (!isMarket && tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
@@ -3293,6 +3401,10 @@ async function status() {
         live: cfg.mode === "live" && cfg.trader.live,
         // The balance the bot sizes its bets from: Polymarket buying power when live, the paper balance otherwise.
         balance: await traderBalance(cfg.mode === "live" && cfg.trader.live, cfg.trader.bankroll).catch(() => null),
+        // The latest finished 15-minute BTC markets (for the streak block), newest first, with where each came from.
+        streak15: cfg.trader.streak15 > 0
+          ? await streak15(Math.floor(Date.now() / 1000), cfg.trader.streak15).catch(() => null)
+          : null,
         today: await traderToday().catch(() => 0),
         trades: await sql`select * from fadebot_trades where coalesce(strategy, 'trader') = 'trader'
             order by id desc limit 40`.catch(() => []),

@@ -804,6 +804,7 @@ export interface FadeBotStatus {
       form?: boolean;
       minSec?: number;
       confirmSec?: number;
+      streak15?: number;
       skipJevPct?: { lo: number; hi: number }[];
       stats?: boolean;
       statsInvert?: boolean;
@@ -982,6 +983,14 @@ export interface TraderAsk {
 export interface TraderStatus {
   live: boolean;
   balance?: number | null;
+  /** Latest finished 15-minute BTC markets (newest first) for FADEBOT_TRADER_STREAK15. */
+  streak15?: {
+    blocked: boolean;
+    side: "up" | "down" | null;
+    run: number;
+    n: number;
+    results: { period: number; result: "up" | "down" | null; source: string }[];
+  } | null;
   today: number;
   trades: TraderTrade[];
   totals: { n: number; pnl: number; wins: number } | null;

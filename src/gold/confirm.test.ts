@@ -47,3 +47,17 @@ describe("bias + confirmation", () => {
     expect(r.kind === "buy" && r.note).toContain("confirmed");
   });
 });
+
+import { streak15Block } from "../../supabase/functions/_shared/marketPick";
+describe("15-minute streak block", () => {
+  it("blocks when the newest n results match", () => {
+    expect(streak15Block(["up", "up", "up", "down"], 3)).toEqual({ blocked: true, side: "up", run: 3 });
+    expect(streak15Block(["up", "up", "down", "up"], 3).blocked).toBe(false);
+    expect(streak15Block(["down", "down", "down", "down", "up"], 3).run).toBe(4);
+  });
+  it("never blocks on missing results or when off", () => {
+    expect(streak15Block([null, "up", "up", "up"], 3).blocked).toBe(false);
+    expect(streak15Block(["up", null, "up", "up"], 3).blocked).toBe(false);
+    expect(streak15Block(["up", "up", "up"], 0).blocked).toBe(false);
+  });
+});
