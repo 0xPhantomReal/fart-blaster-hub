@@ -84,6 +84,8 @@ export type AskRow = {
   downCost: number;
   btc: number | null;
   ref: number | null;
+  /** Jev's answer (buy_up / buy_down / wait …), when stored. */
+  action?: string | null;
 };
 
 export type HistoryFilter = { edge: number; minSec: number; maxSec: number };

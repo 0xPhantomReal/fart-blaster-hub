@@ -1091,7 +1091,7 @@ export type StatsReplay = {
   days: number;
   gap: number;
   betPct: number;
-  settings: Record<string, number | boolean>;
+  used: Record<string, number | boolean | string>;
   totals: {
     trades: number;
     won: number;
@@ -1099,6 +1099,7 @@ export type StatsReplay = {
     startBal: number;
     endBal: number;
     worstDrop: number;
+    worstStreak: number;
     realTrades: number;
     realPnl: number;
     bothTraded: number;
@@ -1109,8 +1110,16 @@ export type StatsReplay = {
   error?: string;
 };
 
-/** Stats mode replayed with the live bot's own code and settings over its stored asks (read-only, up to 7 days). */
-export async function fetchStatsReplay(days: number, gapCents: number, start: number): Promise<StatsReplay | null> {
+/**
+ * Market buys replayed with the live bot's own code over its stored calls (read-only, up to 7 days). `settings`
+ * replaces live settings (strings as the secrets take them; blank = keep the live value).
+ */
+export async function fetchReplay(
+  days: number,
+  gapCents: number,
+  start: number,
+  settings: Record<string, string>,
+): Promise<StatsReplay | null> {
   if (!FN_URL) return null;
   const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
     method: "POST",
@@ -1118,7 +1127,7 @@ export async function fetchStatsReplay(days: number, gapCents: number, start: nu
       "Content-Type": "application/json",
       ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
     },
-    body: JSON.stringify({ action: "stats-replay", days, gap: gapCents, start }),
+    body: JSON.stringify({ action: "replay", days, gap: gapCents, start, settings }),
   }).catch(() => null);
   if (!res || !res.ok) return null;
   return (await res.json().catch(() => null)) as StatsReplay | null;

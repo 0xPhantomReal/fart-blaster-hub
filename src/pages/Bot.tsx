@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
-import { fadeBotStatus, type FadeBotStatus, fetchStatsReplay, type StatsReplay } from "@/gold/feed";
+import { fadeBotStatus, type FadeBotStatus, fetchReplay, type StatsReplay } from "@/gold/feed";
 
 /** /bot — just the Polymarket bot: balance, today's result and the bot panel. No chart. */
 const money = (x: number | null | undefined) =>
@@ -10,18 +10,135 @@ const signed = (x: number | null | undefined) =>
 const tone = (x: number | null | undefined) =>
   x === null || x === undefined || x === 0 ? "text-[#c9d1d9]" : x > 0 ? "text-[#26a69a]" : "text-[#ef5350]";
 
-/** Stats replay: the live bot's own stats-mode code and settings run over its stored asks, by day. */
-const ReplayBox = ({ balance }: { balance: number | null | undefined }) => {
+type Field = { key: string; label: string; hint: string; kind?: "onoff" };
+const FIELDS: { group: string; fields: Field[] }[] = [
+  {
+    group: "Calls",
+    fields: [
+      { key: "edge", label: "Edge (pts)", hint: "FADEBOT_TRADER_EDGE" },
+      { key: "minSec", label: "No calls before (s)", hint: "FADEBOT_TRADER_MIN_SEC" },
+      { key: "skipJevPct", label: "Skip Jev % (e.g. 50-55,61-70)", hint: "FADEBOT_TRADER_SKIP_JEV_PCT" },
+    ],
+  },
+  {
+    group: "Price rules (stats off)",
+    fields: [
+      { key: "invert", label: "Invert", hint: "FADEBOT_TRADER_INVERT", kind: "onoff" },
+      { key: "ban", label: "Ban Jev's side (e.g. 51-99, blank = off)", hint: "FADEBOT_TRADER_BAN" },
+      { key: "skipRanges", label: "Skip prices (e.g. 49-62)", hint: "FADEBOT_TRADER_SKIP_RANGES" },
+      { key: "skipReask", label: "Skip re-asks", hint: "FADEBOT_TRADER_SKIP_REASK", kind: "onoff" },
+      { key: "swapRanges", label: "Swap prices (blank = no swap)", hint: "FADEBOT_TRADER_SWAP_RANGES" },
+    ],
+  },
+  {
+    group: "Stats mode",
+    fields: [
+      { key: "stats", label: "Stats", hint: "FADEBOT_TRADER_STATS", kind: "onoff" },
+      { key: "statsMinEdge", label: "Min edge (¢ per $1)", hint: "FADEBOT_TRADER_STATS_MIN_EDGE" },
+      { key: "statsInvert", label: "Stats invert", hint: "FADEBOT_TRADER_STATS_INVERT", kind: "onoff" },
+      { key: "statsSwapAbove", label: "Swap above (¢, 0 = off)", hint: "FADEBOT_TRADER_STATS_SWAP_ABOVE" },
+      { key: "statsMaxAgainst", label: "Wrong-side skip ($, 0 = off)", hint: "FADEBOT_TRADER_STATS_MAX_AGAINST" },
+      { key: "statsMinN", label: "Min past calls", hint: "FADEBOT_TRADER_STATS_MIN_N" },
+      { key: "statsSlip", label: "Slip (¢)", hint: "FADEBOT_TRADER_STATS_SLIP" },
+      { key: "statsCandles", label: "History (windows)", hint: "FADEBOT_TRADER_STATS_CANDLES" },
+    ],
+  },
+  {
+    group: "Sizing",
+    fields: [
+      { key: "betPct", label: "Bet % of balance", hint: "FADEBOT_TRADER_BET_PCT" },
+      { key: "dailyLoss", label: "Daily loss limit ($)", hint: "FADEBOT_TRADER_DAILY_LOSS" },
+    ],
+  },
+];
+
+type TraderSettings = NonNullable<FadeBotStatus["settings"]["trader"]>;
+const rng = (x?: { lo: number; hi: number }[]) =>
+  (x ?? []).map((r) => `${Math.round(r.lo * 100)}-${Math.round(r.hi * 100)}`).join(",");
+const c100 = (x?: number) => (x === undefined || x === null ? "" : String(Math.round(x * 100)));
+/** The live settings as form values. */
+function fromLive(t: TraderSettings): Record<string, string> {
+  const yn = (b?: boolean) => (b ? "on" : "off");
+  return {
+    edge: c100(t.edge),
+    minSec: String(t.minSec ?? 0),
+    skipJevPct: rng(t.skipJevPct),
+    invert: yn(t.invert),
+    ban: t.banLo !== undefined && t.banHi !== undefined ? rng([{ lo: t.banLo, hi: t.banHi }]) : "",
+    skipRanges: rng(t.skipRanges),
+    skipReask: yn(t.skipReask),
+    swapRanges: t.swap === false ? "" : rng(t.swapRanges),
+    stats: yn(t.stats),
+    statsMinEdge: c100(t.statsMinEdge),
+    statsInvert: yn(t.statsInvert),
+    statsSwapAbove: c100(t.statsSwapAbove ?? 0),
+    statsMaxAgainst: String(t.statsMaxAgainst ?? 0),
+    statsMinN: String(t.statsMinN ?? 15),
+    statsSlip: c100(t.statsSlip),
+    statsCandles: String(t.statsCandles ?? 288),
+    betPct: String(t.betPct ?? 5),
+    dailyLoss: String(t.dailyLoss ?? ""),
+  };
+}
+/** The form as the replay takes it: blank ranges mean "none", and no swap ranges means swap off. */
+function toReplay(f: Record<string, string>): Record<string, string> {
+  return { ...f, swap: f.swapRanges.trim() ? "on" : "off" };
+}
+/** The secrets that would run these settings live. */
+function secretsFor(f: Record<string, string>): string[] {
+  const out: string[] = [];
+  const put = (k: string, v: string) => out.push(`${k}=${v}`);
+  put("FADEBOT_TRADER_ORDER", "market");
+  put("FADEBOT_TRADER_EDGE", f.edge);
+  put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
+  put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
+  put("FADEBOT_TRADER_STATS", f.stats === "on" ? "on" : "off");
+  if (f.stats === "on") {
+    put("FADEBOT_TRADER_STATS_MIN_EDGE", f.statsMinEdge);
+    put("FADEBOT_TRADER_STATS_INVERT", f.statsInvert === "on" ? "1" : "0");
+    put("FADEBOT_TRADER_STATS_SWAP_ABOVE", f.statsSwapAbove || "0");
+    put("FADEBOT_TRADER_STATS_MAX_AGAINST", f.statsMaxAgainst || "0");
+    put("FADEBOT_TRADER_STATS_MIN_N", f.statsMinN);
+    put("FADEBOT_TRADER_STATS_SLIP", f.statsSlip);
+    put("FADEBOT_TRADER_STATS_CANDLES", f.statsCandles);
+  } else {
+    put("FADEBOT_TRADER_INVERT", f.invert === "on" ? "1" : "0");
+    const ban = f.ban.trim().match(/^(\d+)\s*-\s*(\d+)/);
+    if (ban) {
+      put("FADEBOT_TRADER_BAN", "on");
+      put("FADEBOT_TRADER_BAN_MIN", ban[1]);
+      put("FADEBOT_TRADER_BAN_MAX", ban[2]);
+    } else put("FADEBOT_TRADER_BAN", "off");
+    put("FADEBOT_TRADER_SKIP_RANGES", f.skipRanges || "(delete)");
+    put("FADEBOT_TRADER_SKIP_REASK", f.skipReask === "on" ? "on" : "off");
+    if (f.swapRanges.trim()) {
+      put("FADEBOT_TRADER_SWAP", "on");
+      put("FADEBOT_TRADER_SWAP_RANGES", f.swapRanges);
+    } else put("FADEBOT_TRADER_SWAP", "off");
+  }
+  put("FADEBOT_TRADER_BET_PCT", f.betPct);
+  if (f.dailyLoss) put("FADEBOT_TRADER_DAILY_LOSS", f.dailyLoss);
+  return out;
+}
+
+/** Replay: the live bot's own market-buy code run over its stored calls, with settings you can change. */
+const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balance: number | null | undefined }) => {
   const [days, setDays] = useState(7);
   const [gap, setGap] = useState(10);
   const [start, setStart] = useState<string>("");
+  const [form, setForm] = useState<Record<string, string> | null>(null);
   const [busy, setBusy] = useState(false);
   const [r, setR] = useState<StatsReplay | null | undefined>(undefined);
   const [showTrades, setShowTrades] = useState(false);
+  const [showSecrets, setShowSecrets] = useState(false);
+  useEffect(() => {
+    if (live && !form) setForm(fromLive(live));
+  }, [live, form]);
   const run = async () => {
+    if (!form) return;
     setBusy(true);
     const b = Number(start) || (balance && balance > 0 ? Math.round(balance) : 100);
-    setR(await fetchStatsReplay(days, gap, b));
+    setR(await fetchReplay(days, gap, b, toReplay(form)));
     setBusy(false);
   };
   const tt = r?.totals;
@@ -34,51 +151,103 @@ const ReplayBox = ({ balance }: { balance: number | null | undefined }) => {
       minute: "2-digit",
     });
   const input = "w-16 rounded border border-[#30363d] bg-[#0e1116] px-2 py-1 text-sm tabular-nums";
+  const statsOn = form?.stats === "on";
   return (
     <section className="rounded-lg border border-[#30363d] bg-[#161b22] p-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold">Stats replay</div>
-          <div className="text-xs text-[#8b949e]">
-            The bot's own stats-mode code and current settings, run over its stored calls. Can't replay the recheck.
-          </div>
-        </div>
-        <div className="flex flex-wrap items-end gap-2 text-xs text-[#8b949e]">
-          <label className="flex flex-col gap-1">
-            Days
-            <input className={input} type="number" min={1} max={7} value={days}
-              onChange={(e) => setDays(Math.min(7, Math.max(1, Number(e.target.value) || 7)))} />
-          </label>
-          <label className="flex flex-col gap-1">
-            Gap ¢
-            <input className={input} type="number" min={0} max={30} value={gap}
-              onChange={(e) => setGap(Math.min(30, Math.max(0, Number(e.target.value) || 0)))} />
-          </label>
-          <label className="flex flex-col gap-1">
-            Start $
-            <input className={input + " w-20"} type="number" min={1} placeholder={balance ? String(Math.round(balance)) : "100"}
-              value={start} onChange={(e) => setStart(e.target.value)} />
-          </label>
-          <button
-            className="rounded bg-[#238636] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-            disabled={busy}
-            onClick={() => void run()}
-          >
-            {busy ? "Running…" : "Run replay"}
-          </button>
-        </div>
+      <div className="text-sm font-semibold">Replay</div>
+      <div className="text-xs text-[#8b949e]">
+        The bot's own market-buy code run over its stored calls with these settings (they start as your live ones;
+        changing them here changes nothing on the bot). Not replayed: the recheck's second price; fills are the quote +
+        the gap.
       </div>
+      {!form ? (
+        <p className="mt-3 text-sm text-[#8b949e]">Loading your settings…</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {FIELDS.map((g) => (
+            <fieldset
+              key={g.group}
+              className={`rounded border border-[#30363d] p-2 ${
+                (g.group.startsWith("Price") && statsOn)
+                  ? "opacity-50"
+                  : ""
+              }`}
+            >
+              <legend className="px-1 text-xs text-[#8b949e]">
+                {g.group}
+                {g.group.startsWith("Price") && statsOn ? " — ignored while stats is on" : ""}
+              </legend>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {g.fields.map((fl) => (
+                  <label key={fl.key} className="flex flex-col gap-1 text-xs text-[#8b949e]" title={fl.hint}>
+                    {fl.label}
+                    {fl.kind === "onoff" ? (
+                      <select
+                        className="rounded border border-[#30363d] bg-[#0e1116] px-2 py-1 text-sm text-[#c9d1d9]"
+                        value={form[fl.key]}
+                        onChange={(e) => setForm({ ...form, [fl.key]: e.target.value })}
+                      >
+                        <option value="on">On</option>
+                        <option value="off">Off</option>
+                      </select>
+                    ) : (
+                      <input
+                        className="rounded border border-[#30363d] bg-[#0e1116] px-2 py-1 text-sm tabular-nums text-[#c9d1d9]"
+                        value={form[fl.key]}
+                        onChange={(e) => setForm({ ...form, [fl.key]: e.target.value })}
+                      />
+                    )}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+          <div className="flex flex-wrap items-end gap-2 text-xs text-[#8b949e]">
+            <label className="flex flex-col gap-1">
+              Days
+              <input className={input} type="number" min={1} max={7} value={days}
+                onChange={(e) => setDays(Math.min(7, Math.max(1, Number(e.target.value) || 7)))} />
+            </label>
+            <label className="flex flex-col gap-1">
+              Gap ¢
+              <input className={input} type="number" min={0} max={30} value={gap}
+                onChange={(e) => setGap(Math.min(30, Math.max(0, Number(e.target.value) || 0)))} />
+            </label>
+            <label className="flex flex-col gap-1">
+              Start $
+              <input className={input + " w-20"} type="number" min={1}
+                placeholder={balance ? String(Math.round(balance)) : "100"} value={start}
+                onChange={(e) => setStart(e.target.value)} />
+            </label>
+            <button
+              className="rounded bg-[#238636] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void run()}
+            >
+              {busy ? "Running…" : "Run replay"}
+            </button>
+            <button className="rounded border border-[#30363d] px-3 py-1.5 text-sm" onClick={() => live && setForm(fromLive(live))}>
+              Reset to live
+            </button>
+            <button className="text-xs text-[#58a6ff]" onClick={() => setShowSecrets((x) => !x)}>
+              {showSecrets ? "Hide secrets" : "Secrets for these settings"}
+            </button>
+          </div>
+          {showSecrets && (
+            <pre className="overflow-auto rounded bg-[#0e1116] p-2 text-xs">{secretsFor(form).join("\n")}</pre>
+          )}
+        </div>
+      )}
       {r === null && <p className="mt-3 text-sm text-[#ef5350]">Replay failed (deploy the fadebot function first?).</p>}
       {r?.error && <p className="mt-3 text-sm text-[#ef5350]">{r.error}</p>}
       {r && tt && (
         <div className="mt-4 space-y-3 text-sm">
-          {!r.settings.statsOn && (
-            <p className="text-xs text-[#d29922]">Stats mode is off on the bot right now; this shows what it would do if on.</p>
-          )}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div>
               <div className="text-xs text-[#8b949e]">Balance</div>
-              <div className="tabular-nums font-medium">{money(tt.startBal)} → {money(tt.endBal)}</div>
+              <div className={`tabular-nums font-medium ${tone(tt.endBal - tt.startBal)}`}>
+                {money(tt.startBal)} → {money(tt.endBal)}
+              </div>
             </div>
             <div>
               <div className="text-xs text-[#8b949e]">Trades / won</div>
@@ -87,8 +256,8 @@ const ReplayBox = ({ balance }: { balance: number | null | undefined }) => {
               </div>
             </div>
             <div>
-              <div className="text-xs text-[#8b949e]">Worst drop</div>
-              <div className="tabular-nums font-medium">{tt.worstDrop}%</div>
+              <div className="text-xs text-[#8b949e]">Worst drop / losing streak</div>
+              <div className="tabular-nums font-medium">{tt.worstDrop}% / {tt.worstStreak}</div>
             </div>
             <div>
               <div className="text-xs text-[#8b949e]">Real bot, same days</div>
@@ -98,13 +267,15 @@ const ReplayBox = ({ balance }: { balance: number | null | undefined }) => {
             </div>
           </div>
           <div className="text-xs text-[#8b949e]">
-            {r.betPct}% of balance per trade, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded} windows;
-            same side in {tt.sameSide}.
+            {r.betPct}% of balance per trade, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded}{" "}
+            windows; same side in {tt.sameSide}.
           </div>
           <table className="w-full text-xs tabular-nums">
             <thead className="text-[#8b949e]">
-              <tr><th className="text-left">Day</th><th className="text-right">Trades</th><th className="text-right">Won</th>
-                <th className="text-right">P&L</th><th className="text-right">End balance</th></tr>
+              <tr>
+                <th className="text-left">Day</th><th className="text-right">Trades</th><th className="text-right">Won</th>
+                <th className="text-right">P&L</th><th className="text-right">End balance</th>
+              </tr>
             </thead>
             <tbody>
               {r.byDay.map((d) => (
@@ -123,15 +294,17 @@ const ReplayBox = ({ balance }: { balance: number | null | undefined }) => {
             <div className="max-h-96 overflow-auto">
               <table className="w-full text-xs tabular-nums">
                 <thead className="sticky top-0 bg-[#161b22] text-[#8b949e]">
-                  <tr><th className="text-left">Window</th><th className="text-left">Jev</th><th className="text-left">Replay</th>
-                    <th className="text-right">P&L</th><th className="text-left pl-2">Real bot</th></tr>
+                  <tr>
+                    <th className="text-left">Window</th><th className="text-left">Jev</th><th className="text-left">Replay</th>
+                    <th className="text-right">P&L</th><th className="pl-2 text-left">Real bot</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {[...r.trades].reverse().map((x) => (
                     <tr key={x.window} title={x.note} className="border-t border-[#21262d]">
                       <td>{time(x.window)} <span className="text-[#8b949e]">{x.at}s</span></td>
                       <td>{x.jev} {x.pct}%</td>
-                      <td>{x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(against)" : ""}</td>
+                      <td>{x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(other side)" : ""}</td>
                       <td className={`text-right ${tone(x.pnl)}`}>{signed(x.pnl)}</td>
                       <td className="pl-2 text-[#8b949e]">
                         {x.real ? `${x.real.side} ${x.real.paid}¢ ${x.real.result ?? "open"}` : "—"}
@@ -231,7 +404,7 @@ const Bot = () => {
           </section>
         )}
 
-        <ReplayBox balance={t?.balance} />
+        <ReplayBox live={s?.settings?.trader} balance={t?.balance} />
 
         <section className="rounded-lg border border-[#30363d] bg-[#161b22] p-4">
           <FadeBotPanel bars={[]} readSec={null} readLabel="" pastIsLive={false} status={s} botOnly />
