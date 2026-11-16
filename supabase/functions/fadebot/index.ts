@@ -257,6 +257,10 @@ const settings = () => ({
     // if no pushed price in the last few seconds); the edge, invert, skip and swap stay on the REST quote.
     // FADEBOT_TRADER_RULES_LIVE=off keeps the ban on the REST quote too.
     rulesLive: env("FADEBOT_TRADER_RULES_LIVE") !== "off",
+    // FADEBOT_TRADER_RECHECK=on (Nov 15, market buys): re-read the price right after Jev answers (live stream, or one
+    // REST read if the stream is stale) and make the whole decision — edge, stats, wrong-side skip, invert, skip,
+    // swap — on that price instead of the one read before asking him.
+    recheck: env("FADEBOT_TRADER_RECHECK") === "on",
     skipRanges: parseRanges(env("FADEBOT_TRADER_SKIP_RANGES"), []),
     // FADEBOT_TRADER_SKIP_REASK=on: after a skip, keep asking Jev in the same window; the next call that clears the
     // edge at a price outside the skip ranges can buy. Market skips don't count toward FADEBOT_TRADER_MAX_ENTRIES (one
@@ -1868,6 +1872,7 @@ async function traderRun(start: number, minute: number, until: number) {
     statsSlip: number;
     statsMinEdge: number;
     rulesLive: boolean;
+    recheck: boolean;
     skipRanges: PriceRange[];
     skipReask: boolean;
     swap: boolean;
@@ -2220,6 +2225,23 @@ async function traderRun(start: number, minute: number, until: number) {
         };
         const via = lastQuoteVia;
         const jev = await askJevTrader(state, !!pos, Math.round(tc.edge * 100));
+        // Recheck (market buys, FADEBOT_TRADER_RECHECK=on): Jev takes a few seconds, so decide on the price right
+        // after his answer — the live stream if fresh, else one new REST read — not the one read before asking him.
+        let qd = q;
+        let recheckTag = "";
+        if (tc.recheck && tc.order === "market" && !pos) {
+          const fresh = await quotes(market, true);
+          if (fresh.upCost !== null && fresh.downCost !== null) {
+            const src = lastQuoteVia === "live stream" ? "live" : "REST";
+            const cc = (x: number | null) => (x === null ? "—" : `${Math.round(x * 100)}¢`);
+            const moved = Math.abs(fresh.upCost - (q.upCost ?? fresh.upCost)) >= 0.005 ||
+              Math.abs(fresh.downCost - (q.downCost ?? fresh.downCost)) >= 0.005;
+            recheckTag = moved
+              ? ` [rechecked after Jev (${src}): Up ${cc(q.upCost)}→${cc(fresh.upCost)}, Down ${cc(q.downCost)}→${cc(fresh.downCost)}]`
+              : ` [rechecked after Jev (${src}): unchanged]`;
+            qd = fresh;
+          }
+        }
         asks += 1;
         row = {
           ...row,
@@ -2240,10 +2262,10 @@ async function traderRun(start: number, minute: number, until: number) {
         // Limit mode: the edge is measured against what the order would pay (the limit, or less if already cheaper).
         const lim = tc.order === "limit"
           ? {
-            upCost: q.upCost === null ? tc.limitPrice : Math.min(q.upCost, tc.limitPrice),
-            downCost: q.downCost === null ? tc.limitPrice : Math.min(q.downCost, tc.limitPrice),
+            upCost: qd.upCost === null ? tc.limitPrice : Math.min(qd.upCost, tc.limitPrice),
+            downCost: qd.downCost === null ? tc.limitPrice : Math.min(qd.downCost, tc.limitPrice),
           }
-          : q;
+          : qd;
         // Hybrid + market: the ban moves to the live price below, so the REST-based decision leaves it out.
         const liveRules = tc.feed === "hybrid" && tc.rulesLive && tc.order === "market" && !!stream?.s.connected;
         const d = traderDecision(
@@ -2270,7 +2292,7 @@ async function traderRun(start: number, minute: number, until: number) {
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
           statsDist = dist;
-          const otherNow = d.buy === "up" ? q.downCost : q.upCost;
+          const otherNow = d.buy === "up" ? qd.downCost : qd.upCost;
           statsD = statsDecide({ pct: d.p, jevCost: d.cost, otherCost: otherNow ?? 1 - d.cost, dist }, hist, {
             minN: tc.statsMinN,
             slip: tc.statsSlip,
@@ -2303,7 +2325,7 @@ async function traderRun(start: number, minute: number, until: number) {
         else if (tooEarly) {
           row.did = `call at ${Math.floor(nowEl)} s ignored: before ${tc.minSec} s (FADEBOT_TRADER_MIN_SEC)`;
         } else if (statsD && statsD.choice === "skip" && "buy" in d) {
-          row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${statsD.why}, asking again`;
+          row.did = `stats: Jev ${Math.round(d.p * 100)}% for ${d.buy} (${statsD.bands}): ${statsD.why}, asking again${recheckTag}`;
 
         } else if (jevPctHit && "buy" in d) {
           row.did = `Jev ${Math.round(d.p * 100)}% for ${d.buy}: in the ${
@@ -2317,15 +2339,15 @@ async function traderRun(start: number, minute: number, until: number) {
           const statsAgainst = (statsD?.choice === "against") !== (!!statsD && tc.statsInvert);
           let side: Side = statsD ? (statsAgainst ? (d.buy === "up" ? "down" : "up") : d.buy)
             : tc.invert ? (d.buy === "up" ? "down" : "up") : d.buy;
-          let cost = statsD ? (side === "up" ? q.upCost : q.downCost)
-            : tc.invert ? (side === "up" ? q.upCost : q.downCost) : d.cost;
+          let cost = statsD ? (side === "up" ? qd.upCost : qd.downCost)
+            : tc.invert ? (side === "up" ? qd.upCost : qd.downCost) : d.cost;
           if (cost === null || !(cost > 0 && cost < 1)) throw new Error(`no price for ${side}`);
           let pSide = (statsD ? statsAgainst : tc.invert) ? 1 - d.p : d.p;
           // Stats swap: the side to buy costs more than FADEBOT_TRADER_STATS_SWAP_ABOVE → buy the cheaper side.
           let statsSwapNote = "";
           if (statsD && tc.statsSwapAbove > 0 && cost > tc.statsSwapAbove + 1e-9) {
             const opp: Side = side === "up" ? "down" : "up";
-            const oc = opp === "up" ? q.upCost : q.downCost;
+            const oc = opp === "up" ? qd.upCost : qd.downCost;
             if (oc !== null && oc > 0 && oc < 1) {
               statsSwapNote = ` (${side} at ${Math.round(cost * 100)}¢ is over ${Math.round(tc.statsSwapAbove * 100)}¢ → swapped to ${opp} at ${
                 Math.round(oc * 100)
@@ -2341,7 +2363,7 @@ async function traderRun(start: number, minute: number, until: number) {
             if (sideDist < -tc.statsMaxAgainst) {
               row.did = `stats would buy ${side}${statsSwapNote}, but BTC is $${Math.abs(sideDist).toFixed(0)} on the wrong side of the start (more than $${
                 tc.statsMaxAgainst
-              }): skipped, asking again`;
+              }): skipped, asking again${recheckTag}`;
               await logAsk(row);
               continue;
             }
@@ -2374,7 +2396,7 @@ async function traderRun(start: number, minute: number, until: number) {
           const swapRange = tc.swap && tc.order === "market" && !statsD ? inRanges(cost, tc.swapRanges) : null;
           if (swapRange) {
             const opp: Side = side === "up" ? "down" : "up";
-            const oc = opp === "up" ? q.upCost : q.downCost;
+            const oc = opp === "up" ? qd.upCost : qd.downCost;
             if (oc !== null && oc > 0 && oc < 1) {
               swapNote = ` (${side} at ${Math.round(cost * 100)}¢ is in the ${rangesText([swapRange])} swap range → swapped to ${opp} at ${
                 Math.round(oc * 100)
@@ -2534,7 +2556,7 @@ async function traderRun(start: number, minute: number, until: number) {
                   : tc.invert ? `faded Jev: it wanted ${d.buy}` : `Jev`
               } (${Math.round(d.p * 100)}% for ${d.buy} vs ${
                 Math.round(d.cost * 100)
-              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}${statsSwapNote}${liveTag}${statsD ? ` [stats: ${statsD.bands}: ${statsD.why}]` : ""}`})`;
+              }¢) at ${Math.round(nowEl)} s${pctNote}${swapNote}${statsSwapNote}${liveTag}${recheckTag}${statsD ? ` [stats: ${statsD.bands}: ${statsD.why}]` : ""}`})`;
           row.did = `${
             statsD ? `stats ${statsAgainst ? "AGAINST" : "WITH"} Jev's ${d.buy}: ` : tc.invert ? `faded Jev's ${d.buy}: ` : ""
           }bought ${side} $${d.stake.toFixed(2)}${pctNote}${swapNote}${statsSwapNote}${liveTag} @ ${price.toFixed(2)}`;
