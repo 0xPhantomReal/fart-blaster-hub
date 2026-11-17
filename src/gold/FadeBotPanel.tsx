@@ -916,7 +916,12 @@ function ModeBox({
           )
           : null}
         {order === "market" && tc?.confirmSec
-          ? chip(true, `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree`)
+          ? chip(
+            true,
+            `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree${
+              tc.confirmAt ? ` · only if confirmed at ${tc.confirmAt.lo}–${tc.confirmAt.hi} s` : ""
+            }`,
+          )
           : null}
         {tc?.skipJevPct?.length
           ? chip(true, `No calls with Jev at ${tc.skipJevPct.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}%`).join(" or ")}`)

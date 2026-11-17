@@ -90,6 +90,8 @@ export type MarketCfg = {
   minSec: number;
   /** Seconds after the window's first call that a confirming call must come; 0 = off. */
   confirmSec?: number;
+  /** The confirmation must land in this range (seconds into the window), else no trade that window. */
+  confirmAt?: { lo: number; hi: number } | null;
   stats: boolean;
   statsCfg: PickCfg;
   invert: boolean;
@@ -119,6 +121,19 @@ export type MarketCall = {
   quoteHist?: { at: number; up: number; down: number }[];
 };
 
+/** A seconds range "160-189" (or "160+" = 160–300); null when blank or malformed. */
+export function parseSecRange(text: string | undefined | null): { lo: number; hi: number } | null {
+  const t = String(text ?? "").trim();
+  const m = t.match(/^(\d+)\s*(?:-|–|to)\s*(\d+)$/i);
+  const p = t.match(/^(\d+)\s*\+$/);
+  let lo: number, hi: number;
+  if (m) [lo, hi] = [Number(m[1]), Number(m[2])];
+  else if (p) [lo, hi] = [Number(p[1]), 300];
+  else return null;
+  if (lo > hi) [lo, hi] = [hi, lo];
+  return { lo, hi };
+}
+
 export type ConfirmResult = { ok: true; note: string; why?: undefined } | { ok: false; why: string; note?: undefined };
 
 /**
@@ -126,7 +141,13 @@ export type ConfirmResult = { ok: true; note: string; why?: undefined } | { ok: 
  * seconds after the bias either confirms it (same side) — from then on calls on that side may buy — or, pointing
  * the other way, becomes the new bias, and the wait starts again from it. Repeats until confirmed or the window ends.
  */
-export function confirmGate(earlier: { at: number; pick: Side }[], now: { at: number; pick: Side }, sec: number): ConfirmResult {
+export function confirmGate(
+  earlier: { at: number; pick: Side }[],
+  now: { at: number; pick: Side },
+  sec: number,
+  /** Allowed confirmation time (seconds into the window); confirmed outside it = no trade this window. */
+  at?: { lo: number; hi: number } | null,
+): ConfirmResult {
   const s = (x: number) => `${Math.round(x)} s`;
   const all = [...earlier, now];
   let bias = all[0];
@@ -150,6 +171,12 @@ export function confirmGate(earlier: { at: number; pick: Side }[], now: { at: nu
   }
   if (confirmedAt === null) {
     return { ok: false, why: `bias ${bias.pick} (set at ${s(bias.at)})${was}; waiting until ${s(bias.at + sec)} to confirm` };
+  }
+  if (at && (Math.round(confirmedAt) < at.lo || Math.round(confirmedAt) > at.hi)) {
+    return {
+      ok: false,
+      why: `bias ${bias.pick} confirmed at ${s(confirmedAt)}, outside the ${at.lo}–${at.hi} s range (FADEBOT_TRADER_CONFIRM_AT): no trade this window`,
+    };
   }
   if (now.pick !== bias.pick) {
     return { ok: false, why: `bias ${bias.pick} confirmed at ${s(confirmedAt)}, but Jev now says ${now.pick}: waiting` };
@@ -211,7 +238,7 @@ function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts |
   }
   let confirmNote = "";
   if (cfg.confirmSec && cfg.confirmSec > 0) {
-    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, cfg.confirmSec);
+    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, cfg.confirmSec, cfg.confirmAt);
     if (g.why !== undefined) return { kind: "wait", why: g.why, stats: null };
     confirmNote = g.note;
   }

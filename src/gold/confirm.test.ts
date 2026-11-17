@@ -61,3 +61,25 @@ describe("15-minute streak block", () => {
     expect(streak15Block(["up", "up", "up"], 0).blocked).toBe(false);
   });
 });
+
+import { parseSecRange } from "../../supabase/functions/_shared/marketPick";
+describe("confirmation time range", () => {
+  const R = parseSecRange("160-189");
+  it("parses seconds", () => {
+    expect(R).toEqual({ lo: 160, hi: 189 });
+    expect(parseSecRange("200+")).toEqual({ lo: 200, hi: 300 });
+    expect(parseSecRange("")).toBeNull();
+  });
+  it("trades only when the confirmation lands in the range", () => {
+    const early = confirmGate([{ at: 30, pick: "up" }], { at: 152, pick: "up" }, 120, R);
+    expect(early.ok).toBe(false);
+    expect(early.why).toContain("no trade this window");
+    // a later call in the same window stays blocked: the confirmation was at 152 s
+    const later = confirmGate([{ at: 30, pick: "up" }, { at: 152, pick: "up" }], { at: 170, pick: "up" }, 120, R);
+    expect(later.ok).toBe(false);
+    const inside = confirmGate([{ at: 45, pick: "up" }], { at: 168, pick: "up" }, 120, R);
+    expect(inside.ok).toBe(true);
+    const late = confirmGate([{ at: 75, pick: "up" }], { at: 200, pick: "up" }, 120, R);
+    expect(late.ok).toBe(false);
+  });
+});

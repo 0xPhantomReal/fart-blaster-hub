@@ -72,6 +72,7 @@ import {
   type MarketPick,
   marketPick,
   parseAgeRules,
+  parseSecRange,
   streak15Block,
 } from "../_shared/marketPick.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
@@ -248,6 +249,9 @@ const settings = () => ({
     // after MIN_SEC) sets the bias and is not bought; the first call at least this many seconds later confirms it
     // (same side → buy) or becomes the new bias (other side) and the wait starts again. 0 / unset = off.
     confirmSec: Math.max(0, Number(env("FADEBOT_TRADER_CONFIRM_SEC") || 0)),
+    // Confirmation time range (FADEBOT_TRADER_CONFIRM_AT, e.g. "160-189", seconds into the window): a confirmation
+    // outside it means no trade that window. Unset = any time.
+    confirmAt: parseSecRange(env("FADEBOT_TRADER_CONFIRM_AT")),
     // Quote-age rules (market buys; FADEBOT_TRADER_AGE_RULES, e.g. "0-2:none;3-5:50-99;6-10:20-29;11-15:0-19;
     // 16-20:0-19;21+:all"): how long the quote for the side being bought has gone unchanged decides which prices may
     // buy. Ages not listed are allowed. Unset = off.
@@ -1918,6 +1922,7 @@ async function statsHistory(
 function marketCfg(tc: {
   minSec: number;
   confirmSec: number;
+  confirmAt: { lo: number; hi: number } | null;
   ageRules: AgeRule[];
   stats: boolean;
   statsMinN: number;
@@ -1937,6 +1942,7 @@ function marketCfg(tc: {
   return {
     minSec: tc.minSec,
     confirmSec: tc.confirmSec,
+    confirmAt: tc.confirmAt,
     ageRules: tc.ageRules,
     stats: tc.stats,
     statsCfg: {
@@ -1975,6 +1981,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("edge", num("edge", 0, 99) !== undefined ? num("edge", 0, 99)! / 100 : undefined);
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
+  if (o.confirmAt !== undefined && o.confirmAt !== null) tc.confirmAt = parseSecRange(String(o.confirmAt));
   if (typeof o.ageRules === "string") tc.ageRules = parseAgeRules(o.ageRules);
   set("streak15", num("streak15", 0, 20));
   set("minLeftSec", num("minLeftSec", 0, 299));
@@ -2182,6 +2189,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       edge: Math.round(tc.edge * 100),
       minSec: tc.minSec,
       confirmSec: tc.confirmSec,
+      confirmAt: tc.confirmAt ? `${tc.confirmAt.lo}-${tc.confirmAt.hi}` : "",
       ageRules: ageRulesText(tc.ageRules),
       streak15: tc.streak15,
       minLeftSec: tc.minLeftSec,
@@ -2289,6 +2297,7 @@ async function traderRun(start: number, minute: number, until: number) {
     wsMaxAgeSec: number;
     minSec: number;
     confirmSec: number;
+    confirmAt: { lo: number; hi: number } | null;
     ageRules: AgeRule[];
     streak15: number;
     skipJevPct: PriceRange[];

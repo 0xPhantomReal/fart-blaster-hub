@@ -18,6 +18,7 @@ const FIELDS: { group: string; fields: Field[] }[] = [
       { key: "edge", label: "Edge (pts)", hint: "FADEBOT_TRADER_EDGE" },
       { key: "minSec", label: "No calls before (s)", hint: "FADEBOT_TRADER_MIN_SEC" },
       { key: "confirmSec", label: "Confirm after (s, 0 = off)", hint: "FADEBOT_TRADER_CONFIRM_SEC" },
+      { key: "confirmAt", label: "Confirmed at (s, e.g. 160-189)", hint: "FADEBOT_TRADER_CONFIRM_AT" },
       {
         key: "ageRules",
         label: "Quote-age rules (e.g. 0-2:none;3-5:50-99;21+:all)",
@@ -72,6 +73,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     edge: c100(t.edge),
     minSec: String(t.minSec ?? 0),
     confirmSec: String(t.confirmSec ?? 0),
+    confirmAt: t.confirmAt ? `${t.confirmAt.lo}-${t.confirmAt.hi}` : "",
     ageRules: (t.ageRules ?? [])
       .map((r) =>
         `${r.lo}${r.hi === null || r.hi === undefined || r.hi > 1e6 ? "+" : `-${r.hi}`}:${
@@ -112,6 +114,7 @@ function secretsFor(f: Record<string, string>): string[] {
   put("FADEBOT_TRADER_EDGE", f.edge);
   put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
   put("FADEBOT_TRADER_CONFIRM_SEC", f.confirmSec || "0");
+  put("FADEBOT_TRADER_CONFIRM_AT", f.confirmAt || "(delete)");
   put("FADEBOT_TRADER_AGE_RULES", f.ageRules || "(delete)");
   put("FADEBOT_TRADER_STREAK15", f.streak15 || "0");
   put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
