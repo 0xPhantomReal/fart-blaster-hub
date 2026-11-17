@@ -884,6 +884,22 @@ function ModeBox({
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
+        {order === "market" && tc?.ageRules?.length
+          ? chip(
+            true,
+            `Quote age: ${
+              tc.ageRules.map((r) =>
+                `${r.lo}${r.hi === null || r.hi > 1e6 ? "+" : `–${r.hi}`} s ${
+                  r.allow === null
+                    ? "all"
+                    : r.allow.length
+                    ? r.allow.map((a) => `${Math.round(a.lo * 100)}–${Math.round(a.hi * 100)}¢`).join("/")
+                    : "none"
+                }`
+              ).join(" · ")
+            }`,
+          )
+          : null}
         {tc?.streak15
           ? chip(
             true,

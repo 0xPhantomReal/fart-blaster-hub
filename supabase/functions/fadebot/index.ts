@@ -65,7 +65,15 @@ import {
   type StatsDecision,
   type StatsSample,
 } from "../_shared/statsMode.ts";
-import { type MarketCfg, type MarketPick, marketPick, streak15Block } from "../_shared/marketPick.ts";
+import {
+  type AgeRule,
+  ageRulesText,
+  type MarketCfg,
+  type MarketPick,
+  marketPick,
+  parseAgeRules,
+  streak15Block,
+} from "../_shared/marketPick.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
 import {
   emaRuleDecision,
@@ -240,6 +248,10 @@ const settings = () => ({
     // after MIN_SEC) sets the bias and is not bought; the first call at least this many seconds later confirms it
     // (same side → buy) or becomes the new bias (other side) and the wait starts again. 0 / unset = off.
     confirmSec: Math.max(0, Number(env("FADEBOT_TRADER_CONFIRM_SEC") || 0)),
+    // Quote-age rules (market buys; FADEBOT_TRADER_AGE_RULES, e.g. "0-2:none;3-5:50-99;6-10:20-29;11-15:0-19;
+    // 16-20:0-19;21+:all"): how long the quote for the side being bought has gone unchanged decides which prices may
+    // buy. Ages not listed are allowed. Unset = off.
+    ageRules: parseAgeRules(env("FADEBOT_TRADER_AGE_RULES")),
     // 15-minute streak block (FADEBOT_TRADER_STREAK15, e.g. 3): when the latest this-many finished 15-minute BTC
     // markets on Polymarket all settled the same way, no new buys. 0 / unset = off.
     streak15: Math.max(0, Math.round(Number(env("FADEBOT_TRADER_STREAK15") || 0))),
@@ -1906,6 +1918,7 @@ async function statsHistory(
 function marketCfg(tc: {
   minSec: number;
   confirmSec: number;
+  ageRules: AgeRule[];
   stats: boolean;
   statsMinN: number;
   statsSlip: number;
@@ -1924,6 +1937,7 @@ function marketCfg(tc: {
   return {
     minSec: tc.minSec,
     confirmSec: tc.confirmSec,
+    ageRules: tc.ageRules,
     stats: tc.stats,
     statsCfg: {
       minN: tc.statsMinN,
@@ -1961,6 +1975,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("edge", num("edge", 0, 99) !== undefined ? num("edge", 0, 99)! / 100 : undefined);
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
+  if (typeof o.ageRules === "string") tc.ageRules = parseAgeRules(o.ageRules);
   set("streak15", num("streak15", 0, 20));
   set("minLeftSec", num("minLeftSec", 0, 299));
   if (o.trigger === "choice" || o.trigger === "probability") tc.trigger = o.trigger;
@@ -2076,6 +2091,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     dayMap.set(day, dm);
     let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
     const earlier: { at: number; pick: Side }[] = [];
+    const quoteHist: { at: number; up: number; down: number }[] = [];
     for (const a of byWindow.get(w)!) {
       if (!(a.upCost > 0 && a.upCost < 1 && a.downCost > 0 && a.downCost < 1)) continue;
       const callNow = isCall(a, f);
@@ -2089,16 +2105,18 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       );
       if (!("buy" in d)) {
         if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
+        quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
         continue;
       }
       const c = callOf(a, data.refFallback, data.btcFallback);
       const dist = c.dist === null ? null : (d.buy === c.pick ? 1 : -1) * c.dist;
       const mp = marketPick(
-        { buy: d.buy, p: d.p, cost: d.cost, at: a.at, upCost: a.upCost, downCost: a.downCost, dist, earlier: [...earlier] },
+        { buy: d.buy, p: d.p, cost: d.cost, at: a.at, upCost: a.upCost, downCost: a.downCost, dist, earlier: [...earlier], quoteHist: [...quoteHist] },
         mcfg,
         tc.stats ? counts : null,
       );
       if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
+      quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
       if (mp.kind === "wait") continue;
       if (mp.kind === "skip") {
         if (tc.skipReask) continue;
@@ -2164,6 +2182,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       edge: Math.round(tc.edge * 100),
       minSec: tc.minSec,
       confirmSec: tc.confirmSec,
+      ageRules: ageRulesText(tc.ageRules),
       streak15: tc.streak15,
       minLeftSec: tc.minLeftSec,
       trigger: tc.trigger,
@@ -2270,6 +2289,7 @@ async function traderRun(start: number, minute: number, until: number) {
     wsMaxAgeSec: number;
     minSec: number;
     confirmSec: number;
+    ageRules: AgeRule[];
     streak15: number;
     skipJevPct: PriceRange[];
     stats: boolean;
@@ -2729,9 +2749,17 @@ async function traderRun(start: number, minute: number, until: number) {
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
           // Bias + confirmation: this window's earlier calls, judged exactly as the replay judges them.
+          const winAsks = (tc.confirmSec > 0 || tc.ageRules.length) && !tooEarly
+            ? await sql`select at_sec, p_up, up_cost, down_cost from fadebot_asks where window_start = ${start}
+                and up_cost is not null and down_cost is not null order by at_sec`
+            : [];
+          // Quote-age rules: this window's earlier recorded quotes, as the replay sees them.
+          const quoteHist = winAsks
+            .filter((a) => Number(a.at_sec) < nowEl)
+            .map((a) => ({ at: Number(a.at_sec), up: Number(a.up_cost), down: Number(a.down_cost) }));
           const earlier = tc.confirmSec > 0 && !tooEarly
-            ? (await sql`select at_sec, p_up, up_cost, down_cost from fadebot_asks where window_start = ${start}
-                and p_up is not null and up_cost is not null and down_cost is not null order by at_sec`)
+            ? winAsks
+              .filter((a) => a.p_up !== null)
               .map((a): AskRow => ({
                 window: start,
                 at: Number(a.at_sec),
@@ -2745,7 +2773,7 @@ async function traderRun(start: number, minute: number, until: number) {
               .map((a) => ({ at: a.at, pick: (a.pUp >= 0.5 ? "up" : "down") as Side }))
             : [];
           mp = marketPick(
-            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned, earlier },
+            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned, earlier, quoteHist },
             marketCfg(tc),
             counts,
           );

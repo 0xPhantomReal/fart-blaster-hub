@@ -17,7 +17,76 @@
 import { inRanges, type PriceRange, rangesText, type Side } from "./fadeStrategy.ts";
 import { type PickCfg, type StatsCounts, type StatsDecision, statsPick } from "./statsMode.ts";
 
+/** One quote-age rule: quotes aged lo..hi seconds may buy only at these prices (empty = none; null = all). */
+export type AgeRule = { lo: number; hi: number; allow: PriceRange[] | null };
+
+/**
+ * FADEBOT_TRADER_AGE_RULES, e.g. "0-2:none;3-5:50-99;6-10:20-29;11-15:0-19;16-20:0-19;21+:all".
+ * Brackets split by ";", each "ages:prices" with ages "a-b" or "a+" (seconds) and prices "none", "all" or cent
+ * ranges split by ",". Malformed brackets are ignored.
+ */
+export function parseAgeRules(s: string | undefined | null): AgeRule[] {
+  const out: AgeRule[] = [];
+  for (const part of String(s ?? "").split(";")) {
+    const m = part.trim().match(/^(\d+)\s*(?:-\s*(\d+)|(\+))\s*:\s*(.+)$/);
+    if (!m) continue;
+    const lo = Number(m[1]);
+    const hi = m[3] ? Infinity : Number(m[2]);
+    const p = m[4].trim().toLowerCase();
+    let allow: PriceRange[] | null;
+    if (p === "all") allow = null;
+    else if (p === "none") allow = [];
+    else {
+      allow = [];
+      for (const r of p.split(",")) {
+        const x = r.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+        if (x) allow.push({ lo: Number(x[1]) / 100, hi: Number(x[2]) / 100 });
+      }
+      if (!allow.length) continue;
+    }
+    if (hi >= lo) out.push({ lo, hi, allow });
+  }
+  return out;
+}
+
+export function ageRulesText(rules: AgeRule[]): string {
+  return rules.map((r) =>
+    `${r.lo}${r.hi === Infinity ? "+" : `–${r.hi}`} s: ${
+      r.allow === null ? "all" : r.allow.length ? rangesText(r.allow) : "none"
+    }`
+  ).join("; ");
+}
+
+/**
+ * Seconds since the quote for `side` last changed: walk back through this window's earlier recorded quotes while
+ * they equal the current one. Whole seconds, like the analysis tables.
+ */
+export function quoteAge(
+  hist: { at: number; up: number; down: number }[],
+  now: { at: number; cost: number },
+  side: Side,
+): number {
+  let t0 = now.at;
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const h = hist[i];
+    if (h.at >= now.at) continue;
+    const c = side === "up" ? h.up : h.down;
+    if (Math.abs(c - now.cost) > 1e-9) break;
+    t0 = h.at;
+  }
+  return Math.round(now.at - t0);
+}
+
+/** Is a buy at `cost` allowed for a quote `age` seconds old? No matching rule = allowed. */
+export function ageAllowed(age: number, cost: number, rules: AgeRule[]): { ok: boolean; rule: AgeRule | null } {
+  const r = rules.find((x) => age >= x.lo && age <= x.hi) ?? null;
+  if (!r || r.allow === null) return { ok: true, rule: r };
+  return { ok: !!inRanges(cost, r.allow), rule: r };
+}
+
 export type MarketCfg = {
+  /** Quote-age rules (FADEBOT_TRADER_AGE_RULES); empty = off. */
+  ageRules?: AgeRule[];
   minSec: number;
   /** Seconds after the window's first call that a confirming call must come; 0 = off. */
   confirmSec?: number;
@@ -46,6 +115,8 @@ export type MarketCall = {
   liveBanned?: string;
   /** Earlier calls in this window (asks that cleared the edge after MIN_SEC), oldest first: second and Jev's side. */
   earlier?: { at: number; pick: Side }[];
+  /** This window's earlier recorded quotes (all asks), oldest first, for the quote-age rules. */
+  quoteHist?: { at: number; up: number; down: number }[];
 };
 
 export type ConfirmResult = { ok: true; note: string; why?: undefined } | { ok: false; why: string; note?: undefined };
@@ -118,6 +189,23 @@ export function streak15Block(results: (Side | null)[], n: number): { blocked: b
 const opp = (s: Side): Side => (s === "up" ? "down" : "up");
 
 export function marketPick(call: MarketCall, cfg: MarketCfg, counts: StatsCounts | null): MarketPick {
+  const r = marketPickRules(call, cfg, counts);
+  if (r.kind !== "buy" || !cfg.ageRules?.length) return r;
+  const age = quoteAge(call.quoteHist ?? [], { at: call.at, cost: r.cost }, r.side);
+  const a = ageAllowed(age, r.cost, cfg.ageRules);
+  if (!a.ok) {
+    return {
+      kind: "wait",
+      why: `${r.side} quote ${Math.round(r.cost * 100)}¢ is ${age} s old: the ${a.rule!.lo}${
+        a.rule!.hi === Infinity ? "+" : `–${a.rule!.hi}`
+      } s rule allows ${a.rule!.allow!.length ? rangesText(a.rule!.allow!) : "no buys"} (FADEBOT_TRADER_AGE_RULES)`,
+      stats: r.stats,
+    };
+  }
+  return { ...r, note: r.note + ` [quote ${age} s old]` };
+}
+
+function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts | null): MarketPick {
   if (call.at < cfg.minSec) {
     return { kind: "wait", why: `call at ${Math.floor(call.at)} s ignored: before ${cfg.minSec} s (FADEBOT_TRADER_MIN_SEC)`, stats: null };
   }
