@@ -875,6 +875,11 @@ function ModeBox({
             tc.statsSwapRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
           } buys the other side`)
           : null}
+        {order === "market" && tc?.stats && tc?.statsSkipRanges?.length
+          ? chip(true, `Stats skip: no buy at ${
+            tc.statsSkipRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
+          } (asks again)`)
+          : null}
         {order === "market" && tc?.stats && tc?.statsMaxAgainst
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}

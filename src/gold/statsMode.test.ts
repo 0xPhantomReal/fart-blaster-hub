@@ -107,3 +107,19 @@ describe("statsPick", () => {
     expect(n.buy && n.side).toBe("up");
   });
 });
+
+describe("stats skip ranges", () => {
+  const cfg = { minN: 10, slip: 0.09, minEdge: 0.05, fee: 0.095, invert: false, swapAbove: 0, maxAgainst: 0 };
+  const call = { pick: "up" as const, pct: 0.7, jevCost: 0.3, otherCost: 0.7, dist: 10 };
+  it("skips when the side to buy is in a skip range, after any swap", () => {
+    const c = countSamples(mk(20, {}, 12));
+    const k = statsPick(call, c, { ...cfg, skipRanges: [{ lo: 0.3, hi: 0.39 }] });
+    expect(k.buy).toBe(false);
+    expect(k.note).toContain("stats skip range");
+    const ok = statsPick(call, c, { ...cfg, skipRanges: [{ lo: 0.4, hi: 0.49 }] });
+    expect(ok.buy && ok.side).toBe("up");
+    // swapped to down at 70¢ first, so a 30–39¢ skip no longer applies
+    const sw = statsPick(call, c, { ...cfg, swapRanges: [{ lo: 0.25, hi: 0.35 }], skipRanges: [{ lo: 0.3, hi: 0.39 }] });
+    expect(sw.buy && sw.side).toBe("down");
+  });
+});

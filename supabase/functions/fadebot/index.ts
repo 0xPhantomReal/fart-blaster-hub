@@ -265,6 +265,9 @@ const settings = () => ({
     // Stats swap ranges (FADEBOT_TRADER_STATS_SWAP_RANGES, e.g. "60-99,41-43"): when the side stats would buy costs a
     // price in one of these, buy the other side instead. Off when unset; works alongside STATS_SWAP_ABOVE.
     statsSwapRanges: parseRanges(env("FADEBOT_TRADER_STATS_SWAP_RANGES"), []),
+    // Stats skip ranges (FADEBOT_TRADER_STATS_SKIP_RANGES, e.g. "30-39" or "0-9,30-39"): when the side stats would buy
+    // (after any stats swap) is priced in one of these, skip the call and ask again. Off when unset.
+    statsSkipRanges: parseRanges(env("FADEBOT_TRADER_STATS_SKIP_RANGES"), []),
     statsCandles: Math.max(12, Math.round(Number(env("FADEBOT_TRADER_STATS_CANDLES") || 288))),
     statsMinN: Math.max(3, Math.round(Number(env("FADEBOT_TRADER_STATS_MIN_N") || 15))),
     statsSlip: Number(env("FADEBOT_TRADER_STATS_SLIP") || 9) / 100,
@@ -1910,6 +1913,7 @@ function marketCfg(tc: {
   statsInvert: boolean;
   statsSwapAbove: number;
   statsSwapRanges: PriceRange[];
+  statsSkipRanges: PriceRange[];
   statsMaxAgainst: number;
   invert: boolean;
   skipJevPct: PriceRange[];
@@ -1929,6 +1933,7 @@ function marketCfg(tc: {
       invert: tc.statsInvert,
       swapAbove: tc.statsSwapAbove,
       swapRanges: tc.statsSwapRanges,
+      skipRanges: tc.statsSkipRanges,
       maxAgainst: tc.statsMaxAgainst,
     },
     invert: tc.invert,
@@ -1974,6 +1979,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("statsInvert", on("statsInvert"));
   set("statsSwapAbove", num("statsSwapAbove", 0, 99) !== undefined ? num("statsSwapAbove", 0, 99)! / 100 : undefined);
   set("statsSwapRanges", ranges("statsSwapRanges"));
+  set("statsSkipRanges", ranges("statsSkipRanges"));
   set("statsMaxAgainst", num("statsMaxAgainst", 0, 10000));
   set("statsMinN", num("statsMinN", 3, 1000));
   set("statsSlip", num("statsSlip", 0, 50) !== undefined ? num("statsSlip", 0, 50)! / 100 : undefined);
@@ -2172,6 +2178,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       statsInvert: tc.statsInvert,
       statsSwapAbove: Math.round(tc.statsSwapAbove * 100),
       statsSwapRanges: rng(tc.statsSwapRanges),
+      statsSkipRanges: rng(tc.statsSkipRanges),
       statsMaxAgainst: tc.statsMaxAgainst,
       statsMinN: tc.statsMinN,
       statsSlip: Math.round(tc.statsSlip * 100),
@@ -2270,6 +2277,7 @@ async function traderRun(start: number, minute: number, until: number) {
     statsMaxAgainst: number;
     statsSwapAbove: number;
     statsSwapRanges: PriceRange[];
+    statsSkipRanges: PriceRange[];
     statsCandles: number;
     statsMinN: number;
     statsSlip: number;

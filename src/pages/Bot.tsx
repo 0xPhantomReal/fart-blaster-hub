@@ -40,6 +40,7 @@ const FIELDS: { group: string; fields: Field[] }[] = [
       { key: "statsInvert", label: "Stats invert", hint: "FADEBOT_TRADER_STATS_INVERT", kind: "onoff" },
       { key: "statsSwapAbove", label: "Swap above (¢, 0 = off)", hint: "FADEBOT_TRADER_STATS_SWAP_ABOVE" },
       { key: "statsSwapRanges", label: "Stats swap prices (e.g. 60-99,41-43)", hint: "FADEBOT_TRADER_STATS_SWAP_RANGES" },
+      { key: "statsSkipRanges", label: "Stats skip prices (e.g. 30-39)", hint: "FADEBOT_TRADER_STATS_SKIP_RANGES" },
       { key: "statsMaxAgainst", label: "Wrong-side skip ($, 0 = off)", hint: "FADEBOT_TRADER_STATS_MAX_AGAINST" },
       { key: "statsMinN", label: "Min past calls", hint: "FADEBOT_TRADER_STATS_MIN_N" },
       { key: "statsSlip", label: "Slip (¢)", hint: "FADEBOT_TRADER_STATS_SLIP" },
@@ -78,6 +79,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsInvert: yn(t.statsInvert),
     statsSwapAbove: c100(t.statsSwapAbove ?? 0),
     statsSwapRanges: rng(t.statsSwapRanges),
+    statsSkipRanges: rng(t.statsSkipRanges),
     statsMaxAgainst: String(t.statsMaxAgainst ?? 0),
     statsMinN: String(t.statsMinN ?? 15),
     statsSlip: c100(t.statsSlip),
@@ -106,6 +108,7 @@ function secretsFor(f: Record<string, string>): string[] {
     put("FADEBOT_TRADER_STATS_INVERT", f.statsInvert === "on" ? "1" : "0");
     put("FADEBOT_TRADER_STATS_SWAP_ABOVE", f.statsSwapAbove || "0");
     put("FADEBOT_TRADER_STATS_SWAP_RANGES", f.statsSwapRanges || "(delete)");
+    put("FADEBOT_TRADER_STATS_SKIP_RANGES", f.statsSkipRanges || "(delete)");
     put("FADEBOT_TRADER_STATS_MAX_AGAINST", f.statsMaxAgainst || "0");
     put("FADEBOT_TRADER_STATS_MIN_N", f.statsMinN);
     put("FADEBOT_TRADER_STATS_SLIP", f.statsSlip);

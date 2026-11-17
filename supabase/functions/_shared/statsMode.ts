@@ -219,7 +219,14 @@ export function statsDecide(call: StatsCall, counts: StatsCounts, cfg: StatsCfg)
 }
 
 /** Stats mode's extra rules on top of the decision (all optional). */
-export type PickCfg = StatsCfg & { invert: boolean; swapAbove: number; swapRanges?: PriceRange[]; maxAgainst: number };
+export type PickCfg = StatsCfg & {
+  invert: boolean;
+  swapAbove: number;
+  swapRanges?: PriceRange[];
+  /** Skip the call when the side to buy (after any swap) is priced in one of these. */
+  skipRanges?: PriceRange[];
+  maxAgainst: number;
+};
 
 export type StatsPick =
   | { buy: false; decision: StatsDecision; note: string }
@@ -227,7 +234,8 @@ export type StatsPick =
 
 /**
  * The whole stats-mode pick for one call, in the live bot's order: decide (with / against / skip) → stats invert →
- * swap to the other side when the price is over `swapAbove` or in `swapRanges` → skip if BTC is more than `maxAgainst` past the start line
+ * swap to the other side when the price is over `swapAbove` or in `swapRanges` → skip if that side's price is in
+ * `skipRanges` → skip if BTC is more than `maxAgainst` past the start line
  * against the side actually being bought.
  */
 export function statsPick(call: StatsCall & { pick: Side }, counts: StatsCounts, cfg: PickCfg): StatsPick {
@@ -250,6 +258,16 @@ export function statsPick(call: StatsCall & { pick: Side }, counts: StatsCounts,
     against = !against;
     side = against ? other : call.pick;
     cost = oc;
+  }
+  const sk = inRanges(cost, cfg.skipRanges ?? []);
+  if (sk) {
+    return {
+      buy: false,
+      decision,
+      note: `stats would buy ${side} at ${Math.round(cost * 100)}¢${note}, but that's in the ${
+        rangesText([sk])
+      } stats skip range`,
+    };
   }
   if (cfg.maxAgainst > 0 && call.dist !== null) {
     const sideDist = side === call.pick ? call.dist : -call.dist;
