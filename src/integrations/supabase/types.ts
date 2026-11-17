@@ -14,6 +14,27 @@ export type Database = {
   }
   public: {
     Tables: {
+      fadebot_15m: {
+        Row: {
+          at: string | null
+          period_start: number
+          result: string
+          source: string
+        }
+        Insert: {
+          at?: string | null
+          period_start: number
+          result: string
+          source: string
+        }
+        Update: {
+          at?: string | null
+          period_start?: number
+          result?: string
+          source?: string
+        }
+        Relationships: []
+      }
       fadebot_asks: {
         Row: {
           action: string | null
