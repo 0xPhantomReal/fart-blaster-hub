@@ -54,6 +54,14 @@ const FIELDS: { group: string; fields: Field[] }[] = [
     ],
   },
   {
+    group: "Exits (replay only)",
+    fields: [
+      { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
+      { key: "slPct", label: "Stop loss (% of price paid, 0 = off)", hint: "replay only" },
+      { key: "maxEntries", label: "Max entries per window (after a sell)", hint: "FADEBOT_TRADER_MAX_ENTRIES" },
+    ],
+  },
+  {
     group: "Sizing",
     fields: [
       { key: "betPct", label: "Bet % of balance", hint: "FADEBOT_TRADER_BET_PCT" },
@@ -99,6 +107,9 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsSlip: c100(t.statsSlip),
     statsCandles: String(t.statsCandles ?? 288),
     betPct: String(t.betPct ?? 5),
+    tpPct: "0",
+    slPct: "0",
+    maxEntries: String((t as { maxEntries?: number }).maxEntries ?? 3),
     dailyLoss: String(t.dailyLoss ?? ""),
   };
 }
@@ -297,6 +308,12 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
           <div className="text-xs text-[#8b949e]">
             {r.betPct}% of balance per trade, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded}{" "}
             windows; same side in {tt.sameSide}.
+            {tt.takeProfits || tt.stopLosses
+              ? ` Exits: ${tt.takeProfits ?? 0} take profit, ${tt.stopLosses ?? 0} stop loss (sold at the sell price − the gap).`
+              : ""}
+            {tt.patchyExits
+              ? ` ⚠ ${tt.patchyExits} trades had gaps of 20 s+ in the recorded prices after buying, so their exits are rough.`
+              : ""}
           </div>
           <table className="w-full text-xs tabular-nums">
             <thead className="text-[#8b949e]">
@@ -332,7 +349,12 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                     <tr key={x.window} title={x.note} className="border-t border-[#21262d]">
                       <td>{time(x.window)} <span className="text-[#8b949e]">{x.at}s</span></td>
                       <td>{x.jev} {x.pct}%</td>
-                      <td>{x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(other side)" : ""}</td>
+                      <td>
+                        {x.entry && x.entry > 1 ? `#${x.entry} ` : ""}
+                        {x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(other side)" : ""}
+                        {x.exit ? ` · ${x.exit.why} at ${x.exit.at}s, sold ${x.exit.fill}¢` : ""}
+                        {x.patchy ? " ⚠" : ""}
+                      </td>
                       <td className={`text-right ${tone(x.pnl)}`}>{signed(x.pnl)}</td>
                       <td className="pl-2 text-[#8b949e]">
                         {x.real ? `${x.real.side} ${x.real.paid}¢ ${x.real.result ?? "open"}` : "—"}

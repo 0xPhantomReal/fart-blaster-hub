@@ -1101,6 +1101,12 @@ export type StatsReplayTrade = {
   balance: number;
   note: string;
   real: { side: string; paid: number; result: string | null; pnl: number | null } | null;
+  /** Replay take profit / stop loss: how the position ended early, if it did. */
+  exit?: { why: string; at: number; sellQuote: number; fill: number } | null;
+  /** 1 = first buy in the window; 2+ = re-entries after a sell. */
+  entry?: number;
+  /** The recorded prices after the buy had a gap of more than 20 s (TP/SL less reliable). */
+  patchy?: boolean;
 };
 export type StatsReplay = {
   days: number;
@@ -1115,6 +1121,9 @@ export type StatsReplay = {
     endBal: number;
     worstDrop: number;
     worstStreak: number;
+    takeProfits?: number;
+    stopLosses?: number;
+    patchyExits?: number;
     realTrades: number;
     realPnl: number;
     bothTraded: number;

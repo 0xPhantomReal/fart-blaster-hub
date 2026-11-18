@@ -2009,6 +2009,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("statsCandles", num("statsCandles", 12, 2016));
   set("betPct", num("betPct", 0.1, 100));
   set("dailyLoss", num("dailyLoss", 1, 1e9));
+  set("maxEntries", num("maxEntries", 1, 20));
   tc.order = "market";
   return tc;
 }
@@ -2069,6 +2070,29 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       res15.set(p, a && b && a.n >= 20 && b.n >= 20 ? winner(a.avg, b.avg) : null);
     }
   }
+  // Take profit / stop loss (replay only): % of the price paid; 0 = off. Max entries applies after a sell.
+  const tpPct = Math.max(0, Number(over.tpPct) || 0) / 100;
+  const slPct = Math.min(100, Math.max(0, Number(over.slPct) || 0)) / 100;
+  const exitsOn = tpPct > 0 || slPct > 0;
+  let tpN = 0, slN = 0, patchyN = 0;
+  const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
+  if (exitsOn) {
+    const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
+      .catch(() => []);
+    for (const r of rowsP) {
+      const l = pathBy.get(Number(r.window_start)) ?? [];
+      // deno-lint-ignore no-explicit-any
+      for (const pt of (r.pts as any[]) ?? []) {
+        if (Array.isArray(pt) && pt.length >= 3) {
+          l.push({ at: Number(pt[0]), up: pt[1] === null ? null : Number(pt[1]), down: pt[2] === null ? null : Number(pt[2]) });
+        }
+      }
+      pathBy.set(Number(r.window_start), l);
+    }
+  }
+  const pricesOf = (w: number, asksW: AskRow[]) =>
+    [...(pathBy.get(w) ?? []), ...asksW.map((a) => ({ at: a.at, up: a.upCost, down: a.downCost }))]
+      .sort((x, y) => x.at - y.at);
   const mcfg = marketCfg(tc);
   const decideCfg = tc.stats ? { ...tc, banLo: undefined, banHi: undefined } : tc;
   const pct = tc.betPct > 0 ? tc.betPct / 100 : 0.05;
@@ -2096,87 +2120,152 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     const day = dayOf(w);
     const dm = dayMap.get(day) ?? { trades: 0, won: 0, pnl: 0, startBal: bal, endBal: bal };
     dayMap.set(day, dm);
-    let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
+    const asksW = byWindow.get(w)!;
     const earlier: { at: number; pick: Side }[] = [];
     const quoteHist: { at: number; up: number; down: number }[] = [];
-    for (const a of byWindow.get(w)!) {
-      if (!(a.upCost > 0 && a.upCost < 1 && a.downCost > 0 && a.downCost < 1)) continue;
-      const callNow = isCall(a, f);
-      const action = (a.action ?? (a.pUp >= 0.5 ? "buy_up" : "buy_down")) as TraderAction;
-      const d = traderDecision(
-        { action, pUp: a.pUp },
-        { upCost: a.upCost, downCost: a.downCost },
-        null,
-        { secondsLeft: TF - a.at, entries: 0, lossLimitHit: dm.pnl <= -tc.dailyLoss },
-        decideCfg,
-      );
-      if (!("buy" in d)) {
+    // Every recorded price in this window (asks + the per-second path), for take profit / stop loss.
+    const prices = exitsOn ? pricesOf(w, asksW) : [];
+    let idx = 0, entries = 0, resumeAt = -1;
+    while (entries < Math.max(1, tc.maxEntries)) {
+      let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
+      let windowOver = false;
+      for (; idx < asksW.length; idx++) {
+        const a = asksW[idx];
+        // While holding, the live bot doesn't ask Jev, so those asks don't exist for it.
+        if (a.at <= resumeAt) continue;
+        if (!(a.upCost > 0 && a.upCost < 1 && a.downCost > 0 && a.downCost < 1)) continue;
+        const callNow = isCall(a, f);
+        const action = (a.action ?? (a.pUp >= 0.5 ? "buy_up" : "buy_down")) as TraderAction;
+        const d = traderDecision(
+          { action, pUp: a.pUp },
+          { upCost: a.upCost, downCost: a.downCost },
+          null,
+          { secondsLeft: TF - a.at, entries, lossLimitHit: dm.pnl <= -tc.dailyLoss },
+          decideCfg,
+        );
+        if (!("buy" in d)) {
+          if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
+          quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
+          continue;
+        }
+        const c = callOf(a, data.refFallback, data.btcFallback);
+        const dist = c.dist === null ? null : (d.buy === c.pick ? 1 : -1) * c.dist;
+        const mp = marketPick(
+          {
+            buy: d.buy,
+            p: d.p,
+            cost: d.cost,
+            at: a.at,
+            upCost: a.upCost,
+            downCost: a.downCost,
+            dist,
+            earlier: [...earlier],
+            quoteHist: [...quoteHist],
+          },
+          mcfg,
+          tc.stats ? counts : null,
+        );
         if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
         quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
-        continue;
-      }
-      const c = callOf(a, data.refFallback, data.btcFallback);
-      const dist = c.dist === null ? null : (d.buy === c.pick ? 1 : -1) * c.dist;
-      const mp = marketPick(
-        { buy: d.buy, p: d.p, cost: d.cost, at: a.at, upCost: a.upCost, downCost: a.downCost, dist, earlier: [...earlier], quoteHist: [...quoteHist] },
-        mcfg,
-        tc.stats ? counts : null,
-      );
-      if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
-      quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
-      if (mp.kind === "wait") continue;
-      if (mp.kind === "skip") {
-        if (tc.skipReask) continue;
+        if (mp.kind === "wait") continue;
+        if (mp.kind === "skip") {
+          if (tc.skipReask) continue;
+          windowOver = true;
+          break;
+        }
+        pick = mp;
+        at = a.at;
+        jev = d.buy;
+        pJev = d.p;
+        idx++;
         break;
       }
-      pick = mp;
-      at = a.at;
-      jev = d.buy;
-      pJev = d.p;
-      break;
+      if (!pick || windowOver) break;
+      entries++;
+      const price = Math.min(0.99, pick.cost + gap);
+      const stake = Math.max(1, Math.floor(bal * pct * 100) / 100);
+      // Take profit / stop loss on the side's sell price (1 − the other side's cost), as % of the price paid.
+      let exit: { at: number; px: number; why: "take profit" | "stop loss" } | null = null;
+      let worstGap = 0, lastT = at;
+      if (exitsOn) {
+        for (const pt of prices) {
+          if (pt.at <= at) continue;
+          worstGap = Math.max(worstGap, pt.at - lastT);
+          lastT = pt.at;
+          const oc = pick.side === "up" ? pt.down : pt.up;
+          if (oc === null || !(oc > 0 && oc < 1)) continue;
+          const sell = 1 - oc;
+          if (tpPct > 0 && sell >= price * (1 + tpPct) - 1e-9) {
+            exit = { at: pt.at, px: sell, why: "take profit" };
+            break;
+          }
+          if (slPct > 0 && sell <= price * (1 - slPct) + 1e-9) {
+            exit = { at: pt.at, px: sell, why: "stop loss" };
+            break;
+          }
+        }
+        if (!exit) worstGap = Math.max(worstGap, TF - lastT);
+      }
+      const patchy = exitsOn && worstGap > 20;
+      if (patchy) patchyN++;
+      let pnl: number, ok: boolean, exitFill: number | null = null;
+      if (exit) {
+        // Selling pays the gap too (the price can be stale the same way), plus the fee on both legs.
+        exitFill = Math.max(0.01, exit.px - gap);
+        const shares = stake / price;
+        pnl = shares * exitFill - stake - shares * 0.095 * price * (1 - price) - shares * 0.095 * exitFill * (1 - exitFill);
+        ok = pnl > 0;
+        if (exit.why === "take profit") tpN++;
+        else slN++;
+      } else {
+        ok = pick.side === win;
+        pnl = stake * perDollar(price, ok, 0.095);
+      }
+      bal += pnl;
+      dm.trades++;
+      if (ok) dm.won++;
+      dm.pnl += pnl;
+      dm.endBal = bal;
+      if (ok) {
+        won++;
+        streak = 0;
+      } else {
+        lost++;
+        streak++;
+        worstStreak = Math.max(worstStreak, streak);
+      }
+      peak = Math.max(peak, bal);
+      worstDrop = Math.min(worstDrop, bal / peak - 1);
+      const r = entries === 1 ? realBy.get(w) : undefined;
+      if (r) {
+        compared++;
+        if (r.side === pick.side) same++;
+      }
+      trades.push({
+        window: w,
+        at,
+        jev,
+        pct: Math.round(pJev * 100),
+        side: pick.side,
+        against: pick.otherSide,
+        quote: Math.round(pick.cost * 100),
+        paid: Math.round(price * 100),
+        winner: win,
+        won: ok,
+        stake: Math.round(stake * 100) / 100,
+        pnl: Math.round(pnl * 100) / 100,
+        balance: Math.round(bal * 100) / 100,
+        exit: exit
+          ? { why: exit.why, at: Math.round(exit.at), sellQuote: Math.round(exit.px * 100), fill: Math.round(exitFill! * 100) }
+          : null,
+        entry: entries,
+        patchy,
+        note: `${pick.stats ? `${pick.stats.bands}: ${pick.stats.why}` : ""}${pick.note}`.trim(),
+        real: r ? { side: r.side, paid: Math.round(r.price * 100), result: r.result, pnl: r.pnl } : null,
+      });
+      if (!exit) break; // held to settlement: done with this window
+      resumeAt = exit.at;
     }
-    if (!pick) continue;
-    const price = Math.min(0.99, pick.cost + gap);
-    const stake = Math.max(1, Math.floor(bal * pct * 100) / 100);
-    const ok = pick.side === win;
-    const pnl = stake * perDollar(price, ok, 0.095);
-    bal += pnl;
-    dm.trades++;
-    if (ok) dm.won++;
-    dm.pnl += pnl;
-    dm.endBal = bal;
-    if (ok) {
-      won++;
-      streak = 0;
-    } else {
-      lost++;
-      streak++;
-      worstStreak = Math.max(worstStreak, streak);
-    }
-    peak = Math.max(peak, bal);
-    worstDrop = Math.min(worstDrop, bal / peak - 1);
-    const r = realBy.get(w);
-    if (r) {
-      compared++;
-      if (r.side === pick.side) same++;
-    }
-    trades.push({
-      window: w,
-      at,
-      jev,
-      pct: Math.round(pJev * 100),
-      side: pick.side,
-      against: pick.otherSide,
-      quote: Math.round(pick.cost * 100),
-      paid: Math.round(price * 100),
-      winner: win,
-      won: ok,
-      stake: Math.round(stake * 100) / 100,
-      pnl: Math.round(pnl * 100) / 100,
-      balance: Math.round(bal * 100) / 100,
-      note: `${pick.stats ? `${pick.stats.bands}: ${pick.stats.why}` : ""}${pick.note}`.trim(),
-      real: r ? { side: r.side, paid: Math.round(r.price * 100), result: r.result, pnl: r.pnl } : null,
-    });
     if (bal < 1) break;
   }
   const settled = real.filter((r) => r.result === "win" || r.result === "loss");
@@ -2213,6 +2302,9 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       statsCandles: tc.statsCandles,
       betPct: tc.betPct,
       dailyLoss: tc.dailyLoss,
+      maxEntries: tc.maxEntries,
+      tpPct: Math.round(tpPct * 100),
+      slPct: Math.round(slPct * 100),
     },
     totals: {
       trades: won + lost,
@@ -2223,6 +2315,9 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstDrop: Math.round(worstDrop * 1000) / 10,
       worstStreak,
       blocked15,
+      takeProfits: tpN,
+      stopLosses: slN,
+      patchyExits: patchyN,
       realTrades: settled.length,
       realPnl: Math.round(settled.reduce((x, r) => x + Number(r.pnl ?? 0), 0) * 100) / 100,
       bothTraded: compared,
