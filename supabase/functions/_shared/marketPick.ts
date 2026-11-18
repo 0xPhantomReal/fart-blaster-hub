@@ -90,6 +90,8 @@ export type MarketCfg = {
   minSec: number;
   /** Seconds after the window's first call that a confirming call must come; 0 = off. */
   confirmSec?: number;
+  /** Replay only: a third call ("buy") at least this many seconds after the confirming ("warm") call; 0 = off. */
+  confirm2Sec?: number;
   /** The confirmation must land in this range (seconds into the window), else no trade that window. */
   confirmAt?: { lo: number; hi: number } | null;
   stats: boolean;
@@ -137,40 +139,55 @@ export function parseSecRange(text: string | undefined | null): { lo: number; hi
 export type ConfirmResult = { ok: true; note: string; why?: undefined } | { ok: false; why: string; note?: undefined };
 
 /**
- * Bias and confirmation: the window's first call sets the bias (and is not bought). The first call at least `sec`
- * seconds after the bias either confirms it (same side) — from then on calls on that side may buy — or, pointing
- * the other way, becomes the new bias, and the wait starts again from it. Repeats until confirmed or the window ends.
+ * Bias and confirmation: the window's first call sets the bias (and is not bought). Each stage needs the first call
+ * at least waits[i] seconds after the previous stage's call, on the bias side: with one wait (live) that call
+ * confirms; with two (replay's triple confirmation) the first is "warm" and the second confirms. A call on the
+ * other side becomes the new bias and the chain starts again. Once confirmed, calls on the bias side may buy.
  */
 export function confirmGate(
   earlier: { at: number; pick: Side }[],
   now: { at: number; pick: Side },
-  sec: number,
+  sec: number | number[],
   /** Allowed confirmation time (seconds into the window); confirmed outside it = no trade this window. */
   at?: { lo: number; hi: number } | null,
 ): ConfirmResult {
+  const waits = (Array.isArray(sec) ? sec : [sec]).filter((x) => x > 0);
   const s = (x: number) => `${Math.round(x)} s`;
   const all = [...earlier, now];
   let bias = all[0];
-  let flips = 0;
+  let stage = 0, stageAt = bias.at, flips = 0;
+  const steps: number[] = [];
   let confirmedAt: number | null = null;
   for (const c of all.slice(1)) {
     if (confirmedAt !== null) break;
-    if (c.at < bias.at + sec - 1e-9) continue;
-    if (c.pick === bias.pick) confirmedAt = c.at;
-    else {
+    if (c.at < stageAt + waits[stage] - 1e-9) continue;
+    if (c.pick === bias.pick) {
+      steps.push(c.at);
+      stage++;
+      stageAt = c.at;
+      if (stage >= waits.length) confirmedAt = c.at;
+    } else {
       bias = c;
+      stage = 0;
+      stageAt = c.at;
+      steps.length = 0;
       flips++;
     }
   }
   const was = flips ? ` (bias flipped ${flips}×)` : "";
+  const triple = waits.length > 1;
   if (bias === now) {
     return {
       ok: false,
-      why: `${flips ? "bias flipped" : "bias set"}: Jev ${now.pick} at ${s(now.at)}; waiting for a call ${sec} s later to confirm`,
+      why: `${flips ? "bias flipped" : "bias set"}: Jev ${now.pick} at ${s(now.at)}; waiting for a call ${waits[0]} s later to ${
+        triple ? "warm up" : "confirm"
+      }`,
     };
   }
   if (confirmedAt === null) {
-    return { ok: false, why: `bias ${bias.pick} (set at ${s(bias.at)})${was}; waiting until ${s(bias.at + sec)} to confirm` };
+    const what = triple && stage === 1 ? `warm at ${s(stageAt)}; waiting until ${s(stageAt + waits[1])} for the buy call`
+      : `waiting until ${s(stageAt + waits[stage])} to ${triple ? "warm up" : "confirm"}`;
+    return { ok: false, why: `bias ${bias.pick} (set at ${s(bias.at)})${was}; ${what}` };
   }
   if (at && (Math.round(confirmedAt) < at.lo || Math.round(confirmedAt) > at.hi)) {
     return {
@@ -181,7 +198,8 @@ export function confirmGate(
   if (now.pick !== bias.pick) {
     return { ok: false, why: `bias ${bias.pick} confirmed at ${s(confirmedAt)}, but Jev now says ${now.pick}: waiting` };
   }
-  return { ok: true, note: ` [bias ${bias.pick} at ${s(bias.at)}${was}, confirmed at ${s(confirmedAt)}]` };
+  const warm = triple ? `, warm at ${s(steps[0])}` : "";
+  return { ok: true, note: ` [bias ${bias.pick} at ${s(bias.at)}${was}${warm}, confirmed at ${s(confirmedAt)}]` };
 }
 
 export type MarketPick =
@@ -238,7 +256,8 @@ function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts |
   }
   let confirmNote = "";
   if (cfg.confirmSec && cfg.confirmSec > 0) {
-    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, cfg.confirmSec, cfg.confirmAt);
+    const waits = cfg.confirm2Sec && cfg.confirm2Sec > 0 ? [cfg.confirmSec, cfg.confirm2Sec] : [cfg.confirmSec];
+    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, waits, cfg.confirmAt);
     if (g.why !== undefined) return { kind: "wait", why: g.why, stats: null };
     confirmNote = g.note;
   }

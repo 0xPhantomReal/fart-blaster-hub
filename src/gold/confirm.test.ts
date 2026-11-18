@@ -83,3 +83,29 @@ describe("confirmation time range", () => {
     expect(late.ok).toBe(false);
   });
 });
+
+describe("triple confirmation (bias → warm → buy)", () => {
+  it("needs a warm call and then a buy call, each after its wait", () => {
+    const W = [60, 30];
+    expect(confirmGate([{ at: 30, pick: "up" }], { at: 95, pick: "up" }, W).ok).toBe(false); // 95 is the warm call
+    expect(confirmGate([{ at: 30, pick: "up" }, { at: 95, pick: "up" }], { at: 110, pick: "up" }, W).ok).toBe(false); // too soon
+    const ok = confirmGate([{ at: 30, pick: "up" }, { at: 95, pick: "up" }], { at: 126, pick: "up" }, W);
+    expect(ok.ok).toBe(true);
+    expect(ok.note).toContain("warm at 95 s");
+  });
+  it("a disagreeing warm or buy call becomes the new bias", () => {
+    const W = [60, 30];
+    const g = confirmGate([{ at: 30, pick: "up" }, { at: 95, pick: "up" }], { at: 126, pick: "down" }, W);
+    expect(g.why).toContain("bias flipped");
+    const again = confirmGate(
+      [{ at: 30, pick: "up" }, { at: 95, pick: "up" }, { at: 126, pick: "down" }, { at: 190, pick: "down" }],
+      { at: 221, pick: "down" },
+      W,
+    );
+    expect(again.ok).toBe(true);
+  });
+  it("a single wait behaves exactly like before", () => {
+    expect(confirmGate([{ at: 40, pick: "up" }], { at: 101, pick: "up" }, [60]).ok).toBe(true);
+    expect(confirmGate([{ at: 40, pick: "up" }], { at: 101, pick: "up" }, 60).ok).toBe(true);
+  });
+});

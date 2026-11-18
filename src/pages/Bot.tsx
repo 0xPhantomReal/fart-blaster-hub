@@ -18,6 +18,7 @@ const FIELDS: { group: string; fields: Field[] }[] = [
       { key: "edge", label: "Edge (pts)", hint: "FADEBOT_TRADER_EDGE" },
       { key: "minSec", label: "No calls before (s)", hint: "FADEBOT_TRADER_MIN_SEC" },
       { key: "confirmSec", label: "Confirm after (s, 0 = off)", hint: "FADEBOT_TRADER_CONFIRM_SEC" },
+      { key: "confirm2Sec", label: "Warm → buy wait (s, 0 = off; replay only)", hint: "replay only: triple confirmation" },
       { key: "confirmAt", label: "Confirmed at (s, e.g. 160-189)", hint: "FADEBOT_TRADER_CONFIRM_AT" },
       {
         key: "ageRules",
@@ -81,6 +82,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     edge: c100(t.edge),
     minSec: String(t.minSec ?? 0),
     confirmSec: String(t.confirmSec ?? 0),
+    confirm2Sec: "0",
     confirmAt: t.confirmAt ? `${t.confirmAt.lo}-${t.confirmAt.hi}` : "",
     ageRules: (t.ageRules ?? [])
       .map((r) =>

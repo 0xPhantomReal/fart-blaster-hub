@@ -2093,7 +2093,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   const pricesOf = (w: number, asksW: AskRow[]) =>
     [...(pathBy.get(w) ?? []), ...asksW.map((a) => ({ at: a.at, up: a.upCost, down: a.downCost }))]
       .sort((x, y) => x.at - y.at);
-  const mcfg = marketCfg(tc);
+  // Triple confirmation (replay only): bias → warm (CONFIRM_SEC later) → buy (confirm2Sec after the warm call).
+  const mcfg = { ...marketCfg(tc), confirm2Sec: Math.max(0, Number(over.confirm2Sec) || 0) };
   const decideCfg = tc.stats ? { ...tc, banLo: undefined, banHi: undefined } : tc;
   const pct = tc.betPct > 0 ? tc.betPct / 100 : 0.05;
   const counts: StatsCounts = new Map();
@@ -2278,6 +2279,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       edge: Math.round(tc.edge * 100),
       minSec: tc.minSec,
       confirmSec: tc.confirmSec,
+      confirm2Sec: Math.max(0, Number(over.confirm2Sec) || 0),
       confirmAt: tc.confirmAt ? `${tc.confirmAt.lo}-${tc.confirmAt.hi}` : "",
       ageRules: ageRulesText(tc.ageRules),
       streak15: tc.streak15,
