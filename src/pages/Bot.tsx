@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import { fadeBotStatus, type FadeBotStatus, fetchReplay, type StatsReplay } from "@/gold/feed";
+import { parsePaste, type PasteResult, pasteReference, toPaste } from "@/gold/replayPaste";
 
 /** /bot — just the Polymarket bot: balance, today's result and the bot panel. No chart. */
 const money = (x: number | null | undefined) =>
@@ -181,6 +182,22 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
   const [r, setR] = useState<StatsReplay | null | undefined>(undefined);
   const [showTrades, setShowTrades] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
+  const [showPaste, setShowPaste] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasted, setPasted] = useState<PasteResult | null>(null);
+  const [copied, setCopied] = useState("");
+  const copy = (what: string, text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => setCopied(what), () => setCopied(""));
+  };
+  const applyPaste = () => {
+    if (!form) return;
+    const res = parsePaste(pasteText, form);
+    setForm(res.form);
+    if (res.controls.days !== undefined) setDays(res.controls.days);
+    if (res.controls.gap !== undefined) setGap(res.controls.gap);
+    if (res.controls.start !== undefined) setStart(String(res.controls.start));
+    setPasted(res);
+  };
   useEffect(() => {
     if (live && !form) setForm(fromLive(live));
   }, [live, form]);
@@ -287,12 +304,88 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             <button className="rounded border border-[#30363d] px-3 py-1.5 text-sm" onClick={() => live && setForm(fromLive(live))}>
               Reset to live
             </button>
+            <button
+              className="rounded border border-[#30363d] px-3 py-1.5 text-sm"
+              onClick={() => {
+                setPasted(null);
+                setCopied("");
+                setShowPaste(true);
+              }}
+            >
+              Paste settings
+            </button>
             <button className="text-xs text-[#58a6ff]" onClick={() => setShowSecrets((x) => !x)}>
               {showSecrets ? "Hide secrets" : "Secrets for these settings"}
             </button>
           </div>
           {showSecrets && (
             <pre className="overflow-auto rounded bg-[#0e1116] p-2 text-xs">{secretsFor(form).join("\n")}</pre>
+          )}
+          {showPaste && (
+            <div
+              className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/70 p-3 sm:p-8"
+              onClick={() => setShowPaste(false)}
+            >
+              <div
+                className="w-full max-w-2xl space-y-3 rounded-lg border border-[#30363d] bg-[#161b22] p-4 text-sm"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold">Paste settings</div>
+                  <button className="text-[#8b949e]" onClick={() => setShowPaste(false)} aria-label="Close">✕</button>
+                </div>
+                <p className="text-xs text-[#8b949e]">
+                  One setting per line, e.g. <code>EDGE=20</code> or <code>FADEBOT_TRADER_STATS_MIN_EDGE=5</code>. Any
+                  order. Settings you leave out keep their current value.
+                </p>
+                <textarea
+                  className="h-44 w-full rounded border border-[#30363d] bg-[#0e1116] p-2 font-mono text-xs text-[#c9d1d9]"
+                  placeholder={"EDGE=20\nCONFIRM_SEC=120\nCONFIRM_AT=160-189\nSTATS=on\nDAYS=7\nGAP=10"}
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded bg-[#238636] px-3 py-1.5 font-medium text-white disabled:opacity-50"
+                    disabled={!pasteText.trim()}
+                    onClick={applyPaste}
+                  >
+                    Apply to the form
+                  </button>
+                  <button
+                    className="rounded border border-[#30363d] px-3 py-1.5"
+                    onClick={() => form && copy("current", toPaste(form, { days, gap, start: Number(start) || undefined }))}
+                  >
+                    {copied === "current" ? "Copied ✓" : "Copy current settings"}
+                  </button>
+                  <button className="rounded border border-[#30363d] px-3 py-1.5" onClick={() => setShowPaste(false)}>
+                    Close
+                  </button>
+                </div>
+                {pasted && (
+                  <div className="space-y-1 rounded bg-[#0e1116] p-2 text-xs">
+                    <div className="text-[#26a69a]">
+                      Applied {pasted.applied.length}: {pasted.applied.join(" · ") || "nothing"}
+                    </div>
+                    {pasted.ignored.length > 0 && (
+                      <div className="text-[#d29922]">Not recognised (ignored): {pasted.ignored.join(" · ")}</div>
+                    )}
+                    <div className="text-[#8b949e]">Check the form, then press Run replay.</div>
+                  </div>
+                )}
+                <div className="border-t border-[#30363d] pt-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="text-xs font-semibold text-[#8b949e]">Format and every setting (for other agents)</div>
+                    <button className="text-xs text-[#58a6ff]" onClick={() => copy("format", pasteReference())}>
+                      {copied === "format" ? "Copied ✓" : "Copy format"}
+                    </button>
+                  </div>
+                  <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-[#0e1116] p-2 text-[11px] leading-snug text-[#c9d1d9]">
+                    {pasteReference()}
+                  </pre>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -366,7 +459,7 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                 <tbody>
                   {[...r.trades].reverse().map((x) => (
                     <tr key={x.window} title={x.note} className="border-t border-[#21262d]">
-                      <td>{time(x.window)} <span className="text-[#8b949e]">{x.at}s</span></td>
+                      <td>{time(x.window)} <span className="text-[#8b949e]">{Math.round(x.at)}s</span></td>
                       <td>{x.jev} {x.pct}%</td>
                       <td>
                         {x.entry && x.entry > 1 ? `#${x.entry} ` : ""}
