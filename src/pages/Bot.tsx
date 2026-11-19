@@ -63,8 +63,9 @@ const FIELDS: { group: string; fields: Field[] }[] = [
     ],
   },
   {
-    group: "Exits (replay only)",
+    group: "Fills & exits (replay only)",
     fields: [
+      { key: "maxFill", label: "Max fill price (¢, 0 = off)", hint: "replay only: buys that would fill above this ask again" },
       { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
       { key: "slPct", label: "Stop loss (% of price paid, 0 = off)", hint: "replay only" },
       { key: "maxEntries", label: "Max entries per window (after a sell)", hint: "FADEBOT_TRADER_MAX_ENTRIES" },
@@ -118,6 +119,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsSlip: c100(t.statsSlip),
     statsCandles: String(t.statsCandles ?? 288),
     betPct: String(t.betPct ?? 5),
+    maxFill: "0",
     tpPct: "0",
     slPct: "0",
     maxEntries: String((t as { maxEntries?: number }).maxEntries ?? 3),
@@ -420,6 +422,9 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
           <div className="text-xs text-[#8b949e]">
             {r.betPct}% of balance per trade, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded}{" "}
             windows; same side in {tt.sameSide}.
+            {tt.cappedBuys
+              ? ` Max fill price: ${tt.cappedBuys} calls would have filled above it and asked again.`
+              : ""}
             {tt.takeProfits || tt.stopLosses
               ? ` Exits: ${tt.takeProfits ?? 0} take profit, ${tt.stopLosses ?? 0} stop loss (sold at the sell price − the gap).`
               : ""}

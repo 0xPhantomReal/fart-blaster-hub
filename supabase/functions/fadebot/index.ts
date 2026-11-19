@@ -2081,6 +2081,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   const slPct = Math.min(100, Math.max(0, Number(over.slPct) || 0)) / 100;
   const exitsOn = tpPct > 0 || slPct > 0;
   let tpN = 0, slN = 0, patchyN = 0;
+  // Maximum fill price (replay only; cents, 0 = off): a buy that would fill above it (quote + gap) doesn't fill and
+  // the bot asks again, like a capped order that misses.
+  const maxFill = Math.min(99, Math.max(0, Number(over.maxFill) || 0)) / 100;
+  let cappedN = 0;
   const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
   if (exitsOn) {
     const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
@@ -2179,6 +2183,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
           if (tc.skipReask) continue;
           windowOver = true;
           break;
+        }
+        if (maxFill > 0 && Math.min(0.99, mp.cost + gap) > maxFill + 1e-9) {
+          cappedN++;
+          continue;
         }
         pick = mp;
         at = a.at;
@@ -2312,6 +2320,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       betPct: tc.betPct,
       dailyLoss: tc.dailyLoss,
       maxEntries: tc.maxEntries,
+      maxFill: Math.round(maxFill * 100),
       tpPct: Math.round(tpPct * 100),
       slPct: Math.round(slPct * 100),
     },
@@ -2324,6 +2333,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstDrop: Math.round(worstDrop * 1000) / 10,
       worstStreak,
       blocked15,
+      cappedBuys: cappedN,
       takeProfits: tpN,
       stopLosses: slN,
       patchyExits: patchyN,
