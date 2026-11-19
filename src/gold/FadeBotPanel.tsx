@@ -919,7 +919,11 @@ function ModeBox({
           ? chip(
             true,
             `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree${
-              tc.confirmAt ? ` · only if confirmed at ${tc.confirmAt.lo}–${tc.confirmAt.hi} s` : ""
+              tc.confirmAt
+                ? ` · only if confirmed at ${tc.confirmAt.lo}–${tc.confirmAt.hi} s${
+                  tc.confirmAtReask ? " (earlier confirmations: asks again)" : " (else skips the window)"
+                }`
+                : ""
             }`,
           )
           : null}

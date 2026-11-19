@@ -94,6 +94,8 @@ export type MarketCfg = {
   confirm2Sec?: number;
   /** The confirmation must land in this range (seconds into the window), else no trade that window. */
   confirmAt?: { lo: number; hi: number } | null;
+  /** FADEBOT_TRADER_CONFIRM_AT_MODE=reask: an early confirmation doesn't count; keep asking for one in the range. */
+  confirmAtReask?: boolean;
   stats: boolean;
   statsCfg: PickCfg;
   invert: boolean;
@@ -150,6 +152,8 @@ export function confirmGate(
   sec: number | number[],
   /** Allowed confirmation time (seconds into the window); confirmed outside it = no trade this window. */
   at?: { lo: number; hi: number } | null,
+  /** With `at`: a confirmation before the range doesn't count — keep asking for one inside it (else: no trade). */
+  reask = false,
 ): ConfirmResult {
   const waits = (Array.isArray(sec) ? sec : [sec]).filter((x) => x > 0);
   const s = (x: number) => `${Math.round(x)} s`;
@@ -162,6 +166,8 @@ export function confirmGate(
     if (confirmedAt !== null) break;
     if (c.at < stageAt + waits[stage] - 1e-9) continue;
     if (c.pick === bias.pick) {
+      // Re-ask mode: a final confirmation before the allowed range doesn't count; keep waiting for one inside it.
+      if (reask && at && stage === waits.length - 1 && Math.round(c.at) < at.lo) continue;
       steps.push(c.at);
       stage++;
       stageAt = c.at;
@@ -185,8 +191,10 @@ export function confirmGate(
     };
   }
   if (confirmedAt === null) {
-    const what = triple && stage === 1 ? `warm at ${s(stageAt)}; waiting until ${s(stageAt + waits[1])} for the buy call`
-      : `waiting until ${s(stageAt + waits[stage])} to ${triple ? "warm up" : "confirm"}`;
+    let due = stageAt + waits[stage];
+    if (reask && at && stage === waits.length - 1) due = Math.max(due, at.lo);
+    const what = triple && stage === 1 ? `warm at ${s(stageAt)}; waiting until ${s(due)} for the buy call`
+      : `waiting until ${s(due)} to ${triple ? "warm up" : "confirm"}`;
     return { ok: false, why: `bias ${bias.pick} (set at ${s(bias.at)})${was}; ${what}` };
   }
   if (at && (Math.round(confirmedAt) < at.lo || Math.round(confirmedAt) > at.hi)) {
@@ -257,7 +265,7 @@ function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts |
   let confirmNote = "";
   if (cfg.confirmSec && cfg.confirmSec > 0) {
     const waits = cfg.confirm2Sec && cfg.confirm2Sec > 0 ? [cfg.confirmSec, cfg.confirm2Sec] : [cfg.confirmSec];
-    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, waits, cfg.confirmAt);
+    const g = confirmGate(call.earlier ?? [], { at: call.at, pick: call.buy }, waits, cfg.confirmAt, !!cfg.confirmAtReask);
     if (g.why !== undefined) return { kind: "wait", why: g.why, stats: null };
     confirmNote = g.note;
   }

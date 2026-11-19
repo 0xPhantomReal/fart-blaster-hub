@@ -252,6 +252,9 @@ const settings = () => ({
     // Confirmation time range (FADEBOT_TRADER_CONFIRM_AT, e.g. "160-189", seconds into the window): a confirmation
     // outside it means no trade that window. Unset = any time.
     confirmAt: parseSecRange(env("FADEBOT_TRADER_CONFIRM_AT")),
+    // FADEBOT_TRADER_CONFIRM_AT_MODE=reask: a confirmation before that range doesn't count — keep asking for one
+    // inside it. Anything else: a confirmation outside the range means no trade that window.
+    confirmAtReask: env("FADEBOT_TRADER_CONFIRM_AT_MODE") === "reask",
     // Quote-age rules (market buys; FADEBOT_TRADER_AGE_RULES, e.g. "0-2:none;3-5:50-99;6-10:20-29;11-15:0-19;
     // 16-20:0-19;21+:all"): how long the quote for the side being bought has gone unchanged decides which prices may
     // buy. Ages not listed are allowed. Unset = off.
@@ -1923,6 +1926,7 @@ function marketCfg(tc: {
   minSec: number;
   confirmSec: number;
   confirmAt: { lo: number; hi: number } | null;
+  confirmAtReask: boolean;
   ageRules: AgeRule[];
   stats: boolean;
   statsMinN: number;
@@ -1943,6 +1947,7 @@ function marketCfg(tc: {
     minSec: tc.minSec,
     confirmSec: tc.confirmSec,
     confirmAt: tc.confirmAt,
+    confirmAtReask: tc.confirmAtReask,
     ageRules: tc.ageRules,
     stats: tc.stats,
     statsCfg: {
@@ -1982,6 +1987,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
   if (o.confirmAt !== undefined && o.confirmAt !== null) tc.confirmAt = parseSecRange(String(o.confirmAt));
+  if (o.confirmAtMode === "reask" || o.confirmAtMode === "skip") tc.confirmAtReask = o.confirmAtMode === "reask";
   if (typeof o.ageRules === "string") tc.ageRules = parseAgeRules(o.ageRules);
   set("streak15", num("streak15", 0, 20));
   set("minLeftSec", num("minLeftSec", 0, 299));
@@ -2281,6 +2287,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       confirmSec: tc.confirmSec,
       confirm2Sec: Math.max(0, Number(over.confirm2Sec) || 0),
       confirmAt: tc.confirmAt ? `${tc.confirmAt.lo}-${tc.confirmAt.hi}` : "",
+      confirmAtMode: tc.confirmAtReask ? "reask" : "skip",
       ageRules: ageRulesText(tc.ageRules),
       streak15: tc.streak15,
       minLeftSec: tc.minLeftSec,
@@ -2395,6 +2402,7 @@ async function traderRun(start: number, minute: number, until: number) {
     minSec: number;
     confirmSec: number;
     confirmAt: { lo: number; hi: number } | null;
+    confirmAtReask: boolean;
     ageRules: AgeRule[];
     streak15: number;
     skipJevPct: PriceRange[];

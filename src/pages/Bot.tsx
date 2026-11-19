@@ -10,7 +10,7 @@ const signed = (x: number | null | undefined) =>
 const tone = (x: number | null | undefined) =>
   x === null || x === undefined || x === 0 ? "text-[#c9d1d9]" : x > 0 ? "text-[#26a69a]" : "text-[#ef5350]";
 
-type Field = { key: string; label: string; hint: string; kind?: "onoff" };
+type Field = { key: string; label: string; hint: string; kind?: "onoff" | "choice"; choices?: [string, string][] };
 const FIELDS: { group: string; fields: Field[] }[] = [
   {
     group: "Calls",
@@ -20,6 +20,13 @@ const FIELDS: { group: string; fields: Field[] }[] = [
       { key: "confirmSec", label: "Confirm after (s, 0 = off)", hint: "FADEBOT_TRADER_CONFIRM_SEC" },
       { key: "confirm2Sec", label: "Warm → buy wait (s, 0 = off; replay only)", hint: "replay only: triple confirmation" },
       { key: "confirmAt", label: "Confirmed at (s, e.g. 160-189)", hint: "FADEBOT_TRADER_CONFIRM_AT" },
+      {
+        key: "confirmAtMode",
+        label: "Confirmed too early",
+        hint: "FADEBOT_TRADER_CONFIRM_AT_MODE",
+        kind: "choice",
+        choices: [["reask", "Ask again"], ["skip", "Skip the window"]],
+      },
       {
         key: "ageRules",
         label: "Quote-age rules (e.g. 0-2:none;3-5:50-99;21+:all)",
@@ -84,6 +91,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     confirmSec: String(t.confirmSec ?? 0),
     confirm2Sec: "0",
     confirmAt: t.confirmAt ? `${t.confirmAt.lo}-${t.confirmAt.hi}` : "",
+    confirmAtMode: t.confirmAtReask ? "reask" : "skip",
     ageRules: (t.ageRules ?? [])
       .map((r) =>
         `${r.lo}${r.hi === null || r.hi === undefined || r.hi > 1e6 ? "+" : `-${r.hi}`}:${
@@ -128,6 +136,7 @@ function secretsFor(f: Record<string, string>): string[] {
   put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
   put("FADEBOT_TRADER_CONFIRM_SEC", f.confirmSec || "0");
   put("FADEBOT_TRADER_CONFIRM_AT", f.confirmAt || "(delete)");
+  if (f.confirmAt) put("FADEBOT_TRADER_CONFIRM_AT_MODE", f.confirmAtMode === "reask" ? "reask" : "(delete)");
   put("FADEBOT_TRADER_AGE_RULES", f.ageRules || "(delete)");
   put("FADEBOT_TRADER_STREAK15", f.streak15 || "0");
   put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
@@ -222,7 +231,15 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                 {g.fields.map((fl) => (
                   <label key={fl.key} className="flex flex-col gap-1 text-xs text-[#8b949e]" title={fl.hint}>
                     {fl.label}
-                    {fl.kind === "onoff" ? (
+                    {fl.kind === "choice" ? (
+                      <select
+                        className="rounded border border-[#30363d] bg-[#0e1116] px-2 py-1 text-sm text-[#c9d1d9]"
+                        value={form[fl.key]}
+                        onChange={(e) => setForm({ ...form, [fl.key]: e.target.value })}
+                      >
+                        {(fl.choices ?? []).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      </select>
+                    ) : fl.kind === "onoff" ? (
                       <select
                         className="rounded border border-[#30363d] bg-[#0e1116] px-2 py-1 text-sm text-[#c9d1d9]"
                         value={form[fl.key]}

@@ -109,3 +109,24 @@ describe("triple confirmation (bias → warm → buy)", () => {
     expect(confirmGate([{ at: 40, pick: "up" }], { at: 101, pick: "up" }, 60).ok).toBe(true);
   });
 });
+
+describe("confirmed too early: ask again", () => {
+  const R = { lo: 160, hi: 189 };
+  it("an early confirmation doesn't count; a same-side call inside the range confirms", () => {
+    const early = confirmGate([{ at: 30, pick: "up" }], { at: 152, pick: "up" }, 120, R, true);
+    expect(early.ok).toBe(false);
+    expect(early.why).toContain("waiting until 160 s");
+    const inside = confirmGate([{ at: 30, pick: "up" }, { at: 152, pick: "up" }], { at: 162, pick: "up" }, 120, R, true);
+    expect(inside.ok).toBe(true);
+    expect(inside.note).toContain("confirmed at 162 s");
+  });
+  it("skip mode still ends the window on an early confirmation", () => {
+    const g = confirmGate([{ at: 30, pick: "up" }, { at: 152, pick: "up" }], { at: 162, pick: "up" }, 120, R, false);
+    expect(g.ok).toBe(false);
+    expect(g.why).toContain("no trade this window");
+  });
+  it("after the range there is still no trade", () => {
+    const late = confirmGate([{ at: 80, pick: "up" }], { at: 201, pick: "up" }, 120, R, true);
+    expect(late.ok).toBe(false);
+  });
+});
