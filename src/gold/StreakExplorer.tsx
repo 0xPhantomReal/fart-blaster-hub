@@ -20,6 +20,7 @@ const cut = (edges: number[], labels: string[]) => (v: F[string]) => {
 const signed = (v: number) => `${v >= 0 ? "+" : "−"}$${Math.abs(v)}`;
 
 export const FEATURES: Feature[] = [
+  { key: "score", label: "Confidence score (0–9)", bucket: cut([3, 5, 7, 8], ["0–2", "3–4", "5–6", "7", "8–9"]) },
   { key: "hour", label: "Time of day (ET)", bucket: cut([4, 8, 12, 16, 20], ["12–4 AM", "4–8 AM", "8 AM–12", "12–4 PM", "4–8 PM", "8 PM–12"]) },
   { key: "weekday", label: "Day of week", bucket: (v) => (v ? String(v) : null), order: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
   { key: "at", label: "Bought at (s into window)", bucket: cut([150, 170, 190, 220, 250], ["<150 s", "150–169 s", "170–189 s", "190–219 s", "220–249 s", "250 s+"]) },

@@ -86,3 +86,18 @@ describe("stale-move filter", () => {
     expect(marketPick({ ...call, btcNow: null }, cfg, null).kind).toBe("buy");
   });
 });
+
+import { parseScoreTiers, scorePct, tradeScore } from "../../supabase/functions/_shared/marketPick";
+describe("confidence score", () => {
+  it("adds up points from BTC vs start, Jev % and his stats hit rate", () => {
+    expect(tradeScore({ distSide: 40, jevPct: 85, jevRight: 80 }).score).toBe(9);
+    expect(tradeScore({ distSide: -40, jevPct: 55, jevRight: 40 }).score).toBe(0);
+    expect(tradeScore({ distSide: 10, jevPct: 72, jevRight: 55 }).parts).toEqual([2, 2, 1]);
+    expect(tradeScore({ distSide: null, jevPct: 65, jevRight: null }).score).toBe(3);
+  });
+  it("maps a score to a bet % with the tiers", () => {
+    const T = parseScoreTiers("0-2:1;3-4:2;5-6:3;7:4;8-9:5");
+    expect([0, 2, 3, 5, 7, 8, 9].map((s) => scorePct(s, T))).toEqual([1, 1, 2, 3, 4, 5, 5]);
+    expect(scorePct(9, parseScoreTiers("0-4:1;5:3"))).toBe(3);
+  });
+});

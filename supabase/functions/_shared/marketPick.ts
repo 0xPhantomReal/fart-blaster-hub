@@ -367,3 +367,39 @@ function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts |
   }
   return { kind: "buy", side, cost, otherSide: side !== call.buy, statsAgainst: false, stats: null, note: note + confirmNote };
 }
+
+// ── Confidence score (replay sizing for now) ──
+
+/**
+ * 0–9 points from three things that ranked trades in testing: BTC vs the start toward the side bought (−∞..−25 / ..0
+ * / ..25 / more: 0–3), Jev's % (≤60 / ≤70 / ≤80 / more: 0–3) and Jev's hit rate in stats history (<50 / <60 / <75 /
+ * more: 0–3). Unknown parts count 1.
+ */
+export function tradeScore(x: { distSide: number | null; jevPct: number; jevRight: number | null }): {
+  score: number;
+  parts: [number, number, number];
+} {
+  const d = x.distSide === null || !Number.isFinite(x.distSide) ? 1 : x.distSide < -25 ? 0 : x.distSide < 0 ? 1 : x.distSide <= 25 ? 2 : 3;
+  const p = Math.round(x.jevPct);
+  const j = p <= 60 ? 0 : p <= 70 ? 1 : p <= 80 ? 2 : 3;
+  const r = x.jevRight === null || !Number.isFinite(x.jevRight) ? 1
+    : x.jevRight < 50 ? 0 : x.jevRight < 60 ? 1 : x.jevRight < 75 ? 2 : 3;
+  return { score: d + j + r, parts: [d, j, r] };
+}
+
+/** Score → bet %: "0-2:1;3-4:2;5-6:3;7:4;8-9:5" (points:percent). Unlisted scores bet the last tier below them. */
+export function parseScoreTiers(s: string | null | undefined): { lo: number; hi: number; pct: number }[] {
+  const out: { lo: number; hi: number; pct: number }[] = [];
+  for (const part of String(s ?? "").split(";")) {
+    const m = part.trim().match(/^(\d+)\s*(?:-\s*(\d+))?\s*:\s*(\d+(?:\.\d+)?)\s*%?$/);
+    if (m) out.push({ lo: Number(m[1]), hi: m[2] ? Number(m[2]) : Number(m[1]), pct: Number(m[3]) });
+  }
+  return out.sort((a, b) => a.lo - b.lo);
+}
+
+export function scorePct(score: number, tiers: { lo: number; hi: number; pct: number }[]): number {
+  const hit = tiers.find((t) => score >= t.lo && score <= t.hi);
+  if (hit) return hit.pct;
+  const below = tiers.filter((t) => t.hi < score).pop();
+  return below ? below.pct : tiers[0]?.pct ?? 0;
+}

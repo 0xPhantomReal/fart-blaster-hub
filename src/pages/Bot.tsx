@@ -86,8 +86,10 @@ const FIELDS: { group: string; fields: Field[] }[] = [
         label: "Sizing (replay only)",
         hint: "replay only",
         kind: "choice",
-        choices: [["pct", "Bet % of balance"], ["martingale", "Martingale"], ["fibonacci", "Fibonacci"]],
+        choices: [["pct", "Bet % of balance"], ["score", "Score (1–5%)"], ["martingale", "Martingale"], ["fibonacci", "Fibonacci"]],
       },
+      { key: "scoreTiers", label: "Score tiers (points:bet %)", hint: "replay only: e.g. 0-2:1;3-4:2;5-6:3;7:4;8-9:5" },
+      { key: "scoreMin", label: "Skip if score below (0 = off)", hint: "replay only: score 0–9" },
       { key: "betPct", label: "Bet % of balance", hint: "FADEBOT_TRADER_BET_PCT" },
       { key: "baseBet", label: "Base bet ($, blank = bet % of start)", hint: "replay only: martingale / fibonacci" },
       { key: "mgMult", label: "Martingale × after a loss", hint: "replay only" },
@@ -137,6 +139,8 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsCandles: String(t.statsCandles ?? 288),
     betPct: String(t.betPct ?? 5),
     sizing: "pct",
+    scoreTiers: "0-2:1;3-4:2;5-6:3;7:4;8-9:5",
+    scoreMin: "0",
     baseBet: "",
     mgMult: "2",
     resetAfter: "0",
@@ -463,7 +467,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             </div>
           </div>
           <div className="text-xs text-[#8b949e]">
-            {r.used?.sizing && r.used.sizing !== "pct"
+            {r.used?.sizing === "score"
+              ? `Score sizing (${String(r.used.scoreTiers)})${r.used.scoreMin ? `, skipping scores under ${r.used.scoreMin}` : ""}${
+                tt.scoreSkipped ? ` — ${tt.scoreSkipped} calls skipped` : ""
+              }`
+              : r.used?.sizing && r.used.sizing !== "pct"
               ? `${r.used.sizing === "martingale" ? `Martingale ×${r.used.mgMult}` : "Fibonacci"} from a $${r.used.baseBet} base${
                 r.used.resetAfter ? `, reset after ${r.used.resetAfter} losses` : ""
               } (biggest bet $${tt.maxStake ?? "—"})`
@@ -531,6 +539,7 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                         {x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(other side)" : ""}
                         {x.exit ? ` · ${x.exit.why} at ${x.exit.at}s, sold ${x.exit.fill}¢` : ""}
                         {x.patchy ? " ⚠" : ""}
+                        {typeof x.score === "number" ? <span className="text-[#8b949e]"> · score {x.score} ({x.betPct}%)</span> : null}
                         {x.f && typeof x.f.staleMove === "number"
                           ? <span className="text-[#8b949e]"> · quote {String(x.f.quoteAge)} s old, BTC moved ${x.f.staleMove}</span>
                           : null}

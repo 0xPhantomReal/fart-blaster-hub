@@ -72,8 +72,11 @@ import {
   type MarketPick,
   marketPick,
   parseAgeRules,
+  parseScoreTiers,
   parseSecRange,
   quoteAge,
+  scorePct,
+  tradeScore,
   streak15Block,
 } from "../_shared/marketPick.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
@@ -2216,7 +2219,13 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   // Sizing (replay only): "pct" = BET_PCT % of the balance (the live rule); "martingale" = base × mult^losses in a
   // row, back to base after a win; "fibonacci" = base × 1,1,2,3,5,8… — a loss steps up one, a win steps back two.
   // resetAfter > 0: back to the base after that many losses in a row. A stake never exceeds the balance.
-  const sizing = over.sizing === "martingale" || over.sizing === "fibonacci" ? String(over.sizing) : "pct";
+  const sizing = over.sizing === "martingale" || over.sizing === "fibonacci" || over.sizing === "score"
+    ? String(over.sizing)
+    : "pct";
+  // Score sizing (replay only): bet % from the trade's 0–9 confidence score; optionally skip low scores (ask again).
+  const tiers = parseScoreTiers(typeof over.scoreTiers === "string" && over.scoreTiers.trim() ? over.scoreTiers : "0-2:1;3-4:2;5-6:3;7:4;8-9:5");
+  const scoreMin = Math.max(0, Math.round(Number(over.scoreMin) || 0));
+  let scoreSkipN = 0;
   const baseBet = Number(over.baseBet) > 0 ? Number(over.baseBet) : Math.max(1, startBal * (tc.betPct > 0 ? tc.betPct / 100 : 0.05));
   const mgMult = Number(over.mgMult) > 1 ? Number(over.mgMult) : 2;
   const resetAfter = Math.max(0, Math.round(Number(over.resetAfter) || 0));
@@ -2282,7 +2291,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     while (entries < Math.max(1, tc.maxEntries)) {
       let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
       let windowOver = false;
-      let buyA: AskRow | null = null, buyDist: number | null = null, callsBefore = 0, otherCalls = 0;
+      let buyA: AskRow | null = null, buyDist: number | null = null, callsBefore = 0, otherCalls = 0, buyScore = 0;
       for (; idx < asksW.length; idx++) {
         const a = asksW[idx];
         // While holding, the live bot doesn't ask Jev, so those asks don't exist for it.
@@ -2335,6 +2344,16 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
           cappedN++;
           continue;
         }
+        const sc = tradeScore({
+          distSide: dist === null ? null : (mp.side === d.buy ? 1 : -1) * dist,
+          jevPct: d.p * 100,
+          jevRight: mp.stats?.jevRight === null || mp.stats?.jevRight === undefined ? null : mp.stats.jevRight * 100,
+        });
+        if (scoreMin > 0 && sc.score < scoreMin) {
+          scoreSkipN++;
+          continue;
+        }
+        buyScore = sc.score;
         pick = mp;
         at = a.at;
         jev = d.buy;
@@ -2349,7 +2368,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       if (!pick || windowOver) break;
       entries++;
       const price = Math.min(0.99, pick.cost + gap);
-      const want = sizing === "martingale" ? baseBet * mgMult ** step : sizing === "fibonacci" ? baseBet * fib(step) : bal * pct;
+      const want = sizing === "martingale" ? baseBet * mgMult ** step
+        : sizing === "fibonacci" ? baseBet * fib(step)
+        : sizing === "score" ? bal * scorePct(buyScore, tiers) / 100
+        : bal * pct;
       const stake = Math.max(1, Math.floor(Math.min(want, bal) * 100) / 100);
       maxStake = Math.max(maxStake, stake);
       const streakBefore = streak;
@@ -2458,7 +2480,9 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
           : null,
         entry: entries,
         patchy,
-        f: feat,
+        score: buyScore,
+        betPct: Math.round((stake / Math.max(1e-9, bal - pnl)) * 1000) / 10,
+        f: { ...feat, score: buyScore },
         note: `${pick.stats ? `${pick.stats.bands}: ${pick.stats.why}` : ""}${pick.note}`.trim(),
         real: r ? { side: r.side, paid: Math.round(r.price * 100), result: r.result, pnl: r.pnl } : null,
       });
@@ -2507,6 +2531,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       maxFill: Math.round(maxFill * 100),
       minStaleMove: tc.minStaleMove,
       sizing,
+      scoreTiers: tiers.map((t) => `${t.lo}${t.hi !== t.lo ? `-${t.hi}` : ""}:${t.pct}`).join(";"),
+      scoreMin,
       baseBet: Math.round(baseBet * 100) / 100,
       mgMult,
       resetAfter,
@@ -2523,6 +2549,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstStreak,
       blocked15,
       cappedBuys: cappedN,
+      scoreSkipped: scoreSkipN,
       staleSkipped: staleSkipN,
       staleUnknown: staleUnknownN,
       maxStake: Math.round(maxStake * 100) / 100,

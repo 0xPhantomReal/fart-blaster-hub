@@ -1105,6 +1105,9 @@ export type StatsReplayTrade = {
   real: { side: string; paid: number; result: string | null; pnl: number | null } | null;
   /** Replay take profit / stop loss: how the position ended early, if it did. */
   exit?: { why: string; at: number; sellQuote: number; fill: number } | null;
+  /** Confidence score 0–9 at the buy, and the % of balance bet. */
+  score?: number;
+  betPct?: number;
   /** 1 = first buy in the window; 2+ = re-entries after a sell. */
   entry?: number;
   /** The recorded prices after the buy had a gap of more than 20 s (TP/SL less reliable). */
@@ -1126,6 +1129,7 @@ export type StatsReplay = {
     worstDrop: number;
     worstStreak: number;
     cappedBuys?: number;
+    scoreSkipped?: number;
     staleSkipped?: number;
     staleUnknown?: number;
     maxStake?: number;

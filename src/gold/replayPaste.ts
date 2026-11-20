@@ -54,7 +54,9 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "tpPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: take profit (0 = off)" },
   { key: "slPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: stop loss (0 = off)" },
   { key: "maxEntries", secret: "FADEBOT_TRADER_MAX_ENTRIES", kind: "num", unit: "count", example: "1", meaning: "buys per window (only matters after a sell)" },
-  { key: "sizing", secret: null, kind: "choice", unit: "pct | martingale | fibonacci", example: "pct", meaning: "REPLAY ONLY: how bets are sized (pct = bet % of balance, the live rule)" },
+  { key: "sizing", secret: null, kind: "choice", unit: "pct | score | martingale | fibonacci", example: "pct", meaning: "REPLAY ONLY: how bets are sized (pct = bet % of balance, the live rule; score = % from the 0–9 confidence score)" },
+  { key: "scoreTiers", secret: null, kind: "text", unit: "points:%;…", example: "0-2:1;3-4:2;5-6:3;7:4;8-9:5", meaning: "REPLAY ONLY: score sizing tiers (score points : % of balance)" },
+  { key: "scoreMin", secret: null, kind: "num", unit: "points", example: "0", meaning: "REPLAY ONLY: skip calls scoring under this, ask again (0 = off)" },
   { key: "betPct", secret: "FADEBOT_TRADER_BET_PCT", kind: "num", unit: "% of balance", example: "7", meaning: "bet size" },
   { key: "baseBet", secret: null, kind: "num", unit: "$", example: "20", meaning: "REPLAY ONLY: martingale/fibonacci starting bet (blank = bet % of the start)" },
   { key: "mgMult", secret: null, kind: "num", unit: "×", example: "2", meaning: "REPLAY ONLY: martingale multiplier after a loss" },
@@ -178,7 +180,8 @@ export function parsePaste(text: string, base: Record<string, string>): PasteRes
     if (spec.kind === "onoff") val = onOff(v);
     else if (spec.kind === "choice") {
       val = key === "sizing"
-        ? /mart/i.test(v) ? "martingale" : /fib/i.test(v) ? "fibonacci" : /pct|%|percent|balance/i.test(v) ? "pct" : null
+        ? /mart/i.test(v) ? "martingale" : /fib/i.test(v) ? "fibonacci" : /score/i.test(v) ? "score"
+        : /pct|%|percent|balance/i.test(v) ? "pct" : null
         : /reask|again/i.test(v) ? "reask" : /skip/i.test(v) ? "skip" : null;
     }
     else if (spec.kind === "num") val = blank(v) ? (key === "dailyLoss" ? "" : "0") : firstNum(v);
