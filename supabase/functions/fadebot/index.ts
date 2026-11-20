@@ -260,6 +260,9 @@ const settings = () => ({
     // 16-20:0-19;21+:all"): how long the quote for the side being bought has gone unchanged decides which prices may
     // buy. Ages not listed are allowed. Unset = off.
     ageRules: parseAgeRules(env("FADEBOT_TRADER_AGE_RULES")),
+    // Stale-move filter (market buys; FADEBOT_TRADER_MIN_STALE_MOVE, $): no buy when BTC has moved less than this
+    // since the side's quote last changed (asks again). 0 / unset = off.
+    minStaleMove: Math.max(0, Number(env("FADEBOT_TRADER_MIN_STALE_MOVE") || 0)),
     // 15-minute streak block (FADEBOT_TRADER_STREAK15, e.g. 3): when the latest this-many finished 15-minute BTC
     // markets on Polymarket all settled the same way, no new buys. 0 / unset = off.
     streak15: Math.max(0, Math.round(Number(env("FADEBOT_TRADER_STREAK15") || 0))),
@@ -1929,6 +1932,7 @@ function marketCfg(tc: {
   confirmAt: { lo: number; hi: number } | null;
   confirmAtReask: boolean;
   ageRules: AgeRule[];
+  minStaleMove: number;
   stats: boolean;
   statsMinN: number;
   statsSlip: number;
@@ -1950,6 +1954,7 @@ function marketCfg(tc: {
     confirmAt: tc.confirmAt,
     confirmAtReask: tc.confirmAtReask,
     ageRules: tc.ageRules,
+    minStaleMove: tc.minStaleMove,
     stats: tc.stats,
     statsCfg: {
       minN: tc.statsMinN,
@@ -2105,6 +2110,7 @@ function replaySettings(o: Record<string, unknown>) {
   set("edge", num("edge", 0, 99) !== undefined ? num("edge", 0, 99)! / 100 : undefined);
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
+  set("minStaleMove", num("minStaleMove", 0, 100000));
   if (o.confirmAt !== undefined && o.confirmAt !== null) tc.confirmAt = parseSecRange(String(o.confirmAt));
   if (o.confirmAtMode === "reask" || o.confirmAtMode === "skip") tc.confirmAtReask = o.confirmAtMode === "reask";
   if (typeof o.ageRules === "string") tc.ageRules = parseAgeRules(o.ageRules);
@@ -2206,7 +2212,6 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   let cappedN = 0;
   // Stale-move filter (replay only; $, 0 = off): skip a buy (ask again) when BTC has moved less than this since the
   // side's quote last changed. A buy with no BTC data for either moment isn't skipped (counted as unknown).
-  const minStaleMove = Math.max(0, Number(over.minStaleMove) || 0);
   let staleSkipN = 0, staleUnknownN = 0;
   // Sizing (replay only): "pct" = BET_PCT % of the balance (the live rule); "martingale" = base × mult^losses in a
   // row, back to base after a win; "fibonacci" = base × 1,1,2,3,5,8… — a loss steps up one, a win steps back two.
@@ -2270,7 +2275,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     dayMap.set(day, dm);
     const asksW = byWindow.get(w)!;
     const earlier: { at: number; pick: Side }[] = [];
-    const quoteHist: { at: number; up: number; down: number }[] = [];
+    const quoteHist: { at: number; up: number; down: number; btc: number | null }[] = [];
     // Every recorded price in this window (asks + the per-second path), for take profit / stop loss.
     const prices = exitsOn ? pricesOf(w, asksW) : [];
     let idx = 0, entries = 0, resumeAt = -1;
@@ -2294,7 +2299,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         );
         if (!("buy" in d)) {
           if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
-          quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
+          quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost, btc: a.btc ?? data.btcFallback(w, a.at) });
           continue;
         }
         const c = callOf(a, data.refFallback, data.btcFallback);
@@ -2310,13 +2315,17 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
             dist,
             earlier: [...earlier],
             quoteHist: [...quoteHist],
+            btcNow: a.btc ?? data.btcFallback(w, a.at),
           },
           mcfg,
           tc.stats ? counts : null,
         );
         if (callNow) earlier.push({ at: a.at, pick: a.pUp >= 0.5 ? "up" : "down" });
-        quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost });
-        if (mp.kind === "wait") continue;
+        quoteHist.push({ at: a.at, up: a.upCost, down: a.downCost, btc: a.btc ?? data.btcFallback(w, a.at) });
+        if (mp.kind === "wait") {
+          if (mp.code === "stale") staleSkipN++;
+          continue;
+        }
         if (mp.kind === "skip") {
           if (tc.skipReask) continue;
           windowOver = true;
@@ -2325,14 +2334,6 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         if (maxFill > 0 && Math.min(0.99, mp.cost + gap) > maxFill + 1e-9) {
           cappedN++;
           continue;
-        }
-        if (minStaleMove > 0) {
-          const sm = staleMoveAt({ w, at: a.at, side: mp.side, cost: mp.cost, buyA: a, quoteHist, asksW, btcFallback: data.btcFallback });
-          if (sm.move === null) staleUnknownN++;
-          else if (sm.move < minStaleMove - 1e-9) {
-            staleSkipN++;
-            continue;
-          }
         }
         pick = mp;
         at = a.at;
@@ -2432,6 +2433,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         btcFallback: data.btcFallback,
       });
       lastTradeAt = w + at;
+      if (tc.minStaleMove > 0 && feat.staleMove === null) staleUnknownN++;
       const r = entries === 1 ? realBy.get(w) : undefined;
       if (r) {
         compared++;
@@ -2503,7 +2505,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       dailyLoss: tc.dailyLoss,
       maxEntries: tc.maxEntries,
       maxFill: Math.round(maxFill * 100),
-      minStaleMove,
+      minStaleMove: tc.minStaleMove,
       sizing,
       baseBet: Math.round(baseBet * 100) / 100,
       mgMult,
@@ -2604,6 +2606,7 @@ async function traderRun(start: number, minute: number, until: number) {
     confirmAt: { lo: number; hi: number } | null;
     confirmAtReask: boolean;
     ageRules: AgeRule[];
+    minStaleMove: number;
     streak15: number;
     skipJevPct: PriceRange[];
     stats: boolean;
@@ -3063,14 +3066,20 @@ async function traderRun(start: number, minute: number, until: number) {
           const btcNow = forming?.close ?? null;
           const dist = btcNow !== null && refPx !== null ? (d.buy === "up" ? 1 : -1) * (btcNow - refPx) : null;
           // Bias + confirmation: this window's earlier calls, judged exactly as the replay judges them.
-          const winAsks = (tc.confirmSec > 0 || tc.ageRules.length) && !tooEarly
-            ? await sql`select at_sec, p_up, up_cost, down_cost from fadebot_asks where window_start = ${start}
+          const winAsks = (tc.confirmSec > 0 || tc.ageRules.length || tc.minStaleMove > 0) && !tooEarly
+            ? await sql`select at_sec, p_up, up_cost, down_cost, btc from fadebot_asks where window_start = ${start}
                 and up_cost is not null and down_cost is not null order by at_sec`
             : [];
-          // Quote-age rules: this window's earlier recorded quotes, as the replay sees them.
+          // Quote-age rules and the stale-move filter: this window's earlier recorded quotes (with BTC then), as the
+          // replay sees them.
           const quoteHist = winAsks
             .filter((a) => Number(a.at_sec) < nowEl)
-            .map((a) => ({ at: Number(a.at_sec), up: Number(a.up_cost), down: Number(a.down_cost) }));
+            .map((a) => ({
+              at: Number(a.at_sec),
+              up: Number(a.up_cost),
+              down: Number(a.down_cost),
+              btc: a.btc === null ? null : Number(a.btc),
+            }));
           const earlier = tc.confirmSec > 0 && !tooEarly
             ? winAsks
               .filter((a) => a.p_up !== null)
@@ -3087,7 +3096,7 @@ async function traderRun(start: number, minute: number, until: number) {
               .map((a) => ({ at: a.at, pick: (a.pUp >= 0.5 ? "up" : "down") as Side }))
             : [];
           mp = marketPick(
-            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned, earlier, quoteHist },
+            { buy: d.buy, p: d.p, cost: d.cost, at: nowEl, upCost: qd.upCost, downCost: qd.downCost, dist, liveBanned, earlier, quoteHist, btcNow },
             marketCfg(tc),
             counts,
           );

@@ -87,6 +87,8 @@ export function ageAllowed(age: number, cost: number, rules: AgeRule[]): { ok: b
 export type MarketCfg = {
   /** Quote-age rules (FADEBOT_TRADER_AGE_RULES); empty = off. */
   ageRules?: AgeRule[];
+  /** FADEBOT_TRADER_MIN_STALE_MOVE ($): skip when BTC moved less than this since the quote changed; 0 = off. */
+  minStaleMove?: number;
   minSec: number;
   /** Seconds after the window's first call that a confirming call must come; 0 = off. */
   confirmSec?: number;
@@ -121,8 +123,10 @@ export type MarketCall = {
   liveBanned?: string;
   /** Earlier calls in this window (asks that cleared the edge after MIN_SEC), oldest first: second and Jev's side. */
   earlier?: { at: number; pick: Side }[];
-  /** This window's earlier recorded quotes (all asks), oldest first, for the quote-age rules. */
-  quoteHist?: { at: number; up: number; down: number }[];
+  /** This window's earlier recorded quotes (all asks), oldest first, with BTC then, for the quote-age rules. */
+  quoteHist?: { at: number; up: number; down: number; btc?: number | null }[];
+  /** BTC now (for the stale-move filter). */
+  btcNow?: number | null;
 };
 
 /** A seconds range "160-189" (or "160+" = 160–300); null when blank or malformed. */
@@ -211,7 +215,7 @@ export function confirmGate(
 }
 
 export type MarketPick =
-  | { kind: "wait"; why: string; stats: StatsDecision | null }
+  | { kind: "wait"; why: string; stats: StatsDecision | null; code?: "stale" }
   | { kind: "skip"; side: Side; cost: number; range: PriceRange; why: string }
   | {
     kind: "buy";
@@ -241,21 +245,57 @@ export function streak15Block(results: (Side | null)[], n: number): { blocked: b
 
 const opp = (s: Side): Side => (s === "up" ? "down" : "up");
 
+/**
+ * How far BTC moved (absolute $) since the quote for `side` last changed: the quote's age from this window's
+ * earlier recorded quotes, then BTC recorded at that moment vs BTC now. Null when either BTC is unknown.
+ */
+export function staleMove(
+  hist: { at: number; up: number; down: number; btc?: number | null }[],
+  now: { at: number; cost: number; btc: number | null },
+  side: Side,
+): { age: number; move: number | null } {
+  const age = quoteAge(hist, now, side);
+  const t0 = now.at - age;
+  const h0 = t0 >= now.at ? null : hist.find((h) => h.at >= t0 - 0.5 && h.at < now.at);
+  const b0 = h0 ? h0.btc ?? null : now.btc;
+  return { age, move: now.btc !== null && b0 !== null && b0 !== undefined ? Math.abs(now.btc - b0) : null };
+}
+
 export function marketPick(call: MarketCall, cfg: MarketCfg, counts: StatsCounts | null): MarketPick {
   const r = marketPickRules(call, cfg, counts);
-  if (r.kind !== "buy" || !cfg.ageRules?.length) return r;
-  const age = quoteAge(call.quoteHist ?? [], { at: call.at, cost: r.cost }, r.side);
-  const a = ageAllowed(age, r.cost, cfg.ageRules);
-  if (!a.ok) {
-    return {
-      kind: "wait",
-      why: `${r.side} quote ${Math.round(r.cost * 100)}¢ is ${age} s old: the ${a.rule!.lo}${
-        a.rule!.hi === Infinity ? "+" : `–${a.rule!.hi}`
-      } s rule allows ${a.rule!.allow!.length ? rangesText(a.rule!.allow!) : "no buys"} (FADEBOT_TRADER_AGE_RULES)`,
-      stats: r.stats,
-    };
+  if (r.kind !== "buy") return r;
+  let note = r.note;
+  if (cfg.ageRules?.length) {
+    const age = quoteAge(call.quoteHist ?? [], { at: call.at, cost: r.cost }, r.side);
+    const a = ageAllowed(age, r.cost, cfg.ageRules);
+    if (!a.ok) {
+      return {
+        kind: "wait",
+        why: `${r.side} quote ${Math.round(r.cost * 100)}¢ is ${age} s old: the ${a.rule!.lo}${
+          a.rule!.hi === Infinity ? "+" : `–${a.rule!.hi}`
+        } s rule allows ${a.rule!.allow!.length ? rangesText(a.rule!.allow!) : "no buys"} (FADEBOT_TRADER_AGE_RULES)`,
+        stats: r.stats,
+      };
+    }
+    note += ` [quote ${age} s old]`;
   }
-  return { ...r, note: r.note + ` [quote ${age} s old]` };
+  // Stale-move filter (FADEBOT_TRADER_MIN_STALE_MOVE): BTC moved less than this since the side's quote last changed
+  // → no buy, ask again. Unknown BTC doesn't block.
+  if (cfg.minStaleMove && cfg.minStaleMove > 0) {
+    const sm = staleMove(call.quoteHist ?? [], { at: call.at, cost: r.cost, btc: call.btcNow ?? null }, r.side);
+    if (sm.move !== null && sm.move < cfg.minStaleMove - 1e-9) {
+      return {
+        kind: "wait",
+        code: "stale",
+        why: `${r.side} quote ${Math.round(r.cost * 100)}¢ unchanged for ${sm.age} s while BTC moved $${
+          Math.round(sm.move)
+        }: under $${cfg.minStaleMove} (FADEBOT_TRADER_MIN_STALE_MOVE)`,
+        stats: r.stats,
+      };
+    }
+    note += sm.move === null ? " [BTC move unknown]" : ` [BTC moved $${Math.round(sm.move)} since the quote changed]`;
+  }
+  return { ...r, note };
 }
 
 function marketPickRules(call: MarketCall, cfg: MarketCfg, counts: StatsCounts | null): MarketPick {

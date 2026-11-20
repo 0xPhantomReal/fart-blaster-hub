@@ -52,3 +52,37 @@ describe("quote-age rules", () => {
     expect(ok.kind === "buy" && ok.note).toContain("25 s old");
   });
 });
+
+import { staleMove } from "../../supabase/functions/_shared/marketPick";
+describe("stale-move filter", () => {
+  const hist = [
+    { at: 100, up: 0.4, down: 0.61, btc: 65000 },
+    { at: 102, up: 0.45, down: 0.56, btc: 65010 },
+    { at: 104, up: 0.45, down: 0.56, btc: 65020 },
+  ];
+  it("measures BTC's move since the side's quote last changed", () => {
+    expect(staleMove(hist, { at: 106, cost: 0.45, btc: 65040 }, "up")).toEqual({ age: 4, move: 30 });
+    expect(staleMove(hist, { at: 106, cost: 0.5, btc: 65040 }, "up")).toEqual({ age: 0, move: 0 });
+    expect(staleMove(hist, { at: 106, cost: 0.45, btc: null }, "up").move).toBeNull();
+  });
+  it("marketPick skips a buy when BTC moved less than the minimum, and asks again", () => {
+    const cfg = {
+      minSec: 0,
+      minStaleMove: 15,
+      stats: false,
+      statsCfg: { minN: 15, slip: 0.09, minEdge: 0.05, fee: 0.095, invert: false, swapAbove: 0, maxAgainst: 0 },
+      invert: false,
+      skipJevPct: [],
+      skipRanges: [],
+      swap: false,
+      swapRanges: [],
+    };
+    const call = { buy: "up" as const, p: 0.7, cost: 0.45, upCost: 0.45, downCost: 0.56, dist: null, at: 106, quoteHist: hist };
+    const calm = marketPick({ ...call, btcNow: 65020 }, cfg, null); // moved $10 since 102 s
+    expect(marketPick({ ...call, btcNow: 65025 }, cfg, null).kind).toBe("buy"); // exactly $15 is enough
+    expect(calm.kind === "wait" && calm.code).toBe("stale");
+    const moved = marketPick({ ...call, btcNow: 65040 }, cfg, null);
+    expect(moved.kind === "buy" && moved.note).toContain("BTC moved $30");
+    expect(marketPick({ ...call, btcNow: null }, cfg, null).kind).toBe("buy");
+  });
+});

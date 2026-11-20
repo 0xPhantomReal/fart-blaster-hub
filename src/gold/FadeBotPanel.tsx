@@ -900,6 +900,9 @@ function ModeBox({
             }`,
           )
           : null}
+        {order === "market" && tc?.minStaleMove
+          ? chip(true, `Stale-move filter: no buy unless BTC moved $${tc.minStaleMove}+ since the quote changed`)
+          : null}
         {tc?.streak15
           ? chip(
             true,

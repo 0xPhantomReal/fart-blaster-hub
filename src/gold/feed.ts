@@ -809,6 +809,7 @@ export interface FadeBotStatus {
       /** Quote-age rules; hi is null for "and up" (JSON has no Infinity); allow null = all prices. */
       ageRules?: { lo: number; hi: number | null; allow: { lo: number; hi: number }[] | null }[];
       streak15?: number;
+      minStaleMove?: number;
       skipJevPct?: { lo: number; hi: number }[];
       stats?: boolean;
       statsInvert?: boolean;

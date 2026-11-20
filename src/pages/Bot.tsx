@@ -35,6 +35,11 @@ const FIELDS: { group: string; fields: Field[] }[] = [
         hint: "FADEBOT_TRADER_AGE_RULES",
       },
       { key: "streak15", label: "No trades after 15m streak of (0 = off)", hint: "FADEBOT_TRADER_STREAK15" },
+      {
+        key: "minStaleMove",
+        label: "Skip if BTC moved less than ($) since the quote changed (0 = off)",
+        hint: "FADEBOT_TRADER_MIN_STALE_MOVE",
+      },
       { key: "skipJevPct", label: "Skip Jev % (e.g. 50-55,61-70)", hint: "FADEBOT_TRADER_SKIP_JEV_PCT" },
     ],
   },
@@ -67,11 +72,7 @@ const FIELDS: { group: string; fields: Field[] }[] = [
     group: "Fills & exits (replay only)",
     fields: [
       { key: "maxFill", label: "Max fill price (¢, 0 = off)", hint: "replay only: buys that would fill above this ask again" },
-      {
-        key: "minStaleMove",
-        label: "Skip if BTC moved less than ($) since the quote changed (0 = off)",
-        hint: "replay only: stale-move filter",
-      },
+
       { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
       { key: "slPct", label: "Stop loss (% of price paid, 0 = off)", hint: "replay only" },
       { key: "maxEntries", label: "Max entries per window (after a sell)", hint: "FADEBOT_TRADER_MAX_ENTRIES" },
@@ -140,7 +141,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     mgMult: "2",
     resetAfter: "0",
     maxFill: "0",
-    minStaleMove: "0",
+    minStaleMove: String(t.minStaleMove ?? 0),
     tpPct: "0",
     slPct: "0",
     maxEntries: String((t as { maxEntries?: number }).maxEntries ?? 3),
@@ -163,6 +164,7 @@ function secretsFor(f: Record<string, string>): string[] {
   if (f.confirmAt) put("FADEBOT_TRADER_CONFIRM_AT_MODE", f.confirmAtMode === "reask" ? "reask" : "(delete)");
   put("FADEBOT_TRADER_AGE_RULES", f.ageRules || "(delete)");
   put("FADEBOT_TRADER_STREAK15", f.streak15 || "0");
+  put("FADEBOT_TRADER_MIN_STALE_MOVE", f.minStaleMove || "0");
   put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
   put("FADEBOT_TRADER_STATS", f.stats === "on" ? "on" : "off");
   if (f.stats === "on") {
