@@ -67,6 +67,11 @@ const FIELDS: { group: string; fields: Field[] }[] = [
     group: "Fills & exits (replay only)",
     fields: [
       { key: "maxFill", label: "Max fill price (¢, 0 = off)", hint: "replay only: buys that would fill above this ask again" },
+      {
+        key: "minStaleMove",
+        label: "Skip if BTC moved less than ($) since the quote changed (0 = off)",
+        hint: "replay only: stale-move filter",
+      },
       { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
       { key: "slPct", label: "Stop loss (% of price paid, 0 = off)", hint: "replay only" },
       { key: "maxEntries", label: "Max entries per window (after a sell)", hint: "FADEBOT_TRADER_MAX_ENTRIES" },
@@ -135,6 +140,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     mgMult: "2",
     resetAfter: "0",
     maxFill: "0",
+    minStaleMove: "0",
     tpPct: "0",
     slPct: "0",
     maxEntries: String((t as { maxEntries?: number }).maxEntries ?? 3),
@@ -454,6 +460,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             {tt.cappedBuys
               ? ` Max fill price: ${tt.cappedBuys} calls would have filled above it and asked again.`
               : ""}
+            {tt.staleSkipped || tt.staleUnknown
+              ? ` Stale-move filter: ${tt.staleSkipped ?? 0} calls skipped (BTC moved under $${r.used?.minStaleMove}${
+                tt.staleUnknown ? `; ${tt.staleUnknown} had no BTC data and weren't filtered` : ""
+              }).`
+              : ""}
             {tt.takeProfits || tt.stopLosses
               ? ` Exits: ${tt.takeProfits ?? 0} take profit, ${tt.stopLosses ?? 0} stop loss (sold at the sell price − the gap).`
               : ""}
@@ -508,6 +519,9 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                         {x.side} {x.quote}¢→{x.paid}¢ {x.against ? "(other side)" : ""}
                         {x.exit ? ` · ${x.exit.why} at ${x.exit.at}s, sold ${x.exit.fill}¢` : ""}
                         {x.patchy ? " ⚠" : ""}
+                        {x.f && typeof x.f.staleMove === "number"
+                          ? <span className="text-[#8b949e]"> · quote {String(x.f.quoteAge)} s old, BTC moved ${x.f.staleMove}</span>
+                          : null}
                       </td>
                       <td className={`text-right ${tone(x.pnl)}`}>{signed(x.pnl)}</td>
                       <td className="pl-2 text-[#8b949e]">

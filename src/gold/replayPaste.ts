@@ -50,6 +50,7 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "statsSlip", secret: "FADEBOT_TRADER_STATS_SLIP", kind: "num", unit: "¢", example: "9", meaning: "stats: assumed fill gap when scoring" },
   { key: "statsCandles", secret: "FADEBOT_TRADER_STATS_CANDLES", kind: "num", unit: "windows", example: "288", meaning: "stats: history length (288 = 24 h)" },
   { key: "maxFill", secret: null, kind: "num", unit: "¢", example: "0", meaning: "REPLAY ONLY: buys that would fill above this (quote + gap) don't fill; asks again (0 = off)" },
+  { key: "minStaleMove", secret: null, kind: "num", unit: "$", example: "15", meaning: "REPLAY ONLY: skip a buy (ask again) when BTC moved less than this since the side's quote last changed (0 = off)" },
   { key: "tpPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: take profit (0 = off)" },
   { key: "slPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: stop loss (0 = off)" },
   { key: "maxEntries", secret: "FADEBOT_TRADER_MAX_ENTRIES", kind: "num", unit: "count", example: "1", meaning: "buys per window (only matters after a sell)" },

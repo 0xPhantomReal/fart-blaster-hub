@@ -1971,6 +1971,28 @@ function marketCfg(tc: {
 }
 
 /**
+ * How far BTC moved (absolute $) since the quote for `side` last changed, at second `at` of window `w`: the quote's
+ * age from this window's earlier quotes, then BTC at that moment vs now (recorded btc, else the minute fallback).
+ * Null when BTC isn't known for either moment.
+ */
+function staleMoveAt(x: {
+  w: number;
+  at: number;
+  side: Side;
+  cost: number;
+  buyA: AskRow;
+  quoteHist: { at: number; up: number; down: number }[];
+  asksW: AskRow[];
+  btcFallback: (w: number, at: number) => number | null;
+}): { age: number; move: number | null } {
+  const btcAt = (a: AskRow) => a.btc ?? x.btcFallback(x.w, a.at);
+  const age = quoteAge(x.quoteHist, { at: x.at, cost: x.cost }, x.side);
+  const atT0 = x.asksW.find((a) => a.at >= x.at - age - 0.5);
+  const b1 = btcAt(x.buyA), b0 = atT0 ? btcAt(atT0) : null;
+  return { age, move: b1 !== null && b0 !== null ? Math.abs(b1 - b0) : null };
+}
+
+/**
  * The conditions around one replay buy, for the losing-streak explorer. Everything comes from data the bot had at
  * that moment (no hindsight): time, call, prices, quote age, BTC movement, recent windows, stats' reasoning.
  * Dollar moves are signed toward the side bought (+ = BTC moving its way).
@@ -2004,12 +2026,9 @@ function tradeFeatures(x: {
   const hour = Number(d.toLocaleString("en-US", { ...tz, hour: "numeric", hour12: false })) % 24;
   const weekday = d.toLocaleDateString("en-US", { ...tz, weekday: "short" });
   // quote age and BTC move while the quote sat unchanged
-  const age = quoteAge(x.quoteHist, { at: x.at, cost: x.cost }, x.side);
-  const t0 = x.at - age;
-  const atT0 = x.asksW.find((a) => a.at >= t0 - 0.5);
-  const btcNow = btcAt(x.buyA);
-  const btc0 = atT0 ? btcAt(atT0) : null;
-  const staleMove = btcNow !== null && btc0 !== null ? Math.abs(btcNow - btc0) : null;
+  const sm = staleMoveAt(x);
+  const age = sm.age;
+  const staleMove = sm.move;
   // BTC range inside the window so far
   const sofar = x.asksW.filter((a) => a.at <= x.at).map(btcAt).filter((v): v is number => v !== null);
   const winRange = sofar.length ? Math.max(...sofar) - Math.min(...sofar) : null;
@@ -2185,6 +2204,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   // the bot asks again, like a capped order that misses.
   const maxFill = Math.min(99, Math.max(0, Number(over.maxFill) || 0)) / 100;
   let cappedN = 0;
+  // Stale-move filter (replay only; $, 0 = off): skip a buy (ask again) when BTC has moved less than this since the
+  // side's quote last changed. A buy with no BTC data for either moment isn't skipped (counted as unknown).
+  const minStaleMove = Math.max(0, Number(over.minStaleMove) || 0);
+  let staleSkipN = 0, staleUnknownN = 0;
   // Sizing (replay only): "pct" = BET_PCT % of the balance (the live rule); "martingale" = base × mult^losses in a
   // row, back to base after a win; "fibonacci" = base × 1,1,2,3,5,8… — a loss steps up one, a win steps back two.
   // resetAfter > 0: back to the base after that many losses in a row. A stake never exceeds the balance.
@@ -2302,6 +2325,14 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         if (maxFill > 0 && Math.min(0.99, mp.cost + gap) > maxFill + 1e-9) {
           cappedN++;
           continue;
+        }
+        if (minStaleMove > 0) {
+          const sm = staleMoveAt({ w, at: a.at, side: mp.side, cost: mp.cost, buyA: a, quoteHist, asksW, btcFallback: data.btcFallback });
+          if (sm.move === null) staleUnknownN++;
+          else if (sm.move < minStaleMove - 1e-9) {
+            staleSkipN++;
+            continue;
+          }
         }
         pick = mp;
         at = a.at;
@@ -2472,6 +2503,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       dailyLoss: tc.dailyLoss,
       maxEntries: tc.maxEntries,
       maxFill: Math.round(maxFill * 100),
+      minStaleMove,
       sizing,
       baseBet: Math.round(baseBet * 100) / 100,
       mgMult,
@@ -2489,6 +2521,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstStreak,
       blocked15,
       cappedBuys: cappedN,
+      staleSkipped: staleSkipN,
+      staleUnknown: staleUnknownN,
       maxStake: Math.round(maxStake * 100) / 100,
       takeProfits: tpN,
       stopLosses: slN,
