@@ -523,7 +523,7 @@ function TraderPanel({
           </>
         ) : null}
         {tc
-          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; ${tc.order === "flip" ? `but it doesn't buy that side: it waits for the OTHER side to reach ${Math.round((tc.flipAt ?? 0.6) * 100)}¢, then buys ${tc.betPct ? `${tc.betPct}% of the balance` : `$${tc.flipBet ?? 5}`} of the other side at market (if it costs no more than ${Math.round((tc.flipMax ?? 0.75) * 100)}¢), held to settlement; if the other side never gets there, nothing is bought` : tc.order === "limit" ? `instead of buying at market it places a limit order for ${tc.limitPct ? `${tc.limitPct}% of the balance in shares` : `${tc.limitShares} shares`} at ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢ on that side, good until the window ends (the edge is measured against what it would pay: ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, or less if the side is already cheaper), and unfilled orders cost nothing. If the side already costs under ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, it buys ${tc.limitPct ? `${tc.limitPct}% of the balance` : `$${tc.cheapBet ?? 1}`} at market instead` : `size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : tc.betPct ? `${tc.betPct}% of the balance per buy` : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
+          ? ` ${tc.trigger === "probability" ? `The bot buys the side Jev thinks more likely whenever Jev's chance beats its price by ${Math.round(tc.edge * 100)}+ points (whatever Jev's buy/wait choice says — the same thing the table below measures)` : `A buy goes ahead only if Jev says buy and its chance beats the price by ${Math.round(tc.edge * 100)}+ points`}; ${tc.order === "flip" ? `but it doesn't buy that side: it waits for the OTHER side to reach ${Math.round((tc.flipAt ?? 0.6) * 100)}¢, then buys ${tc.betPct ? `${tc.betPct}% of the balance` : `$${tc.flipBet ?? 5}`} of the other side at market (if it costs no more than ${Math.round((tc.flipMax ?? 0.75) * 100)}¢), held to settlement; if the other side never gets there, nothing is bought` : tc.order === "limit" ? `instead of buying at market it places a limit order for ${tc.limitPct ? `${tc.limitPct}% of the balance in shares` : `${tc.limitShares} shares`} at ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢ on that side, good until the window ends (it makes exactly the market-mode decision first: stats, confirmation, skips, swaps and filters pick the side), and unfilled orders cost nothing. If the side already costs under ${Math.round((tc.limitPrice ?? 0.33) * 100)}¢, it buys ${tc.limitPct ? `${tc.limitPct}% of the balance` : `$${tc.cheapBet ?? 1}`} at market instead` : `size is ${tc.allIn ? "ALL-IN (the whole balance on every buy — one loss empties it)" : tc.betPct ? `${tc.betPct}% of the balance per buy` : `${tc.kelly} Kelly of $${tc.bankroll}, $${tc.minBet}–$${tc.maxBet}`}`}, up to ${tc.maxEntries} buys a window, none in the last ${tc.minLeftSec} s,${tc.banLo !== undefined && tc.banHi !== undefined ? ` none at ${Math.round(tc.banLo * 100)}–${Math.round(tc.banHi * 100)}¢,` : ""} and no buys after losing $${tc.dailyLoss} in a day.`
           : ""}
       </p>
       {!t ? (
@@ -858,7 +858,7 @@ function ModeBox({
                 : "Form sizing off",
             )
           : null}
-        {order === "market" && tc?.stats
+        {(order === "market" || order === "limit") && tc?.stats
           ? chip(
               true,
               `Stats mode ON: with/against/skip from the last ${tc.statsCandles ?? 288} windows (min ${tc.statsMinN ?? 15} calls, +${
@@ -866,25 +866,25 @@ function ModeBox({
               }¢ gap) — overrides invert/ban/skip/swap`,
             )
           : null}
-        {order === "market" && tc?.stats && tc?.statsInvert ? chip(true, "Stats INVERTED: buys the opposite of what stats picks") : null}
-        {order === "market" && tc?.stats && tc?.statsSwapAbove
+        {(order === "market" || order === "limit") && tc?.stats && tc?.statsInvert ? chip(true, "Stats INVERTED: buys the opposite of what stats picks") : null}
+        {(order === "market" || order === "limit") && tc?.stats && tc?.statsSwapAbove
           ? chip(true, `Stats swaps buys over ${Math.round(tc.statsSwapAbove * 100)}¢ to the cheaper side`)
           : null}
-        {order === "market" && tc?.stats && tc?.statsSwapRanges?.length
+        {(order === "market" || order === "limit") && tc?.stats && tc?.statsSwapRanges?.length
           ? chip(true, `Stats swap: a buy at ${
             tc.statsSwapRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
           } buys the other side`)
           : null}
-        {order === "market" && tc?.stats && tc?.statsSkipRanges?.length
+        {(order === "market" || order === "limit") && tc?.stats && tc?.statsSkipRanges?.length
           ? chip(true, `Stats skip: no buy at ${
             tc.statsSkipRanges.map((r) => `${Math.round(r.lo * 100)}–${Math.round(r.hi * 100)}¢`).join(" or ")
           } (asks again)`)
           : null}
-        {order === "market" && tc?.stats && tc?.statsMaxAgainst
+        {(order === "market" || order === "limit") && tc?.stats && tc?.statsMaxAgainst
           ? chip(true, `Stats skips buys with BTC $${tc.statsMaxAgainst}+ on the wrong side of the start`)
           : null}
         {tc?.minSec ? chip(true, `No calls before ${tc.minSec} s`) : null}
-        {order === "market" && tc?.ageRules?.length
+        {(order === "market" || order === "limit") && tc?.ageRules?.length
           ? chip(
             true,
             `Quote age: ${
@@ -908,7 +908,7 @@ function ModeBox({
             }¢`,
           )
           : null}
-        {order === "market" && tc?.minStaleMove
+        {(order === "market" || order === "limit") && tc?.minStaleMove
           ? chip(true, `Stale-move filter: no buy unless BTC moved $${tc.minStaleMove}+ since the quote changed`)
           : null}
         {tc?.streak15
@@ -926,7 +926,7 @@ function ModeBox({
             }`,
           )
           : null}
-        {order === "market" && tc?.confirmSec
+        {(order === "market" || order === "limit") && tc?.confirmSec
           ? chip(
             true,
             `Bias + confirm: 1st call sets the side, a call ${tc.confirmSec} s+ later must agree${

@@ -2832,6 +2832,14 @@ async function traderRun(start: number, minute: number, until: number) {
           await sleep(1000);
           continue;
         }
+        if (pos && pos.status === "watching" && pos.order_type === "peak" && !(tc.peakAt > 0 && tc.order === "market")) {
+          // Peak-then-dip was turned off (or the bot left market mode) while this watch was open: cancel it, no buy.
+          await sql`update fadebot_trades set status = 'settled', result = 'not triggered', pnl = 0, closed_at = now(),
+              reason = ${pos.reason + "; peak-then-dip turned off → watch cancelled, nothing bought"}
+            where id = ${pos.id} and status = 'watching'`;
+          await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, did: "peak-then-dip turned off: open watch cancelled" });
+          continue;
+        }
         if (pos && pos.status === "watching" && pos.order_type === "peak") {
           // Peak-then-dip: watching the called side; after it has been at PEAK_AT+, buy it once it falls to PEAK_BUY.
           const side = pos.side as Side;
@@ -3104,7 +3112,10 @@ async function traderRun(start: number, minute: number, until: number) {
         // after his answer — the live stream if fresh, else one new REST read — not the one read before asking him.
         let qd = q;
         let recheckTag = "";
-        if (tc.recheck && tc.order === "market" && !pos) {
+        // Market and limit orders run the same rules (stats, confirmation, skips, swaps, age/stale filters); limit
+        // mode only changes the last step: a limit order at FADEBOT_TRADER_LIMIT_PRICE instead of a market buy.
+        const ruled = tc.order === "market" || tc.order === "limit";
+        if (tc.recheck && ruled && !pos) {
           const fresh = await quotes(market, true);
           if (fresh.upCost !== null && fresh.downCost !== null) {
             const src = lastQuoteVia === "live stream" ? "live" : "REST";
@@ -3134,32 +3145,28 @@ async function traderRun(start: number, minute: number, until: number) {
           ref: refPx,
         };
         const nowEl = Date.now() / 1000 - start;
-        // Limit mode: the edge is measured against what the order would pay (the limit, or less if already cheaper).
-        const lim = tc.order === "limit"
-          ? {
-            upCost: qd.upCost === null ? tc.limitPrice : Math.min(qd.upCost, tc.limitPrice),
-            downCost: qd.downCost === null ? tc.limitPrice : Math.min(qd.downCost, tc.limitPrice),
-          }
-          : qd;
-        // Hybrid + market: the ban moves to the live price below, so the REST-based decision leaves it out.
-        const liveRules = tc.feed === "hybrid" && tc.rulesLive && tc.order === "market" && !!stream?.s.connected;
+        // The decision uses the current prices in both market and limit mode (limit mode used to measure the edge
+        // against the limit price instead; now it makes exactly the market-mode decision, then places the limit).
+        const lim = qd;
+        // Hybrid: the ban moves to the live price below, so the REST-based decision leaves it out.
+        const liveRules = tc.feed === "hybrid" && tc.rulesLive && ruled && !!stream?.s.connected;
         const d = traderDecision(
           { action: jev.action, pUp: jev.pUp },
           lim,
           pos ? { side: pos.side } : null,
           { secondsLeft: TF - nowEl, entries: nRows[0].n, lossLimitHit: today <= -tc.dailyLoss },
-          tc.order === "limit"
-            ? { ...tc, minBet: 0 }
-            : liveRules || (tc.stats && tc.order === "market")
-            ? { ...tc, banLo: undefined, banHi: undefined }
-            : tc,
+          {
+            ...tc,
+            ...(tc.order === "limit" ? { minBet: 0 } : {}),
+            ...(liveRules || (tc.stats && ruled) ? { banLo: undefined, banHi: undefined } : {}),
+          },
         );
         // Runs overlap for a moment at each minute: never buy if another run just opened a position.
         const raced = "buy" in d &&
           (await sql`select 1 from fadebot_trades where window_start = ${start} and status in ('open', 'watching')
             and coalesce(strategy, 'trader') = 'trader'`).length > 0;
         const tooEarly = "buy" in d && nowEl < tc.minSec;
-        const isMarket = tc.order === "market";
+        const isMarket = ruled; // market or limit: both run marketPick
         // 15-minute streak block: the latest FADEBOT_TRADER_STREAK15 finished 15-minute markets all settled one way.
         const s15 = "buy" in d && tc.streak15 > 0 && !raced ? await streak15(start, tc.streak15) : null;
         // Live price for the ban check (hybrid + market, stats off), read right before buying.
@@ -3352,6 +3359,10 @@ async function traderRun(start: number, minute: number, until: number) {
           if (tc.order === "limit") {
             // 15 shares at 33¢ (or what's set), good until the window ends; filled shares are tracked as they come.
             const lp = tc.limitPrice;
+            // Which rules picked this side (same as a market buy's note).
+            const ruleNote = `${statsD ? ` [stats ${statsAgainst ? "AGAINST" : "WITH"} Jev's ${d.buy}: ${statsD.bands}: ${statsD.why}]` : ""}${
+              mb?.note && !tc.stats ? mb.note : ""
+            }${tc.stats ? statsSwapNote : ""}${recheckTag}`;
             // Size: FADEBOT_TRADER_LIMIT_PCT % of the balance at the limit price, else the fixed share count.
             let n = tc.limitShares, cheapBet = tc.cheapBet, sizeNote = "";
             if (tc.limitPct > 0) {
@@ -3382,7 +3393,7 @@ async function traderRun(start: number, minute: number, until: number) {
                   ${fees}, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
                   ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} already ${Math.round(sideNow * 100)}¢ (under ${
                     Math.round(lp * 100)
-                  }¢) → $${cheapBet} market buy${sizeNote} at ${Math.round(nowEl)} s`}, 'market')`;
+                  }¢) → $${cheapBet} market buy${sizeNote} at ${Math.round(nowEl)} s${ruleNote}`}, 'market')`;
               row.did = `${side} under ${Math.round(lp * 100)}¢: bought $${cheapBet}${sizeNote} @ ${price.toFixed(2)}`;
               await logAsk(row);
               continue;
@@ -3395,7 +3406,7 @@ async function traderRun(start: number, minute: number, until: number) {
                 ${instant ? sideNow : lp}, 0, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} costs ${
                   sideNow === null ? "—" : `${Math.round(sideNow * 100)}¢`
-                } → limit ${n} @ ${Math.round(lp * 100)}¢${sizeNote} at ${Math.round(nowEl)} s`}, 'limit', ${lp}, ${n})`;
+                } → limit ${n} @ ${Math.round(lp * 100)}¢${sizeNote} at ${Math.round(nowEl)} s${ruleNote}`}, 'limit', ${lp}, ${n})`;
             row.did = `limit ${n} ${side} @ ${Math.round(lp * 100)}¢${sizeNote}${instant ? " (filled)" : ""}`;
             await logAsk(row);
             continue;
