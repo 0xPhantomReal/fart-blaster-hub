@@ -900,6 +900,14 @@ function ModeBox({
             }`,
           )
           : null}
+        {order === "market" && tc?.peakAt
+          ? chip(
+            true,
+            `Peak then dip: after a call, wait for that side to reach ${Math.round(tc.peakAt * 100)}¢, then buy when it falls to ${
+              Math.round((tc.peakBuy ?? 0.33) * 100)
+            }¢`,
+          )
+          : null}
         {order === "market" && tc?.minStaleMove
           ? chip(true, `Stale-move filter: no buy unless BTC moved $${tc.minStaleMove}+ since the quote changed`)
           : null}

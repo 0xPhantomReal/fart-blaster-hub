@@ -811,6 +811,8 @@ export interface FadeBotStatus {
       ageRules?: { lo: number; hi: number | null; allow: { lo: number; hi: number }[] | null }[];
       streak15?: number;
       minStaleMove?: number;
+      peakAt?: number;
+      peakBuy?: number;
       skipJevPct?: { lo: number; hi: number }[];
       stats?: boolean;
       statsInvert?: boolean;
@@ -1130,6 +1132,7 @@ export type StatsReplay = {
     worstDrop: number;
     worstStreak: number;
     cappedBuys?: number;
+    peakMissed?: number;
     scoreSkipped?: number;
     staleSkipped?: number;
     staleUnknown?: number;

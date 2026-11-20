@@ -40,6 +40,8 @@ const FIELDS: { group: string; fields: Field[] }[] = [
         label: "Skip if BTC moved less than ($) since the quote changed (0 = off)",
         hint: "FADEBOT_TRADER_MIN_STALE_MOVE",
       },
+      { key: "peakAt", label: "Peak then dip: side must reach (¢, 0 = off)", hint: "FADEBOT_TRADER_PEAK_AT" },
+      { key: "peakBuy", label: "…then buy when it falls to (¢)", hint: "FADEBOT_TRADER_PEAK_BUY" },
       { key: "skipJevPct", label: "Skip Jev % (e.g. 50-55,61-70)", hint: "FADEBOT_TRADER_SKIP_JEV_PCT" },
     ],
   },
@@ -146,6 +148,8 @@ function fromLive(t: TraderSettings): Record<string, string> {
     resetAfter: "0",
     maxFill: "0",
     minStaleMove: String(t.minStaleMove ?? 0),
+    peakAt: String(Math.round((t.peakAt ?? 0) * 100)),
+    peakBuy: String(Math.round((t.peakBuy ?? 0.33) * 100)),
     tpPct: "0",
     slPct: "0",
     maxEntries: String((t as { maxEntries?: number }).maxEntries ?? 3),
@@ -169,6 +173,8 @@ function secretsFor(f: Record<string, string>): string[] {
   put("FADEBOT_TRADER_AGE_RULES", f.ageRules || "(delete)");
   put("FADEBOT_TRADER_STREAK15", f.streak15 || "0");
   put("FADEBOT_TRADER_MIN_STALE_MOVE", f.minStaleMove || "0");
+  put("FADEBOT_TRADER_PEAK_AT", f.peakAt || "0");
+  if (Number(f.peakAt) > 0) put("FADEBOT_TRADER_PEAK_BUY", f.peakBuy || "33");
   put("FADEBOT_TRADER_SKIP_JEV_PCT", f.skipJevPct || "(delete)");
   put("FADEBOT_TRADER_STATS", f.stats === "on" ? "on" : "off");
   if (f.stats === "on") {
@@ -479,6 +485,9 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             windows; same side in {tt.sameSide}.
             {tt.cappedBuys
               ? ` Max fill price: ${tt.cappedBuys} calls would have filled above it and asked again.`
+              : ""}
+            {r.used?.peakAt
+              ? ` Peak then dip (${r.used.peakAt}¢ → ${r.used.peakBuy}¢): ${tt.peakMissed ?? 0} calls never dipped after peaking, so no trade.`
               : ""}
             {tt.staleSkipped || tt.staleUnknown
               ? ` Stale-move filter: ${tt.staleSkipped ?? 0} calls skipped (BTC moved under $${r.used?.minStaleMove}${

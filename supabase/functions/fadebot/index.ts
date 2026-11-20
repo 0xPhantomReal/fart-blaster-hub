@@ -341,6 +341,11 @@ const settings = () => ({
     // balance at the limit price (shares = balance × % ÷ limit price, whole shares, at least 1), and the
     // already-under-the-limit market buy bets the same dollars. Unset / 0 = the fixed FADEBOT_TRADER_LIMIT_SHARES.
     limitPct: Math.max(0, Number(env("FADEBOT_TRADER_LIMIT_PCT") || 0)),
+    // Peak-then-dip entry (market buys; FADEBOT_TRADER_PEAK_AT / FADEBOT_TRADER_PEAK_BUY, cents): when a call would
+    // buy, don't buy yet — watch that side; once it has been at PEAK_AT or more (already there counts), buy it at
+    // market when it falls to PEAK_BUY or less. Never both → no trade that window. PEAK_AT unset / 0 = off.
+    peakAt: Math.max(0, Number(env("FADEBOT_TRADER_PEAK_AT") || 0)) / 100,
+    peakBuy: Math.max(0, Number(env("FADEBOT_TRADER_PEAK_BUY") || 33)) / 100,
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
     // instead of placing the limit order.
     cheapBet: Number(env("FADEBOT_TRADER_CHEAP_BET") || 1),
@@ -2118,6 +2123,8 @@ function replaySettings(o: Record<string, unknown>) {
   set("minSec", num("minSec", 0, 299));
   set("confirmSec", num("confirmSec", 0, 299));
   set("minStaleMove", num("minStaleMove", 0, 100000));
+  if (num("peakAt", 0, 99) !== undefined) tc.peakAt = num("peakAt", 0, 99)! / 100;
+  if (num("peakBuy", 1, 99) !== undefined) tc.peakBuy = num("peakBuy", 1, 99)! / 100;
   if (o.confirmAt !== undefined && o.confirmAt !== null) tc.confirmAt = parseSecRange(String(o.confirmAt));
   if (o.confirmAtMode === "reask" || o.confirmAtMode === "skip") tc.confirmAtReask = o.confirmAtMode === "reask";
   if (typeof o.ageRules === "string") tc.ageRules = parseAgeRules(o.ageRules);
@@ -2212,6 +2219,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   const tpPct = Math.max(0, Number(over.tpPct) || 0) / 100;
   const slPct = Math.min(100, Math.max(0, Number(over.slPct) || 0)) / 100;
   const exitsOn = tpPct > 0 || slPct > 0;
+  const peakOn = tc.peakAt > 0;
+  let peakMissN = 0;
   let tpN = 0, slN = 0, patchyN = 0;
   // Maximum fill price (replay only; cents, 0 = off): a buy that would fill above it (quote + gap) doesn't fill and
   // the bot asks again, like a capped order that misses.
@@ -2241,7 +2250,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   let step = 0, maxStake = 0;
   let lastTradeAt: number | null = null;
   const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
-  if (exitsOn) {
+  if (exitsOn || peakOn) {
     const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
       .catch(() => []);
     for (const r of rowsP) {
@@ -2290,7 +2299,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     const earlier: { at: number; pick: Side }[] = [];
     const quoteHist: { at: number; up: number; down: number; btc: number | null }[] = [];
     // Every recorded price in this window (asks + the per-second path), for take profit / stop loss.
-    const prices = exitsOn ? pricesOf(w, asksW) : [];
+    const prices = exitsOn || peakOn ? pricesOf(w, asksW) : [];
     let idx = 0, entries = 0, resumeAt = -1;
     while (entries < Math.max(1, tc.maxEntries)) {
       let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
@@ -2370,8 +2379,35 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         break;
       }
       if (!pick || windowOver) break;
+      // Peak-then-dip (FADEBOT_TRADER_PEAK_AT / PEAK_BUY): the call starts a watch on its side; buy only after it has
+      // been at PEAK_AT+ and then falls to PEAK_BUY or less, using the recorded prices. No dip → no trade this window
+      // (live, a watch ends the window's asking too).
+      let entryAt = at, entryCost = pick.cost, peakPatchy = false;
+      if (peakOn) {
+        let peaked = pick.cost >= tc.peakAt - 1e-9, lastT = at, found = false;
+        for (const pt of prices) {
+          if (pt.at <= at) continue;
+          if (pt.at > TF - tc.minLeftSec) break;
+          if (pt.at - lastT > 20) peakPatchy = true;
+          lastT = pt.at;
+          const c = pick.side === "up" ? pt.up : pt.down;
+          if (c === null || !(c > 0 && c < 1)) continue;
+          if (!peaked) {
+            if (c >= tc.peakAt - 1e-9) peaked = true;
+          } else if (c <= tc.peakBuy + 1e-9) {
+            entryAt = pt.at;
+            entryCost = c;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          peakMissN++;
+          break;
+        }
+      }
       entries++;
-      const price = Math.min(0.99, pick.cost + gap);
+      const price = Math.min(0.99, entryCost + gap);
       const want = sizing === "martingale" ? baseBet * mgMult ** step
         : sizing === "fibonacci" ? baseBet * fib(step)
         : sizing === "score" ? bal * scorePct(buyScore, tiers) / 100
@@ -2381,10 +2417,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       const streakBefore = streak;
       // Take profit / stop loss on the side's sell price (1 − the other side's cost), as % of the price paid.
       let exit: { at: number; px: number; why: "take profit" | "stop loss" } | null = null;
-      let worstGap = 0, lastT = at;
+      let worstGap = 0, lastT = entryAt;
       if (exitsOn) {
         for (const pt of prices) {
-          if (pt.at <= at) continue;
+          if (pt.at <= entryAt) continue;
           worstGap = Math.max(worstGap, pt.at - lastT);
           lastT = pt.at;
           const oc = pick.side === "up" ? pt.down : pt.up;
@@ -2401,7 +2437,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         }
         if (!exit) worstGap = Math.max(worstGap, TF - lastT);
       }
-      const patchy = exitsOn && worstGap > 20;
+      const patchy = (exitsOn && worstGap > 20) || peakPatchy;
       if (patchy) patchyN++;
       let pnl: number, ok: boolean, exitFill: number | null = null;
       if (exit) {
@@ -2467,12 +2503,12 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       }
       trades.push({
         window: w,
-        at,
+        at: entryAt,
         jev,
         pct: Math.round(pJev * 100),
         side: pick.side,
         against: pick.otherSide,
-        quote: Math.round(pick.cost * 100),
+        quote: Math.round(entryCost * 100),
         paid: Math.round(price * 100),
         winner: win,
         won: ok,
@@ -2533,6 +2569,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       dailyLoss: tc.dailyLoss,
       maxEntries: tc.maxEntries,
       maxFill: Math.round(maxFill * 100),
+      peakAt: Math.round(tc.peakAt * 100),
+      peakBuy: Math.round(tc.peakBuy * 100),
       minStaleMove: tc.minStaleMove,
       sizing,
       scoreTiers: tiers.map((t) => `${t.lo}${t.hi !== t.lo ? `-${t.hi}` : ""}:${t.pct}`).join(";"),
@@ -2553,6 +2591,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstStreak,
       blocked15,
       cappedBuys: cappedN,
+      peakMissed: peakMissN,
       scoreSkipped: scoreSkipN,
       staleSkipped: staleSkipN,
       staleUnknown: staleUnknownN,
@@ -2670,6 +2709,8 @@ async function traderRun(start: number, minute: number, until: number) {
     limitPrice: number;
     limitShares: number;
     limitPct: number;
+    peakAt: number;
+    peakBuy: number;
     cheapBet: number;
   } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
@@ -2789,6 +2830,60 @@ async function traderRun(start: number, minute: number, until: number) {
         // A skipped call (skip ranges) ends this window: no more Jev asks or buys until the next one.
         if (!pos && Number(nRows[0].skipped) > 0 && !tc.skipReask) {
           await sleep(1000);
+          continue;
+        }
+        if (pos && pos.status === "watching" && pos.order_type === "peak") {
+          // Peak-then-dip: watching the called side; after it has been at PEAK_AT+, buy it once it falls to PEAK_BUY.
+          const side = pos.side as Side;
+          const c = side === "up" ? q.upCost : q.downCost;
+          const leftNow = TF - (Date.now() / 1000 - start);
+          const cents = (x: number) => `${Math.round(x * 100)}¢`;
+          let state = (pos.dip as string | null) ?? "waiting";
+          if (state === "waiting" && c !== null && c >= tc.peakAt - 1e-9) {
+            state = "peaked";
+            const why = `; ${side} reached ${cents(c)} at ${Math.round(Date.now() / 1000 - start)} s → buying when it falls to ${
+              cents(tc.peakBuy)
+            }`;
+            await sql`update fadebot_trades set dip = 'peaked', reason = ${pos.reason + why}
+              where id = ${pos.id} and status = 'watching'`;
+            pos.reason = pos.reason + why;
+            limitLogged = false;
+          }
+          if (state === "peaked" && c !== null && c > 0 && c <= tc.peakBuy + 1e-9 && leftNow >= tc.minLeftSec) {
+            let bet = tc.flipBet;
+            let sizeNote = "";
+            if (tc.betPct > 0) {
+              const bal = await traderBalance(live, tc.bankroll);
+              bet = Math.max(1, Math.floor(bal * tc.betPct) / 100);
+              sizeNote = ` (${tc.betPct}% of $${bal.toFixed(2)})`;
+            }
+            let shares = bet / c, price = c, fees = 0;
+            let orderId: string | null = null;
+            if (live) {
+              const f = await marketBuy(market, side, bet);
+              if (!f.shares) throw new Error("market buy filled nothing");
+              shares = f.shares;
+              price = f.price;
+              fees = f.fees;
+              orderId = f.id;
+            }
+            await sql`update fadebot_trades set status = 'open', stake = ${bet}, shares = ${shares}, price = ${price},
+                fees = ${fees}, order_id = ${orderId}, opened_sec = ${Date.now() / 1000 - start},
+                reason = ${`${pos.reason}; ${side} fell to ${cents(c)} → bought $${bet.toFixed(2)}${sizeNote}`}
+              where id = ${pos.id} and status = 'watching'`;
+            await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: side,
+              did: `${side} fell to ${cents(c)} after peaking: bought $${bet.toFixed(2)}${sizeNote} @ ${price.toFixed(2)}` });
+            continue;
+          }
+          if (!limitLogged) {
+            limitLogged = true;
+            await logAsk({ ...row, up_cost: q.upCost, down_cost: q.downCost, pos_side: side,
+              did: state === "peaked"
+                ? `${side} has been ${cents(tc.peakAt)}+: waiting for it to fall to ${cents(tc.peakBuy)} (now ${c === null ? "—" : cents(c)})`
+                : `waiting for ${side} to reach ${cents(tc.peakAt)} (now ${c === null ? "—" : cents(c)})` });
+          }
+          if (stream?.s.connected) await stream.s.next(1000);
+          else await sleep(1000);
           continue;
         }
         if (pos && pos.status === "watching") {
@@ -3302,6 +3397,22 @@ async function traderRun(start: number, minute: number, until: number) {
                   sideNow === null ? "—" : `${Math.round(sideNow * 100)}¢`
                 } → limit ${n} @ ${Math.round(lp * 100)}¢${sizeNote} at ${Math.round(nowEl)} s`}, 'limit', ${lp}, ${n})`;
             row.did = `limit ${n} ${side} @ ${Math.round(lp * 100)}¢${sizeNote}${instant ? " (filled)" : ""}`;
+            await logAsk(row);
+            continue;
+          }
+          // Peak-then-dip: don't buy now; watch this side for PEAK_AT then PEAK_BUY (handled above, every second).
+          if (tc.peakAt > 0 && tc.order === "market") {
+            const peaked = cost >= tc.peakAt - 1e-9;
+            const why = `${statsD ? `stats ${statsAgainst ? "AGAINST" : "WITH"} Jev's ${d.buy}: ` : ""}call for ${side} at ${
+              Math.round(cost * 100)
+            }¢ at ${Math.round(nowEl)} s${swapNote}${statsSwapNote}${recheckTag} → ${
+              peaked ? `already ${Math.round(tc.peakAt * 100)}¢+, ` : `waiting for ${Math.round(tc.peakAt * 100)}¢, then `
+            }buying when it falls to ${Math.round(tc.peakBuy * 100)}¢`;
+            await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
+                opened_sec, p_side, open_ref, reason, order_type, status, dip, jev_pick)
+              values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, 0, 0, 0, 0, ${nowEl}, ${pSide},
+                ${before?.avg ?? null}, ${why}, 'peak', 'watching', ${peaked ? "peaked" : "waiting"}, ${d.buy})`;
+            row.did = why;
             await logAsk(row);
             continue;
           }

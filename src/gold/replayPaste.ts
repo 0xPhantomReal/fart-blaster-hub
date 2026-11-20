@@ -34,6 +34,8 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "ageRules", secret: "FADEBOT_TRADER_AGE_RULES", kind: "text", unit: "age:prices;…", example: "0-2:none;3-5:50-99;21+:all", meaning: "quote-age rules (blank = off)" },
   { key: "streak15", secret: "FADEBOT_TRADER_STREAK15", kind: "num", unit: "count", example: "0", meaning: "no trades after this many same 15m results in a row (0 = off)" },
   { key: "minStaleMove", secret: "FADEBOT_TRADER_MIN_STALE_MOVE", kind: "num", unit: "$", example: "15", meaning: "skip a buy (ask again) when BTC moved less than this since the side's quote last changed (0 = off)" },
+  { key: "peakAt", secret: "FADEBOT_TRADER_PEAK_AT", kind: "num", unit: "¢", example: "70", meaning: "peak then dip: after a call, the side must reach this first (0 = off)" },
+  { key: "peakBuy", secret: "FADEBOT_TRADER_PEAK_BUY", kind: "num", unit: "¢", example: "33", meaning: "peak then dip: then buy it at market when it falls to this or less" },
   { key: "skipJevPct", secret: "FADEBOT_TRADER_SKIP_JEV_PCT", kind: "range", unit: "% ranges", example: "50-55,61-70", meaning: "stats off: skip calls with Jev's % in these ranges" },
   { key: "invert", secret: "FADEBOT_TRADER_INVERT", kind: "onoff", unit: "on/off", example: "off", meaning: "stats off: buy the side Jev didn't pick" },
   { key: "ban", secret: "FADEBOT_TRADER_BAN", kind: "range", unit: "¢ range", example: "51-99", meaning: "stats off: no buys when Jev's side costs this (blank = off; BAN=on + BAN_MIN/BAN_MAX also work)" },
