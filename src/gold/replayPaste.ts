@@ -53,7 +53,11 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "tpPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: take profit (0 = off)" },
   { key: "slPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: stop loss (0 = off)" },
   { key: "maxEntries", secret: "FADEBOT_TRADER_MAX_ENTRIES", kind: "num", unit: "count", example: "1", meaning: "buys per window (only matters after a sell)" },
+  { key: "sizing", secret: null, kind: "choice", unit: "pct | martingale | fibonacci", example: "pct", meaning: "REPLAY ONLY: how bets are sized (pct = bet % of balance, the live rule)" },
   { key: "betPct", secret: "FADEBOT_TRADER_BET_PCT", kind: "num", unit: "% of balance", example: "7", meaning: "bet size" },
+  { key: "baseBet", secret: null, kind: "num", unit: "$", example: "20", meaning: "REPLAY ONLY: martingale/fibonacci starting bet (blank = bet % of the start)" },
+  { key: "mgMult", secret: null, kind: "num", unit: "×", example: "2", meaning: "REPLAY ONLY: martingale multiplier after a loss" },
+  { key: "resetAfter", secret: null, kind: "num", unit: "count", example: "0", meaning: "REPLAY ONLY: back to the base bet after this many losses in a row (0 = never)" },
   { key: "dailyLoss", secret: "FADEBOT_TRADER_DAILY_LOSS", kind: "num", unit: "$", example: "900", meaning: "stop for the day after losing this much" },
 ];
 
@@ -171,7 +175,11 @@ export function parsePaste(text: string, base: Record<string, string>): PasteRes
     const spec = PASTE_SPEC.find((f) => f.key === key)!;
     let val: string | null;
     if (spec.kind === "onoff") val = onOff(v);
-    else if (spec.kind === "choice") val = /reask|again/i.test(v) ? "reask" : /skip/i.test(v) ? "skip" : null;
+    else if (spec.kind === "choice") {
+      val = key === "sizing"
+        ? /mart/i.test(v) ? "martingale" : /fib/i.test(v) ? "fibonacci" : /pct|%|percent|balance/i.test(v) ? "pct" : null
+        : /reask|again/i.test(v) ? "reask" : /skip/i.test(v) ? "skip" : null;
+    }
     else if (spec.kind === "num") val = blank(v) ? (key === "dailyLoss" ? "" : "0") : firstNum(v);
     else if (spec.kind === "range") val = blank(v) ? "" : cleanRange(v);
     else val = blank(v) ? "" : v.replace(/\s/g, "");

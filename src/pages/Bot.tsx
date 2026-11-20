@@ -74,7 +74,17 @@ const FIELDS: { group: string; fields: Field[] }[] = [
   {
     group: "Sizing",
     fields: [
+      {
+        key: "sizing",
+        label: "Sizing (replay only)",
+        hint: "replay only",
+        kind: "choice",
+        choices: [["pct", "Bet % of balance"], ["martingale", "Martingale"], ["fibonacci", "Fibonacci"]],
+      },
       { key: "betPct", label: "Bet % of balance", hint: "FADEBOT_TRADER_BET_PCT" },
+      { key: "baseBet", label: "Base bet ($, blank = bet % of start)", hint: "replay only: martingale / fibonacci" },
+      { key: "mgMult", label: "Martingale × after a loss", hint: "replay only" },
+      { key: "resetAfter", label: "Reset after losses in a row (0 = never)", hint: "replay only" },
       { key: "dailyLoss", label: "Daily loss limit ($)", hint: "FADEBOT_TRADER_DAILY_LOSS" },
     ],
   },
@@ -119,6 +129,10 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsSlip: c100(t.statsSlip),
     statsCandles: String(t.statsCandles ?? 288),
     betPct: String(t.betPct ?? 5),
+    sizing: "pct",
+    baseBet: "",
+    mgMult: "2",
+    resetAfter: "0",
     maxFill: "0",
     tpPct: "0",
     slPct: "0",
@@ -420,7 +434,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             </div>
           </div>
           <div className="text-xs text-[#8b949e]">
-            {r.betPct}% of balance per trade, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded}{" "}
+            {r.used?.sizing && r.used.sizing !== "pct"
+              ? `${r.used.sizing === "martingale" ? `Martingale ×${r.used.mgMult}` : "Fibonacci"} from a $${r.used.baseBet} base${
+                r.used.resetAfter ? `, reset after ${r.used.resetAfter} losses` : ""
+              } (biggest bet $${tt.maxStake ?? "—"})`
+              : `${r.betPct}% of balance per trade`}, paid quote + {Math.round(r.gap * 100)}¢. Both traded {tt.bothTraded}{" "}
             windows; same side in {tt.sameSide}.
             {tt.cappedBuys
               ? ` Max fill price: ${tt.cappedBuys} calls would have filled above it and asked again.`

@@ -2085,6 +2085,19 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   // the bot asks again, like a capped order that misses.
   const maxFill = Math.min(99, Math.max(0, Number(over.maxFill) || 0)) / 100;
   let cappedN = 0;
+  // Sizing (replay only): "pct" = BET_PCT % of the balance (the live rule); "martingale" = base × mult^losses in a
+  // row, back to base after a win; "fibonacci" = base × 1,1,2,3,5,8… — a loss steps up one, a win steps back two.
+  // resetAfter > 0: back to the base after that many losses in a row. A stake never exceeds the balance.
+  const sizing = over.sizing === "martingale" || over.sizing === "fibonacci" ? String(over.sizing) : "pct";
+  const baseBet = Number(over.baseBet) > 0 ? Number(over.baseBet) : Math.max(1, startBal * (tc.betPct > 0 ? tc.betPct / 100 : 0.05));
+  const mgMult = Number(over.mgMult) > 1 ? Number(over.mgMult) : 2;
+  const resetAfter = Math.max(0, Math.round(Number(over.resetAfter) || 0));
+  const fib = (n: number) => {
+    let a = 1, b = 1;
+    for (let i = 0; i < n; i++) [a, b] = [b, a + b];
+    return a;
+  };
+  let step = 0, maxStake = 0;
   const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
   if (exitsOn) {
     const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
@@ -2198,7 +2211,9 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       if (!pick || windowOver) break;
       entries++;
       const price = Math.min(0.99, pick.cost + gap);
-      const stake = Math.max(1, Math.floor(bal * pct * 100) / 100);
+      const want = sizing === "martingale" ? baseBet * mgMult ** step : sizing === "fibonacci" ? baseBet * fib(step) : bal * pct;
+      const stake = Math.max(1, Math.floor(Math.min(want, bal) * 100) / 100);
+      maxStake = Math.max(maxStake, stake);
       // Take profit / stop loss on the side's sell price (1 − the other side's cost), as % of the price paid.
       let exit: { at: number; px: number; why: "take profit" | "stop loss" } | null = null;
       let worstGap = 0, lastT = at;
@@ -2237,6 +2252,11 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         pnl = stake * perDollar(price, ok, 0.095);
       }
       bal += pnl;
+      if (pnl > 0) step = sizing === "fibonacci" ? Math.max(0, step - 2) : 0;
+      else {
+        step++;
+        if (resetAfter > 0 && step >= resetAfter) step = 0;
+      }
       dm.trades++;
       if (ok) dm.won++;
       dm.pnl += pnl;
@@ -2321,6 +2341,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       dailyLoss: tc.dailyLoss,
       maxEntries: tc.maxEntries,
       maxFill: Math.round(maxFill * 100),
+      sizing,
+      baseBet: Math.round(baseBet * 100) / 100,
+      mgMult,
+      resetAfter,
       tpPct: Math.round(tpPct * 100),
       slPct: Math.round(slPct * 100),
     },
@@ -2334,6 +2358,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       worstStreak,
       blocked15,
       cappedBuys: cappedN,
+      maxStake: Math.round(maxStake * 100) / 100,
       takeProfits: tpN,
       stopLosses: slN,
       patchyExits: patchyN,

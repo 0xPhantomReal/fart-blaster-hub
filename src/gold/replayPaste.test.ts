@@ -54,3 +54,14 @@ describe("replay paste", () => {
     expect(pasteReference()).toContain("FADEBOT_TRADER_STATS_SKIP_RANGES");
   });
 });
+
+describe("replay paste: sizing", () => {
+  it("reads the sizing choice and its numbers", () => {
+    const r = parsePaste("SIZING=Martingale\nBASE_BET=$20\nMG_MULT=2.5\nRESET_AFTER=4", base);
+    expect(r.form.sizing).toBe("martingale");
+    expect(r.form.baseBet).toBe("20");
+    expect(r.form.mgMult).toBe("2.5");
+    expect(r.form.resetAfter).toBe("4");
+    expect(parsePaste("sizing: fib", base).form.sizing).toBe("fibonacci");
+  });
+});
