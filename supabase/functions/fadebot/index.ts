@@ -73,6 +73,7 @@ import {
   marketPick,
   parseAgeRules,
   parseSecRange,
+  quoteAge,
   streak15Block,
 } from "../_shared/marketPick.ts";
 import { atrByTime, bodySd, flipState, greenFromFlip, type Candle } from "../_shared/flipState.ts";
@@ -1894,7 +1895,7 @@ async function loadStatsData(from: number, to: number) {
     ref: a.ref === null ? null : Number(a.ref),
     action: a.action ?? null,
   }));
-  return { asks, winnerOf, refFallback, btcFallback };
+  return { asks, winnerOf, refFallback, btcFallback, per };
 }
 
 /**
@@ -1966,6 +1967,105 @@ function marketCfg(tc: {
     skipRanges: tc.skipRanges,
     swap: tc.swap,
     swapRanges: tc.swapRanges,
+  };
+}
+
+/**
+ * The conditions around one replay buy, for the losing-streak explorer. Everything comes from data the bot had at
+ * that moment (no hindsight): time, call, prices, quote age, BTC movement, recent windows, stats' reasoning.
+ * Dollar moves are signed toward the side bought (+ = BTC moving its way).
+ */
+function tradeFeatures(x: {
+  w: number;
+  at: number;
+  side: Side;
+  jev: Side;
+  pJev: number;
+  cost: number;
+  buyA: AskRow;
+  buyDist: number | null;
+  quoteHist: { at: number; up: number; down: number }[];
+  asksW: AskRow[];
+  note: string;
+  stats: StatsDecision | null;
+  callsBefore: number;
+  otherCalls: number;
+  lossesBefore: number;
+  lastTradeAt: number | null;
+  per: Map<number, { avg: number; last: number; n: number }>;
+  winnerOf: (w: number) => Side | null;
+  btcFallback: (w: number, at: number) => number | null;
+}) {
+  const dir = x.side === "up" ? 1 : -1;
+  const r1 = (v: number | null) => (v === null || !Number.isFinite(v) ? null : Math.round(v));
+  const btcAt = (a: AskRow) => a.btc ?? x.btcFallback(x.w, a.at);
+  const tz = { timeZone: "America/New_York" } as const;
+  const d = new Date(x.w * 1000);
+  const hour = Number(d.toLocaleString("en-US", { ...tz, hour: "numeric", hour12: false })) % 24;
+  const weekday = d.toLocaleDateString("en-US", { ...tz, weekday: "short" });
+  // quote age and BTC move while the quote sat unchanged
+  const age = quoteAge(x.quoteHist, { at: x.at, cost: x.cost }, x.side);
+  const t0 = x.at - age;
+  const atT0 = x.asksW.find((a) => a.at >= t0 - 0.5);
+  const btcNow = btcAt(x.buyA);
+  const btc0 = atT0 ? btcAt(atT0) : null;
+  const staleMove = btcNow !== null && btc0 !== null ? Math.abs(btcNow - btc0) : null;
+  // BTC range inside the window so far
+  const sofar = x.asksW.filter((a) => a.at <= x.at).map(btcAt).filter((v): v is number => v !== null);
+  const winRange = sofar.length ? Math.max(...sofar) - Math.min(...sofar) : null;
+  // BTC before the window (minute averages): change over 15 / 60 min toward the side, and the 30-min range
+  const avg = (t: number) => x.per.get(t)?.avg ?? null;
+  const a0 = avg(x.w - 60), a15 = avg(x.w - 960), a60 = avg(x.w - 3660);
+  const mins30 = Array.from({ length: 30 }, (_, i) => avg(x.w - 60 * (i + 1))).filter((v): v is number => v !== null);
+  // last 3 windows: how many went the way of the side bought
+  const last3 = [1, 2, 3].map((k) => x.winnerOf(x.w - k * TF));
+  const known3 = last3.filter((v) => v !== null);
+  // the last 15-minute candles (BRTI rule): how many in a row match the side bought (negative = against it)
+  const ps = Math.floor(x.w / TF15) * TF15;
+  let run15 = 0;
+  for (let k = 1; k <= 6; k++) {
+    const a = avg(ps - k * TF15 - 60), b = avg(ps - (k - 1) * TF15 - 60);
+    if (a === null || b === null) break;
+    const res: Side = winner(a, b);
+    if (k === 1) run15 = res === x.side ? 1 : -1;
+    else if ((res === x.side) === run15 > 0) run15 += run15 > 0 ? 1 : -1;
+    else break;
+  }
+  const bias = x.note.match(/bias (?:up|down) at (\d+) s/);
+  const conf = x.note.match(/confirmed at (\d+) s/);
+  const flips = x.note.match(/bias flipped (\d+)/);
+  const st = x.stats;
+  const chosenPer = st ? (x.side === x.jev ? st.withPer : st.againstPer) : null;
+  return {
+    hour,
+    weekday,
+    at: Math.round(x.at),
+    jevPct: Math.round(x.pJev * 100),
+    withJev: x.side === x.jev,
+    side: x.side,
+    quote: Math.round(x.cost * 100),
+    swapped: /swapped/.test(x.note),
+    quoteAge: age,
+    staleMove: r1(staleMove),
+    distSide: r1(x.buyDist === null ? null : (x.side === x.jev ? 1 : -1) * x.buyDist),
+    winRange: r1(winRange),
+    prev15: r1(a0 !== null && a15 !== null ? dir * (a0 - a15) : null),
+    prev60: r1(a0 !== null && a60 !== null ? dir * (a0 - a60) : null),
+    range30: r1(mins30.length >= 10 ? Math.max(...mins30) - Math.min(...mins30) : null),
+    last3With: known3.length === 3 ? known3.filter((v) => v === x.side).length : null,
+    run15,
+    overround: Math.round((x.buyA.upCost + x.buyA.downCost - 1) * 100),
+    biasAt: bias ? Number(bias[1]) : null,
+    confirmAt: conf ? Number(conf[1]) : null,
+    flips: flips ? Number(flips[1]) : 0,
+    callsBefore: x.callsBefore,
+    otherCalls: x.otherCalls,
+    lossesBefore: x.lossesBefore,
+    minsSinceLast: x.lastTradeAt === null ? null : Math.round((x.w + x.at - x.lastTradeAt) / 60),
+    statsLevel: st?.level ?? null,
+    statsN: st?.n ?? null,
+    jevRight: st?.jevRight === null || st?.jevRight === undefined ? null : Math.round(st.jevRight * 100),
+    expPer: chosenPer === null || chosenPer === undefined ? null : Math.round(chosenPer * 100),
   };
 }
 
@@ -2098,6 +2198,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     return a;
   };
   let step = 0, maxStake = 0;
+  let lastTradeAt: number | null = null;
   const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
   if (exitsOn) {
     const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
@@ -2153,6 +2254,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     while (entries < Math.max(1, tc.maxEntries)) {
       let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
       let windowOver = false;
+      let buyA: AskRow | null = null, buyDist: number | null = null, callsBefore = 0, otherCalls = 0;
       for (; idx < asksW.length; idx++) {
         const a = asksW[idx];
         // While holding, the live bot doesn't ask Jev, so those asks don't exist for it.
@@ -2205,6 +2307,10 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         at = a.at;
         jev = d.buy;
         pJev = d.p;
+        buyA = a;
+        buyDist = dist;
+        callsBefore = earlier.length;
+        otherCalls = earlier.filter((e) => e.pick !== d.buy).length;
         idx++;
         break;
       }
@@ -2214,6 +2320,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       const want = sizing === "martingale" ? baseBet * mgMult ** step : sizing === "fibonacci" ? baseBet * fib(step) : bal * pct;
       const stake = Math.max(1, Math.floor(Math.min(want, bal) * 100) / 100);
       maxStake = Math.max(maxStake, stake);
+      const streakBefore = streak;
       // Take profit / stop loss on the side's sell price (1 − the other side's cost), as % of the price paid.
       let exit: { at: number; px: number; why: "take profit" | "stop loss" } | null = null;
       let worstGap = 0, lastT = at;
@@ -2271,6 +2378,29 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       }
       peak = Math.max(peak, bal);
       worstDrop = Math.min(worstDrop, bal / peak - 1);
+      // Conditions at the buy, for the losing-streak explorer (all from data the bot had at that moment).
+      const feat = tradeFeatures({
+        w,
+        at,
+        side: pick.side,
+        jev,
+        pJev,
+        cost: pick.cost,
+        buyA: buyA!,
+        buyDist,
+        quoteHist,
+        asksW,
+        note: pick.note,
+        stats: pick.stats,
+        callsBefore,
+        otherCalls,
+        lossesBefore: streakBefore,
+        lastTradeAt,
+        per: data.per,
+        winnerOf: data.winnerOf,
+        btcFallback: data.btcFallback,
+      });
+      lastTradeAt = w + at;
       const r = entries === 1 ? realBy.get(w) : undefined;
       if (r) {
         compared++;
@@ -2295,6 +2425,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
           : null,
         entry: entries,
         patchy,
+        f: feat,
         note: `${pick.stats ? `${pick.stats.bands}: ${pick.stats.why}` : ""}${pick.note}`.trim(),
         real: r ? { side: r.side, paid: Math.round(r.price * 100), result: r.result, pnl: r.pnl } : null,
       });

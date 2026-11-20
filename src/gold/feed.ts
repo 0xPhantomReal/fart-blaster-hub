@@ -1108,6 +1108,8 @@ export type StatsReplayTrade = {
   entry?: number;
   /** The recorded prices after the buy had a gap of more than 20 s (TP/SL less reliable). */
   patchy?: boolean;
+  /** Conditions at the buy (time, prices, quote age, BTC moves, recent windows, stats), for the streak explorer. */
+  f?: Record<string, number | string | boolean | null>;
 };
 export type StatsReplay = {
   days: number;

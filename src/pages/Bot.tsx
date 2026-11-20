@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { FadeBotPanel } from "@/gold/FadeBotPanel";
 import { fadeBotStatus, type FadeBotStatus, fetchReplay, type StatsReplay } from "@/gold/feed";
 import { parsePaste, type PasteResult, pasteReference, toPaste } from "@/gold/replayPaste";
+import { StreakExplorer } from "@/gold/StreakExplorer";
 
 /** /bot — just the Polymarket bot: balance, today's result and the bot panel. No chart. */
 const money = (x: number | null | undefined) =>
@@ -198,6 +199,7 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
   const [r, setR] = useState<StatsReplay | null | undefined>(undefined);
   const [showTrades, setShowTrades] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
+  const [showStreaks, setShowStreaks] = useState(false);
   const [showPaste, setShowPaste] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasted, setPasted] = useState<PasteResult | null>(null);
@@ -422,10 +424,19 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                 {tt.trades} / {tt.won}{tt.trades ? ` (${Math.round((tt.won / tt.trades) * 100)}%)` : ""}
               </div>
             </div>
-            <div>
+            <button
+              className="text-left"
+              title="Open the losing streaks"
+              onClick={() => {
+                setShowStreaks(true);
+                setTimeout(() => document.getElementById("streaks")?.scrollIntoView({ behavior: "smooth" }), 50);
+              }}
+            >
               <div className="text-xs text-[#8b949e]">Worst drop / losing streak</div>
-              <div className="tabular-nums font-medium">{tt.worstDrop}% / {tt.worstStreak}</div>
-            </div>
+              <div className="tabular-nums font-medium text-[#58a6ff] underline decoration-dotted">
+                {tt.worstDrop}% / {tt.worstStreak}
+              </div>
+            </button>
             <div>
               <div className="text-xs text-[#8b949e]">Real bot, same days</div>
               <div className={`tabular-nums font-medium ${tone(tt.realPnl)}`}>
@@ -470,6 +481,14 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
           <button className="text-xs text-[#58a6ff]" onClick={() => setShowTrades((x) => !x)}>
             {showTrades ? "Hide trades" : `Show trades (${r.trades.length})`}
           </button>
+          <button className="ml-4 text-xs text-[#58a6ff]" onClick={() => setShowStreaks((x) => !x)}>
+            {showStreaks ? "Hide losing streaks" : "Losing streaks & patterns"}
+          </button>
+          {showStreaks && (
+            <div id="streaks">
+              <StreakExplorer trades={r.trades} />
+            </div>
+          )}
           {showTrades && (
             <div className="max-h-96 overflow-auto">
               <table className="w-full text-xs tabular-nums">
