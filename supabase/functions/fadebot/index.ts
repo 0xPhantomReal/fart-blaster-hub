@@ -337,6 +337,10 @@ const settings = () => ({
     wsMaxAgeSec: Number(env("FADEBOT_WS_MAX_AGE_SEC") || 3),
     limitPrice: Number(env("FADEBOT_TRADER_LIMIT_PRICE") || 33) / 100,
     limitShares: Number(env("FADEBOT_TRADER_LIMIT_SHARES") || 15),
+    // Limit mode sizing (FADEBOT_TRADER_LIMIT_PCT, % of balance): when set, each limit order is for that % of the
+    // balance at the limit price (shares = balance × % ÷ limit price, whole shares, at least 1), and the
+    // already-under-the-limit market buy bets the same dollars. Unset / 0 = the fixed FADEBOT_TRADER_LIMIT_SHARES.
+    limitPct: Math.max(0, Number(env("FADEBOT_TRADER_LIMIT_PCT") || 0)),
     // Limit mode: when the side already costs less than the limit, buy FADEBOT_TRADER_CHEAP_BET dollars ($1) at market
     // instead of placing the limit order.
     cheapBet: Number(env("FADEBOT_TRADER_CHEAP_BET") || 1),
@@ -2665,6 +2669,7 @@ async function traderRun(start: number, minute: number, until: number) {
     formMin: number;
     limitPrice: number;
     limitShares: number;
+    limitPct: number;
     cheapBet: number;
   } = cfg.trader;
   const live = cfg.mode === "live" && tc.live;
@@ -3252,16 +3257,24 @@ async function traderRun(start: number, minute: number, until: number) {
           if (tc.order === "limit") {
             // 15 shares at 33¢ (or what's set), good until the window ends; filled shares are tracked as they come.
             const lp = tc.limitPrice;
-            const n = tc.limitShares;
+            // Size: FADEBOT_TRADER_LIMIT_PCT % of the balance at the limit price, else the fixed share count.
+            let n = tc.limitShares, cheapBet = tc.cheapBet, sizeNote = "";
+            if (tc.limitPct > 0) {
+              const bal = await traderBalance(live, tc.bankroll);
+              const dollars = Math.floor(bal * tc.limitPct) / 100;
+              n = Math.max(1, Math.floor(dollars / lp));
+              cheapBet = Math.max(1, dollars);
+              sizeNote = ` (${tc.limitPct}% of $${bal.toFixed(2)})`;
+            }
             const sideNow = side === "up" ? q.upCost : q.downCost;
             if (sideNow !== null && sideNow < lp - 1e-9) {
-              // Already under the limit: buy $1 (FADEBOT_TRADER_CHEAP_BET) at market instead.
-              let shares = tc.cheapBet / sideNow;
+              // Already under the limit: buy at market instead ($1 FADEBOT_TRADER_CHEAP_BET, or the LIMIT_PCT dollars).
+              let shares = cheapBet / sideNow;
               let price = sideNow;
               let fees = 0;
               let orderId: string | null = null;
               if (live) {
-                const f = await marketBuy(market, side, tc.cheapBet);
+                const f = await marketBuy(market, side, cheapBet);
                 if (!f.shares) throw new Error("market buy filled nothing");
                 shares = f.shares;
                 price = f.price;
@@ -3270,12 +3283,12 @@ async function traderRun(start: number, minute: number, until: number) {
               }
               await sql`insert into fadebot_trades (window_start, mode, market_slug, long_is, side, stake, shares, price, fees,
                   opened_sec, p_side, order_id, open_ref, reason, order_type)
-                values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${tc.cheapBet}, ${shares}, ${price},
+                values (${start}, ${mode}, ${market.slug}, ${market.longIs}, ${side}, ${cheapBet}, ${shares}, ${price},
                   ${fees}, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
                   ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} already ${Math.round(sideNow * 100)}¢ (under ${
                     Math.round(lp * 100)
-                  }¢) → $${tc.cheapBet} market buy at ${Math.round(nowEl)} s`}, 'market')`;
-              row.did = `${side} under ${Math.round(lp * 100)}¢: bought $${tc.cheapBet} @ ${price.toFixed(2)}`;
+                  }¢) → $${cheapBet} market buy${sizeNote} at ${Math.round(nowEl)} s`}, 'market')`;
+              row.did = `${side} under ${Math.round(lp * 100)}¢: bought $${cheapBet}${sizeNote} @ ${price.toFixed(2)}`;
               await logAsk(row);
               continue;
             }
@@ -3287,8 +3300,8 @@ async function traderRun(start: number, minute: number, until: number) {
                 ${instant ? sideNow : lp}, 0, ${nowEl}, ${pSide}, ${orderId}, ${before?.avg ?? null},
                 ${`Jev ${Math.round(d.p * 100)}% for ${d.buy}, ${side} costs ${
                   sideNow === null ? "—" : `${Math.round(sideNow * 100)}¢`
-                } → limit ${n} @ ${Math.round(lp * 100)}¢ at ${Math.round(nowEl)} s`}, 'limit', ${lp}, ${n})`;
-            row.did = `limit ${n} ${side} @ ${Math.round(lp * 100)}¢${instant ? " (filled)" : ""}`;
+                } → limit ${n} @ ${Math.round(lp * 100)}¢${sizeNote} at ${Math.round(nowEl)} s`}, 'limit', ${lp}, ${n})`;
+            row.did = `limit ${n} ${side} @ ${Math.round(lp * 100)}¢${sizeNote}${instant ? " (filled)" : ""}`;
             await logAsk(row);
             continue;
           }
