@@ -26,4 +26,12 @@ describe("losing streak explorer", () => {
     expect(analyse(T, 2).streaks.length).toBe(1);
     expect(analyse(T, 1).streaks.length).toBe(2);
   });
+  it("finds winning streaks the same way", () => {
+    const T = [tr(0, true, {}), tr(1, true, {}), tr(2, false, {}), tr(3, true, {}), tr(4, true, {}), tr(5, true, {})];
+    const w = analyse(T, 2, "win");
+    expect(w.streaks.map((s) => s.length)).toEqual([2, 3]);
+    expect(w.inS.size).toBe(5);
+    expect(analyse(T, 3, "win").streaks.length).toBe(1);
+    expect(analyse(T, 2, "loss").streaks.length).toBe(0);
+  });
 });

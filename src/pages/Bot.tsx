@@ -208,6 +208,7 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
   const [showTrades, setShowTrades] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
   const [showStreaks, setShowStreaks] = useState(false);
+  const [streakKind, setStreakKind] = useState<"loss" | "win">("loss");
   const [showPaste, setShowPaste] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasted, setPasted] = useState<PasteResult | null>(null);
@@ -426,16 +427,25 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
                 {money(tt.startBal)} → {money(tt.endBal)}
               </div>
             </div>
-            <div>
+            <button
+              className="text-left"
+              title="Open the winning streaks"
+              onClick={() => {
+                setStreakKind("win");
+                setShowStreaks(true);
+                setTimeout(() => document.getElementById("streaks")?.scrollIntoView({ behavior: "smooth" }), 50);
+              }}
+            >
               <div className="text-xs text-[#8b949e]">Trades / won</div>
-              <div className="tabular-nums font-medium">
+              <div className="tabular-nums font-medium text-[#58a6ff] underline decoration-dotted">
                 {tt.trades} / {tt.won}{tt.trades ? ` (${Math.round((tt.won / tt.trades) * 100)}%)` : ""}
               </div>
-            </div>
+            </button>
             <button
               className="text-left"
               title="Open the losing streaks"
               onClick={() => {
+                setStreakKind("loss");
                 setShowStreaks(true);
                 setTimeout(() => document.getElementById("streaks")?.scrollIntoView({ behavior: "smooth" }), 50);
               }}
@@ -495,11 +505,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             {showTrades ? "Hide trades" : `Show trades (${r.trades.length})`}
           </button>
           <button className="ml-4 text-xs text-[#58a6ff]" onClick={() => setShowStreaks((x) => !x)}>
-            {showStreaks ? "Hide losing streaks" : "Losing streaks & patterns"}
+            {showStreaks ? "Hide streaks" : "Streaks & patterns"}
           </button>
           {showStreaks && (
             <div id="streaks">
-              <StreakExplorer trades={r.trades} />
+              <StreakExplorer key={streakKind} trades={r.trades} initialKind={streakKind} />
             </div>
           )}
           {showTrades && (

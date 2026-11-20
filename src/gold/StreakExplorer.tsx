@@ -2,8 +2,8 @@ import { useMemo, useState } from "react";
 import type { StatsReplayTrade } from "@/gold/feed";
 
 /**
- * Losing-streak explorer for the /bot replay: lists the losing streaks, opens each one with the conditions around
- * every trade, and compares every condition across streak trades vs all trades so patterns stand out.
+ * Streak explorer for the /bot replay: lists the losing (or winning) streaks, opens each one with the conditions
+ * around every trade, and compares every condition across streak trades vs all trades so patterns stand out.
  * The conditions (trade.f) are measured at the moment of the buy by the bot's replay — no hindsight.
  */
 
@@ -62,12 +62,14 @@ const when = (w: number) =>
 
 type Row = { feature: string; bucket: string; n: number; won: number; pnl: number; inStreak: number; lift: number };
 
-export function analyse(trades: StatsReplayTrade[], minLen: number) {
+export type StreakKind = "loss" | "win";
+
+export function analyse(trades: StatsReplayTrade[], minLen: number, kind: StreakKind = "loss") {
   const T = [...trades].sort((a, b) => a.window - b.window || a.at - b.at);
   const streaks: StatsReplayTrade[][] = [];
   let cur: StatsReplayTrade[] = [];
   for (const t of T) {
-    if (!t.won) cur.push(t);
+    if (t.won === (kind === "win")) cur.push(t);
     else {
       if (cur.length >= minLen) streaks.push(cur);
       cur = [];
@@ -111,11 +113,28 @@ function toCsv(T: StatsReplayTrade[], inS: Set<string>) {
   return [head.join(","), ...lines].join("\n");
 }
 
-export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
+export function StreakExplorer({ trades, initialKind = "loss" }: { trades: StatsReplayTrade[]; initialKind?: StreakKind }) {
+  const [kind, setKind] = useState<StreakKind>(initialKind);
   const [minLen, setMinLen] = useState(3);
   const [open, setOpen] = useState<number | null>(null);
   const [feature, setFeature] = useState<string>("");
-  const { T, streaks, inS, rows } = useMemo(() => analyse(trades, minLen), [trades, minLen]);
+  const { T, streaks, inS, rows } = useMemo(() => analyse(trades, minLen, kind), [trades, minLen, kind]);
+  const win = kind === "win";
+  const word = win ? "wins" : "losses";
+  const longest = useMemo(() => {
+    const out = { loss: 0, win: 0 };
+    let run = 0, last: boolean | null = null;
+    for (const t of [...trades].sort((a, b) => a.window - b.window || a.at - b.at)) {
+      run = t.won === last ? run + 1 : 1;
+      last = t.won;
+      if (t.won) out.win = Math.max(out.win, run);
+      else out.loss = Math.max(out.loss, run);
+    }
+    return out;
+  }, [trades]);
+  // over-represented in this kind of streak: red for losing streaks, green for winning ones
+  const hot = win ? "text-[#26a69a]" : "text-[#ef5350]";
+  const cold = win ? "text-[#ef5350]" : "text-[#26a69a]";
   const hasF = T.some((t) => t.f);
   const signals = rows.filter((r) => r.n >= 4 && r.inStreak >= 2).sort((a, b) => b.lift - a.lift).slice(0, 12);
   const worst = rows.filter((r) => r.n >= 4).sort((a, b) => a.pnl - b.pnl).slice(0, 10);
@@ -127,7 +146,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
     const blob = new Blob([toCsv(T, inS)], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "replay-trades-with-conditions.csv";
+    a.download = `replay-trades-with-conditions-${win ? "win" : "loss"}-streaks.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -140,7 +159,9 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
           <th className="text-right">Trades</th>
           <th className="text-right">Won</th>
           <th className="text-right">P&L</th>
-          <th className="text-right" title="Trades in this group that were part of a losing streak">In streaks</th>
+          <th className="text-right" title={`Trades in this group that were part of a ${win ? "winning" : "losing"} streak`}>
+            In streaks
+          </th>
           <th className="text-right" title="How much more common this is in streak trades than in all trades (1.0 = no difference)">Lift</th>
         </tr>
       </thead>
@@ -153,7 +174,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
             <td className="text-right">{Math.round((r.won / r.n) * 100)}%</td>
             <td className={`text-right ${r.pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}`}>{signed(Math.round(r.pnl))}</td>
             <td className="text-right">{r.inStreak}</td>
-            <td className={`text-right ${r.lift >= 1.5 ? "text-[#ef5350]" : r.lift <= 0.5 && r.n >= 4 ? "text-[#26a69a]" : ""}`}>
+            <td className={`text-right ${r.lift >= 1.5 ? hot : r.lift <= 0.5 && r.n >= 4 ? cold : ""}`}>
               {r.lift.toFixed(1)}×
             </td>
           </tr>
@@ -164,7 +185,22 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
   return (
     <div className="space-y-4 rounded border border-[#30363d] p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="font-semibold">Losing streaks &amp; patterns</div>
+        <div className="flex items-center gap-1">
+          {(["loss", "win"] as const).map((k) => (
+            <button
+              key={k}
+              className={`rounded px-2 py-1 text-xs font-semibold ${
+                kind === k ? (k === "win" ? "bg-[#238636] text-white" : "bg-[#da3633] text-white") : "border border-[#30363d] text-[#8b949e]"
+              }`}
+              onClick={() => {
+                setKind(k);
+                setOpen(null);
+              }}
+            >
+              {k === "win" ? `Winning streaks (best ${longest.win})` : `Losing streaks (worst ${longest.loss})`}
+            </button>
+          ))}
+        </div>
         <div className="flex items-center gap-2 text-xs text-[#8b949e]">
           Streak = at least
           <select
@@ -177,7 +213,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
           >
             {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
-          losses in a row
+          {word} in a row
           <button className="text-[#58a6ff]" onClick={download}>Download CSV</button>
         </div>
       </div>
@@ -186,7 +222,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
       )}
       <div className="space-y-1">
         <div className="text-xs text-[#8b949e]">
-          {streaks.length} streak{streaks.length === 1 ? "" : "s"} of {minLen}+ losses ({inS.size} of {T.length} trades). Tap one to
+          {streaks.length} streak{streaks.length === 1 ? "" : "s"} of {minLen}+ {word} ({inS.size} of {T.length} trades). Tap one to
           see every trade in it.
         </div>
         {streaks.map((s, i) => {
@@ -195,9 +231,9 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
             <div key={i} className="rounded bg-[#0e1116]">
               <button className="flex w-full justify-between px-2 py-1.5 text-left text-xs" onClick={() => setOpen(open === i ? null : i)}>
                 <span>
-                  {when(s[0].window)} → {when(s[s.length - 1].window)} · <b>{s.length} losses</b>
+                  {when(s[0].window)} → {when(s[s.length - 1].window)} · <b>{s.length} {word}</b>
                 </span>
-                <span className="text-[#ef5350]">{signed(Math.round(pnl))}</span>
+                <span className={pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}>{signed(Math.round(pnl))}</span>
               </button>
               {open === i && (
                 <div className="overflow-auto px-2 pb-2">
@@ -228,7 +264,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
                             <td className="pr-2">{f.run15 ?? "—"}</td>
                             <td className="pr-2">{f.confirmAt ?? "—"} s</td>
                             <td className="pr-2">{f.jevRight ?? "—"}% of {f.statsN ?? "—"}, {f.expPer ?? "—"}¢</td>
-                            <td className="text-[#ef5350]">{signed(Math.round(t.pnl))}</td>
+                            <td className={t.pnl >= 0 ? "text-[#26a69a]" : "text-[#ef5350]"}>{signed(Math.round(t.pnl))}</td>
                           </tr>
                         );
                       })}
@@ -243,7 +279,9 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
       {hasF && T.length > 0 && (
         <>
           <div>
-            <div className="mb-1 text-xs font-semibold text-[#8b949e]">Most over-represented in losing streaks (lift)</div>
+            <div className="mb-1 text-xs font-semibold text-[#8b949e]">
+              Most over-represented in {win ? "winning" : "losing"} streaks (lift)
+            </div>
             {signals.length ? table(signals) : <p className="text-xs text-[#8b949e]">No condition shows up in 2+ streak trades yet.</p>}
           </div>
           <div className="grid gap-3 lg:grid-cols-2">
@@ -271,7 +309,7 @@ export function StreakExplorer({ trades }: { trades: StatsReplayTrade[] }) {
             {feature && table(shown, false)}
           </div>
           <p className="text-[11px] text-[#8b949e]">
-            Lift 2.0× = twice as common in streak trades as overall. Faded rows have under 4 trades. With this few trades,
+            Lift 2.0× = twice as common in {win ? "winning" : "losing"}-streak trades as overall. Faded rows have under 4 trades. With this few trades,
             many "patterns" are chance: check that a pattern holds on a different week (another replay or export) before
             turning it into a rule. Dollar moves are signed toward the side bought (+ = BTC moving its way).
           </p>
