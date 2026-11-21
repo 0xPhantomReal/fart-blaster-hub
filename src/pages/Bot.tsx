@@ -73,7 +73,15 @@ const FIELDS: { group: string; fields: Field[] }[] = [
   {
     group: "Fills & exits (replay only)",
     fields: [
-      { key: "maxFill", label: "Max fill price (¢, 0 = off)", hint: "replay only: buys that would fill above this ask again" },
+      {
+        key: "order",
+        label: "Order type",
+        hint: "FADEBOT_TRADER_ORDER",
+        kind: "choice",
+        choices: [["market", "Market"], ["limit", "Limit"]],
+      },
+      { key: "limitPrice", label: "Limit price (¢)", hint: "FADEBOT_TRADER_LIMIT_PRICE" },
+      { key: "maxFill", label: "Max fill price (¢, 0 = off; market only)", hint: "replay only: buys that would fill above this ask again" },
 
       { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
       { key: "slPct", label: "Stop loss (% of price paid, 0 = off)", hint: "replay only" },
@@ -139,7 +147,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     statsMinN: String(t.statsMinN ?? 15),
     statsSlip: c100(t.statsSlip),
     statsCandles: String(t.statsCandles ?? 288),
-    betPct: String(t.betPct ?? 5),
+    betPct: String(t.order === "limit" && t.limitPct ? t.limitPct : t.betPct ?? 5),
     sizing: "pct",
     scoreTiers: "0-2:1;3-4:2;5-6:3;7:4;8-9:5",
     scoreMin: "0",
@@ -147,6 +155,8 @@ function fromLive(t: TraderSettings): Record<string, string> {
     mgMult: "2",
     resetAfter: "0",
     maxFill: "0",
+    order: t.order === "limit" ? "limit" : "market",
+    limitPrice: c100(t.limitPrice ?? 0.33),
     minStaleMove: String(t.minStaleMove ?? 0),
     peakAt: String(Math.round((t.peakAt ?? 0) * 100)),
     peakBuy: String(Math.round((t.peakBuy ?? 0.33) * 100)),
@@ -164,7 +174,11 @@ function toReplay(f: Record<string, string>): Record<string, string> {
 function secretsFor(f: Record<string, string>): string[] {
   const out: string[] = [];
   const put = (k: string, v: string) => out.push(`${k}=${v}`);
-  put("FADEBOT_TRADER_ORDER", "market");
+  put("FADEBOT_TRADER_ORDER", f.order === "limit" ? "limit" : "market");
+  if (f.order === "limit") {
+    put("FADEBOT_TRADER_LIMIT_PRICE", f.limitPrice || "33");
+    put("FADEBOT_TRADER_LIMIT_PCT", f.betPct);
+  }
   put("FADEBOT_TRADER_EDGE", f.edge);
   put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
   put("FADEBOT_TRADER_CONFIRM_SEC", f.confirmSec || "0");
@@ -488,6 +502,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
               : ""}
             {r.used?.peakAt
               ? ` Peak then dip (${r.used.peakAt}¢ → ${r.used.peakBuy}¢): ${tt.peakMissed ?? 0} calls never dipped after peaking, so no trade.`
+              : ""}
+            {r.used?.order === "limit"
+              ? ` Limit orders at ${r.used.limitPrice}¢: ${tt.limitFilled ?? 0} filled (the ask came down to ${r.used.limitPrice}¢), ${
+                tt.limitMissed ?? 0
+              } never filled (no trade), ${tt.limitCheap ?? 0} were already under ${r.used.limitPrice}¢ so bought at market.`
               : ""}
             {tt.staleSkipped || tt.staleUnknown
               ? ` Stale-move filter: ${tt.staleSkipped ?? 0} calls skipped (BTC moved under $${r.used?.minStaleMove}${

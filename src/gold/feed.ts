@@ -1133,6 +1133,9 @@ export type StatsReplay = {
     worstStreak: number;
     cappedBuys?: number;
     peakMissed?: number;
+    limitFilled?: number;
+    limitMissed?: number;
+    limitCheap?: number;
     scoreSkipped?: number;
     staleSkipped?: number;
     staleUnknown?: number;

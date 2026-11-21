@@ -2155,7 +2155,9 @@ function replaySettings(o: Record<string, unknown>) {
   set("betPct", num("betPct", 0.1, 100));
   set("dailyLoss", num("dailyLoss", 1, 1e9));
   set("maxEntries", num("maxEntries", 1, 20));
-  tc.order = "market";
+  // Order type: market buys, or a limit at LIMIT_PRICE that only fills if the side's ask comes down to it.
+  tc.order = o.order === "limit" ? "limit" : o.order === "market" ? "market" : tc.order === "limit" ? "limit" : "market";
+  if (num("limitPrice", 1, 99) !== undefined) tc.limitPrice = num("limitPrice", 1, 99)! / 100;
   return tc;
 }
 
@@ -2219,7 +2221,13 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   const tpPct = Math.max(0, Number(over.tpPct) || 0) / 100;
   const slPct = Math.min(100, Math.max(0, Number(over.slPct) || 0)) / 100;
   const exitsOn = tpPct > 0 || slPct > 0;
-  const peakOn = tc.peakAt > 0;
+  // Limit mode: the same decision, then a limit at LIMIT_PRICE. It fills (at the limit) only if the side's recorded
+  // ask comes down to the limit before the window ends; unfilled = no trade, costs nothing. If the side is already
+  // under the limit at the call, the live bot market-buys instead (quote + gap), and so does the replay.
+  const limitOn = tc.order === "limit";
+  const lp = tc.limitPrice;
+  let limitFillN = 0, limitMissN = 0, limitCheapN = 0;
+  const peakOn = tc.peakAt > 0 && !limitOn; // peak-then-dip runs in market mode only (as live)
   let peakMissN = 0;
   let tpN = 0, slN = 0, patchyN = 0;
   // Maximum fill price (replay only; cents, 0 = off): a buy that would fill above it (quote + gap) doesn't fill and
@@ -2250,7 +2258,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   let step = 0, maxStake = 0;
   let lastTradeAt: number | null = null;
   const pathBy = new Map<number, { at: number; up: number | null; down: number | null }[]>();
-  if (exitsOn || peakOn) {
+  if (exitsOn || peakOn || limitOn) {
     const rowsP = await db()`select window_start, pts from fadebot_path where window_start >= ${from} and window_start < ${to}`
       .catch(() => []);
     for (const r of rowsP) {
@@ -2299,7 +2307,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
     const earlier: { at: number; pick: Side }[] = [];
     const quoteHist: { at: number; up: number; down: number; btc: number | null }[] = [];
     // Every recorded price in this window (asks + the per-second path), for take profit / stop loss.
-    const prices = exitsOn || peakOn ? pricesOf(w, asksW) : [];
+    const prices = exitsOn || peakOn || limitOn ? pricesOf(w, asksW) : [];
     let idx = 0, entries = 0, resumeAt = -1;
     while (entries < Math.max(1, tc.maxEntries)) {
       let pick: Extract<MarketPick, { kind: "buy" }> | null = null, at = 0, jev: Side = "up", pJev = 0.5;
@@ -2353,7 +2361,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
           windowOver = true;
           break;
         }
-        if (maxFill > 0 && Math.min(0.99, mp.cost + gap) > maxFill + 1e-9) {
+        if (!limitOn && maxFill > 0 && Math.min(0.99, mp.cost + gap) > maxFill + 1e-9) {
           cappedN++;
           continue;
         }
@@ -2382,8 +2390,32 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       // Peak-then-dip (FADEBOT_TRADER_PEAK_AT / PEAK_BUY): the call starts a watch on its side; buy only after it has
       // been at PEAK_AT+ and then falls to PEAK_BUY or less, using the recorded prices. No dip → no trade this window
       // (live, a watch ends the window's asking too).
-      let entryAt = at, entryCost = pick.cost, peakPatchy = false;
-      if (peakOn) {
+      let entryAt = at, entryCost = pick.cost, peakPatchy = false, limitFill: number | null = null;
+      if (limitOn) {
+        if (pick.cost < lp - 1e-9) limitCheapN++; // already under the limit: market buy now, like live
+        else {
+          let lastT = at, found = false;
+          for (const pt of prices) {
+            if (pt.at <= at) continue;
+            if (pt.at - lastT > 20) peakPatchy = true;
+            lastT = pt.at;
+            const c = pick.side === "up" ? pt.up : pt.down;
+            if (c === null || !(c > 0 && c < 1)) continue;
+            if (c <= lp + 1e-9) {
+              entryAt = pt.at;
+              entryCost = c;
+              limitFill = lp;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            limitMissN++;
+            break; // the limit sat unfilled to the end: no trade this window
+          }
+          limitFillN++;
+        }
+      } else if (peakOn) {
         let peaked = pick.cost >= tc.peakAt - 1e-9, lastT = at, found = false;
         for (const pt of prices) {
           if (pt.at <= at) continue;
@@ -2407,7 +2439,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
         }
       }
       entries++;
-      const price = Math.min(0.99, entryCost + gap);
+      const price = limitFill !== null ? limitFill : Math.min(0.99, entryCost + gap);
       const want = sizing === "martingale" ? baseBet * mgMult ** step
         : sizing === "fibonacci" ? baseBet * fib(step)
         : sizing === "score" ? bal * scorePct(buyScore, tiers) / 100
@@ -2571,6 +2603,8 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       maxFill: Math.round(maxFill * 100),
       peakAt: Math.round(tc.peakAt * 100),
       peakBuy: Math.round(tc.peakBuy * 100),
+      order: tc.order,
+      limitPrice: Math.round(lp * 100),
       minStaleMove: tc.minStaleMove,
       sizing,
       scoreTiers: tiers.map((t) => `${t.lo}${t.hi !== t.lo ? `-${t.hi}` : ""}:${t.pct}`).join(";"),
@@ -2592,6 +2626,9 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       blocked15,
       cappedBuys: cappedN,
       peakMissed: peakMissN,
+      limitFilled: limitFillN,
+      limitMissed: limitMissN,
+      limitCheap: limitCheapN,
       scoreSkipped: scoreSkipN,
       staleSkipped: staleSkipN,
       staleUnknown: staleUnknownN,

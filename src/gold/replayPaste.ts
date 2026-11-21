@@ -52,6 +52,8 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "statsMinN", secret: "FADEBOT_TRADER_STATS_MIN_N", kind: "num", unit: "count", example: "15", meaning: "stats: minimum past calls in a bucket" },
   { key: "statsSlip", secret: "FADEBOT_TRADER_STATS_SLIP", kind: "num", unit: "¢", example: "9", meaning: "stats: assumed fill gap when scoring" },
   { key: "statsCandles", secret: "FADEBOT_TRADER_STATS_CANDLES", kind: "num", unit: "windows", example: "288", meaning: "stats: history length (288 = 24 h)" },
+  { key: "order", secret: "FADEBOT_TRADER_ORDER", kind: "choice", unit: "market | limit", example: "limit", meaning: "market buys, or a limit at limitPrice that fills only if the side's ask comes down to it (else no trade)" },
+  { key: "limitPrice", secret: "FADEBOT_TRADER_LIMIT_PRICE", kind: "num", unit: "¢", example: "33", meaning: "limit mode: the limit order's price" },
   { key: "maxFill", secret: null, kind: "num", unit: "¢", example: "0", meaning: "REPLAY ONLY: buys that would fill above this (quote + gap) don't fill; asks again (0 = off)" },
   { key: "tpPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: take profit (0 = off)" },
   { key: "slPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: stop loss (0 = off)" },
@@ -184,6 +186,8 @@ export function parsePaste(text: string, base: Record<string, string>): PasteRes
       val = key === "sizing"
         ? /mart/i.test(v) ? "martingale" : /fib/i.test(v) ? "fibonacci" : /score/i.test(v) ? "score"
         : /pct|%|percent|balance/i.test(v) ? "pct" : null
+        : key === "order"
+        ? /limit/i.test(v) ? "limit" : /market/i.test(v) ? "market" : null
         : /reask|again/i.test(v) ? "reask" : /skip/i.test(v) ? "skip" : null;
     }
     else if (spec.kind === "num") val = blank(v) ? (key === "dailyLoss" ? "" : "0") : firstNum(v);
