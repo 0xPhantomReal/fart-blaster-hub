@@ -5,7 +5,7 @@
 
 const URL_ = () => Deno.env.get("TYPESAFE_URL") || "https://api.typesafe.ai/v1/systemone";
 
-async function ask(state: Record<string, unknown>, questions: Record<string, unknown>) {
+export async function ask(state: Record<string, unknown>, questions: Record<string, unknown>) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 25000);
   try {

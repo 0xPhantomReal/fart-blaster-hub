@@ -119,6 +119,20 @@ import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
+import { askJevPump } from "../_shared/jevPump.ts";
+import {
+  type BtcCtx,
+  feePerShare,
+  MarketTape,
+  type PumpFeatures,
+  type TapePoint,
+  type TapeTrade,
+  pumpCandidate,
+  pumpExit,
+  pumpFeatures,
+  walkBuy,
+  walkSell,
+} from "../_shared/pumpCore.ts";
 import { autoReplay } from "../_shared/autoReplay.ts";
 import { depthDollars, type LongshotCfg, longshotDecision, settleProbability } from "../_shared/longshot.ts";
 
@@ -4324,11 +4338,448 @@ async function regimeExport(days: number) {
   };
 }
 
+// ── Pump bot (action "pump", its own cron) ─────────────────────────────
+// Buys a cheap side (ask under PUMP_MAX_ASK) when Jev, given the live order book, trade flow, volatility and time
+// left, thinks it can double before falling to half; sells at +PUMP_TP %, −PUMP_SL % or PUMP_EXIT_SEC before the
+// end. Runs beside the other strategies, with its own tables (pump_*), secrets (PUMP_*) and page (/pump). It only
+// ever sells the shares it bought, so it can't touch the main bot's position in the same market.
+
+function pumpSettings() {
+  const n = (k: string, d: number) => {
+    const v = Number(env(k));
+    return env(k) !== "" && Number.isFinite(v) ? v : d;
+  };
+  return {
+    on: env("PUMP_ON") !== "0",
+    live: env("PUMP_MODE") === "live",
+    bet: Math.max(1, n("PUMP_BET", 1)),
+    maxAsk: Math.min(0.99, n("PUMP_MAX_ASK", 30) / 100),
+    minAsk: Math.max(0.01, n("PUMP_MIN_ASK", 2) / 100),
+    tp: Math.max(0.01, n("PUMP_TP", 100) / 100),
+    sl: Math.min(0.99, Math.max(0.01, n("PUMP_SL", 50) / 100)),
+    exitSec: Math.max(1, n("PUMP_EXIT_SEC", 10)),
+    minLeft: Math.max(0, n("PUMP_MIN_LEFT", 45)),
+    jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
+    minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
+    slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
+    maxTrades: Math.max(1, Math.round(n("PUMP_MAX_TRADES", 1))),
+    dailyLoss: Math.max(1, n("PUMP_DAILY_LOSS", 20)),
+  };
+}
+
+let pumpReady = false;
+async function setupPump() {
+  if (pumpReady) return;
+  const sql = db();
+  await sql`create table if not exists pump_trades (
+    id bigserial primary key, window_start bigint not null, mode text not null, market_slug text not null,
+    long_is text not null, side text not null, stake double precision not null, shares double precision not null,
+    price double precision not null, fees double precision default 0, opened_sec double precision, p_pump double precision,
+    order_id text, status text not null default 'open', sold_shares double precision default 0,
+    proceeds double precision default 0, exit_fees double precision default 0, exit_price double precision,
+    exit_sec double precision, exit_why text, result text, pnl double precision, reason text, features jsonb,
+    opened_at timestamptz default now(), closed_at timestamptz)`;
+  await sql`create table if not exists pump_log (
+    id bigserial primary key, window_start bigint, at_sec double precision, side text, ask double precision,
+    bid double precision, p_pump double precision, choice text, did text, features jsonb, created_at timestamptz default now())`;
+  await sql`create table if not exists pump_kv (k text primary key, v jsonb, at timestamptz default now())`;
+  for (const t of ["pump_trades", "pump_log", "pump_kv"]) await sql.unsafe(`alter table ${t} enable row level security`);
+  pumpReady = true;
+}
+
+/** Sell exactly `shares` of `side` (immediate-or-cancel at any price), never the whole position in the market. */
+async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expect: number) {
+  const yes = side === m.longIs;
+  const order = (q: number) =>
+    pm().orders.create({
+      marketSlug: m.slug,
+      intent: yes ? "ORDER_INTENT_SELL_LONG" : "ORDER_INTENT_SELL_SHORT",
+      type: "ORDER_TYPE_LIMIT",
+      // Prices are YES prices: selling YES at 1¢ or better; selling NO = buying YES back at up to 99¢.
+      price: { value: yes ? "0.01" : "0.99", currency: "USD" },
+      quantity: q,
+      tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+      manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+      synchronousExecution: true,
+      maxBlockTime: "5",
+    });
+  let r;
+  try {
+    r = await order(shares);
+  } catch (e) {
+    // Whole shares only, if fractional quantities are refused.
+    if (Math.floor(shares) >= 1 && Math.floor(shares) !== shares) r = await order(Math.floor(shares));
+    else throw e;
+  }
+  let sold = 0, notional = 0, fees = 0;
+  for (const x of r.executions ?? []) {
+    const q = Number(x.lastShares ?? 0);
+    if (q > 0) {
+      sold += q;
+      notional += q * Number(x.lastPx?.value ?? 0);
+    }
+    fees += Number(x.commissionNotionalCollected?.value ?? 0);
+  }
+  let price = sold ? notional / sold : 0;
+  if (sold && !yes && Math.abs(1 - price - expect) < Math.abs(price - expect)) price = 1 - price;
+  return { id: r.id, sold, price, fees };
+}
+
+/** Pump trades left open past their window (a sale that never went through): settle on the result. */
+async function pumpSettle() {
+  const sql = db();
+  const now = Math.floor(Date.now() / 1000);
+  const open = await sql`select * from pump_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
+  for (const t of open) {
+    const won = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
+    if (!won) {
+      if (now > Number(t.window_start) + TF + 3600) {
+        await sql`update pump_trades set status = 'void', result = 'could not settle', closed_at = now() where id = ${t.id}`;
+      }
+      continue;
+    }
+    const left = Math.max(0, Number(t.shares) - Number(t.sold_shares));
+    const pnl = Number(t.proceeds) + left * (won === t.side ? 1 : 0) - Number(t.stake) - Number(t.fees) - Number(t.exit_fees);
+    await sql`update pump_trades set status = 'settled', result = ${won === t.side ? "held: won" : "held: lost"},
+        exit_why = coalesce(exit_why, 'held to settlement'), pnl = ${pnl}, closed_at = now() where id = ${t.id} and status = 'open'`;
+  }
+}
+
+async function pumpToday(mode: string) {
+  const r = await db()`select coalesce(sum(pnl), 0) as p from pump_trades where mode = ${mode} and closed_at >=
+    (date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
+  return Number(r[0]?.p ?? 0);
+}
+
+/** One cron run: watch this minute of the current window over the websocket, until `until`. */
+async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
+  await setup();
+  await setupPump();
+  const sql = db();
+  const pc = pumpSettings();
+  const mode = pc.live ? "live" : "dry";
+  await pumpSettle().catch((e) => console.error("pump settle:", (e as Error).message));
+  if (!pc.on) return "pump bot off (PUMP_ON=0)";
+  // One run at a time (a slow run and the next cron call must not both trade).
+  const nowS = Date.now() / 1000;
+  const lease = await sql`insert into pump_kv (k, v, at) values ('lease', ${sql.json({ until })}, now())
+    on conflict (k) do update set v = excluded.v, at = now()
+    where coalesce((pump_kv.v->>'until')::float, 0) < ${nowS} returning k`;
+  if (!lease.length) return "another pump run is still going";
+  const start = opts.forceStart ?? Math.floor(nowS / TF) * TF;
+  const end = start + TF;
+  const log = (x: Record<string, unknown>) =>
+    sql`insert into pump_log ${sql({ window_start: start, at_sec: Date.now() / 1000 - start, ...x })}`.catch(() => {});
+  const beat = (x: Record<string, unknown>) =>
+    sql`insert into pump_kv (k, v, at) values ('last_run', ${sql.json({ at: Date.now() / 1000, window: start, ...x } as never)}, now())
+      on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
+  let sock: { close(): void } | null = null;
+  const ticks: [number, number][] = [];
+  const btcAbort = { stop: false };
+  try {
+    const market = await findMarket(start);
+    if (!market) {
+      await beat({ did: "no Polymarket market for this window" });
+      return "no market";
+    }
+    const tape = new MarketTape(market.slug, market.longIs);
+    // Carry the last 3 minutes of book history, trades and BTC ticks over from the previous run (each cron run
+    // lasts one minute), so Jev's price trace, flow and volatility don't start empty every minute.
+    const runStart = Date.now();
+    const saved = (await sql`select v from pump_kv where k = 'tape'`)[0]?.v as
+      | { slug: string; hist: TapePoint[]; trades: TapeTrade[]; ticks: [number, number][] }
+      | undefined;
+    if (saved) {
+      const cut = runStart - 180_000;
+      if (saved.slug === market.slug) {
+        tape.hist = (saved.hist ?? []).filter((x) => x.at >= cut);
+        tape.trades = (saved.trades ?? []).filter((x) => x.at >= cut);
+      }
+      for (const t of saved.ticks ?? []) if (t[0] * 1000 >= cut) ticks.push(t);
+    }
+    // Websocket: full book + every trade + best bid/ask. If it can't connect, poll the REST book every second.
+    let via = "websocket";
+    try {
+      const ws = pm().ws.markets() as unknown as {
+        on(e: string, f: (m: Record<string, unknown>) => void): unknown;
+        connect(): Promise<void>;
+        subscribeMarketData(id: string, s: string[]): void;
+        subscribeTrades(id: string, s: string[]): void;
+        subscribeMarketDataLite(id: string, s: string[]): void;
+        close(): void;
+      };
+      ws.on("marketData", (m) => tape.takeBook(m?.marketData as Record<string, unknown>));
+      ws.on("trade", (m) => tape.takeTrade(m?.trade as Record<string, unknown>));
+      ws.on("marketDataLite", (m) => tape.takeLite(m?.marketDataLite as Record<string, unknown>));
+      ws.on("error", () => {});
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        ws.connect(),
+        new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("no connection after 5 s")), 5000))),
+      ]).finally(() => clearTimeout(timer));
+      ws.subscribeMarketData(`pump-book-${start}`, [market.slug]);
+      ws.subscribeTrades(`pump-trades-${start}`, [market.slug]);
+      ws.subscribeMarketDataLite(`pump-lite-${start}`, [market.slug]);
+      sock = ws;
+    } catch (e) {
+      via = `REST book every 1 s (websocket failed: ${((e as Error).message || "").slice(0, 80)})`;
+    }
+    const pollBook = async () => {
+      const b = await yesBook(market.slug);
+      tape.takeBook({
+        marketSlug: market.slug,
+        bids: b.bids.map(([p, q]) => ({ px: p, qty: q })),
+        offers: b.offers.map(([p, q]) => ({ px: p, qty: q })),
+      });
+    };
+    // Seed the book right away (the websocket's first push can take a moment).
+    await pollBook().catch(() => {});
+    // BRTI ticks for bitcoin's distance and volatility, from the gold function's stream.
+    const btcRun = record(until, (t, p) => {
+      if (btcAbort.stop) return;
+      // One tick per second is plenty for distance and volatility; keep 4 minutes.
+      const last = ticks[ticks.length - 1];
+      if (last && Math.floor(last[0]) === Math.floor(t)) last[1] = p;
+      else ticks.push([t, p]);
+      if (ticks.length > 240) ticks.shift();
+    }).catch(() => ({ ticks: [], source: "?" }));
+    let ref = (await period(start - 60))?.avg ?? null;
+    // deno-lint-ignore no-explicit-any
+    let pos: any = (await sql`select * from pump_trades where market_slug = ${market.slug} and status = 'open' order by id desc limit 1`)[0] ??
+      null;
+    let entries = Number((await sql`select count(*)::int as n from pump_trades where window_start = ${start}`)[0].n);
+    let today = await pumpToday(mode);
+    let lastJev = 0, lastRef = Date.now(), lastPoll = 0, lastSellTry = 0, sellErrors = 0, asked = 0;
+    let busy = false;
+    let inflight: Promise<void> | null = null;
+    const cfg = { maxAsk: pc.maxAsk, minAsk: pc.minAsk, tp: pc.tp, sl: pc.sl, exitSec: pc.exitSec, minLeft: pc.minLeft };
+    const did: string[] = [];
+
+    const buy = async (side: Side, f: PumpFeatures, j: { choice: string; pPump: number }) => {
+      const books = tape.books();
+      const ask = books[side].asks[0]?.[0] ?? null;
+      const left = end - Date.now() / 1000;
+      const askedAt = (f.ask_c ?? 0) / 100;
+      if (ask === null || ask >= pc.maxAsk - 1e-9 || ask > askedAt + pc.slip + 1e-9 || left < pc.minLeft) {
+        await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: `Jev said pump (${Math.round(j.pPump * 100)}%) but the ask moved to ${ask === null ? "—" : Math.round(ask * 100) + "¢"} / ${Math.round(left)} s left: no buy` });
+        return;
+      }
+      let shares = 0, price = 0, fees = 0, orderId: string | null = null;
+      if (pc.live) {
+        const r = await marketBuy(market, side, pc.bet);
+        shares = r.shares;
+        price = r.price;
+        fees = r.fees;
+        orderId = r.id ?? null;
+      } else {
+        const w = walkBuy(books[side].asks, pc.bet);
+        if (w) {
+          shares = w.shares;
+          price = w.price;
+          fees = shares * feePerShare(price);
+        }
+      }
+      if (!(shares > 0)) {
+        await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: "buy filled nothing" });
+        return;
+      }
+      const reason = `Jev ${Math.round(j.pPump * 100)}% pump for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
+        ` → $${pc.bet} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
+      pos = (await sql`insert into pump_trades ${sql({
+        window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
+        shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason, features: sql.json(f as never),
+      })} returning *`)[0];
+      entries++;
+      did.push(`bought ${side} @ ${(price * 100).toFixed(1)}¢`);
+      await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: reason });
+    };
+
+    const sell = async (why: string, bid: number) => {
+      const side = pos.side as Side;
+      const left = Math.max(0, Number(pos.shares) - Number(pos.sold_shares));
+      let sold = 0, px = 0, fees = 0;
+      if (pc.live) {
+        try {
+          const r = await pumpSellShares(market, side, left, bid);
+          sold = r.sold;
+          px = r.price;
+          fees = r.fees;
+        } catch (e) {
+          sellErrors++;
+          await log({ side, bid, did: `sell (${why}) failed: ${(e as Error).message.slice(0, 160)}` });
+          // After 3 failures, close the whole position — but only if the main bot holds nothing in this market.
+          if (sellErrors >= 3) {
+            const other = await sql`select 1 from fadebot_trades where market_slug = ${market.slug} and status = 'open' limit 1`;
+            if (!other.length) {
+              const r = await marketSellAll(market, side, bid).catch(() => null);
+              if (r && r.shares) {
+                // Closing the position sold everything in this market, and it was all ours.
+                sold = left;
+                px = r.price;
+                fees = r.fees;
+              }
+            }
+          }
+          if (!sold) return;
+        }
+      } else {
+        const w = walkSell(tape.books()[side].bids, left);
+        sold = w.sold;
+        px = w.price;
+        fees = sold * feePerShare(px);
+      }
+      if (!(sold > 0)) {
+        await log({ side, bid, did: `sell (${why}): nothing filled, trying again` });
+        return;
+      }
+      const soldAll = sold >= left - 1e-6;
+      const proceeds = Number(pos.proceeds) + sold * px;
+      const exitFees = Number(pos.exit_fees) + fees;
+      const sec = Date.now() / 1000 - start;
+      if (soldAll) {
+        const pnl = proceeds - Number(pos.stake) - Number(pos.fees) - exitFees;
+        await sql`update pump_trades set status = 'closed', sold_shares = shares, proceeds = ${proceeds}, exit_fees = ${exitFees},
+            exit_price = ${px}, exit_sec = ${sec}, exit_why = ${why}, result = ${pnl > 0 ? "win" : "loss"}, pnl = ${pnl},
+            closed_at = now() where id = ${pos.id}`;
+        today += pnl;
+        did.push(`${why}: sold @ ${(px * 100).toFixed(1)}¢ (${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)})`);
+        await log({ side, bid, did: `${why}: sold ${sold.toFixed(2)} @ ${(px * 100).toFixed(1)}¢ → ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` });
+        pos = null;
+      } else {
+        await sql`update pump_trades set sold_shares = sold_shares + ${sold}, proceeds = ${proceeds}, exit_fees = ${exitFees},
+            exit_price = ${px}, exit_why = ${why} where id = ${pos.id}`;
+        pos = (await sql`select * from pump_trades where id = ${pos.id}`)[0];
+        await log({ side, bid, did: `${why}: sold ${sold.toFixed(2)} of ${left.toFixed(2)} @ ${(px * 100).toFixed(1)}¢, selling the rest` });
+      }
+    };
+
+    while (Date.now() / 1000 < until - 0.3) {
+      const nowMs = Date.now();
+      const left = end - nowMs / 1000;
+      if (left <= 0.5) break;
+      if (!sock && nowMs - lastPoll >= 1000) {
+        lastPoll = nowMs;
+        await pollBook().catch(() => {});
+      }
+      if (ref === null && nowMs - lastRef > 5000) {
+        lastRef = nowMs;
+        ref = (await period(start - 60))?.avg ?? null;
+      }
+      const books = tape.books();
+      if (pos && !busy) {
+        const side = pos.side as Side;
+        const bid = books[side].bids[0]?.[0] ?? null;
+        const why = pumpExit(Number(pos.price), bid, left, cfg);
+        if (why && bid !== null && nowMs - lastSellTry >= 1500) {
+          lastSellTry = nowMs;
+          busy = true;
+          await sell(why, bid).catch((e) => log({ side, did: `sell error: ${(e as Error).message.slice(0, 160)}` }));
+          busy = false;
+        }
+      } else if (!pos && !busy && !inflight && entries < pc.maxTrades && left >= pc.minLeft && today > -pc.dailyLoss) {
+        const c = pumpCandidate(books, cfg);
+        // Warm up 5 s first: fresh book pushes and BTC ticks before the first question of a run.
+        if (c && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
+          lastJev = nowMs;
+          asked++;
+          const btc: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
+          const f = pumpFeatures(tape, c.side, left, btc, nowMs);
+          inflight = (async () => {
+            try {
+              const recent = await sql`select side, price, exit_why, pnl from pump_trades where mode = ${mode}
+                and status in ('closed', 'settled') order by id desc limit 8`;
+              const j = await askJevPump(f, {
+                our_recent_pump_trades: recent.map((t) => ({
+                  side: t.side, paid_c: Math.round(Number(t.price) * 1000) / 10, exit: t.exit_why, pnl: Math.round(Number(t.pnl) * 100) / 100,
+                })),
+              });
+              if (j.choice === "pump" && j.pPump >= pc.minProb && !pos && entries < pc.maxTrades) {
+                busy = true;
+                await buy(c.side, f, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
+                busy = false;
+              } else {
+                await log({
+                  side: c.side, ask: c.ask, bid: books[c.side].bids[0]?.[0] ?? null, p_pump: j.pPump, choice: j.choice,
+                  did: `Jev ${j.choice} (${Math.round(j.pPump * 100)}% pump; need ${Math.round(pc.minProb * 100)}%): no buy`,
+                  features: sql.json(f as never),
+                });
+              }
+            } catch (e) {
+              await log({ side: c.side, ask: c.ask, did: `Jev error: ${(e as Error).message.slice(0, 160)}` });
+            } finally {
+              inflight = null;
+            }
+          })();
+        }
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (inflight) await Promise.race([inflight, new Promise((r) => setTimeout(r, 3000))]);
+    btcAbort.stop = true;
+    await Promise.race([btcRun, new Promise((r) => setTimeout(r, 1500))]);
+    // Keep each minute's BRTI average so the next window has its price to beat even if the main bot is off.
+    for (let k = Math.floor((start + 0) / 60) * 60; k < until; k += 60) {
+      const ps = ticks.filter(([t]) => t >= k && t < k + 60).map(([, p]) => p);
+      if (ps.length >= 20) {
+        await sql`insert into fadebot_prices (period_start, avg, high, low, last, n, source)
+          values (${k}, ${ps.reduce((a, b) => a + b, 0) / ps.length}, ${Math.max(...ps)}, ${Math.min(...ps)},
+            ${ps[ps.length - 1]}, ${ps.length}, 'pump') on conflict (period_start) do nothing`.catch(() => {});
+      }
+    }
+    await sql`insert into pump_kv (k, v, at) values ('tape', ${sql.json({
+      slug: market.slug, hist: tape.hist, trades: tape.trades, ticks: ticks.slice(-240),
+    } as never)}, now()) on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
+    const summary = `${via}: ${tape.updates} updates, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
+    await beat({ did: summary, via, updates: tape.updates, asked, live: pc.live });
+    await sql`delete from pump_log where created_at < now() - interval '7 days'`.catch(() => {});
+    return summary;
+  } finally {
+    btcAbort.stop = true;
+    try {
+      sock?.close();
+    } catch { /* closed */ }
+    await sql`update pump_kv set v = ${sql.json({ until: 0 })} where k = 'lease'`.catch(() => {});
+  }
+}
+
+/** Read-only: the pump bot's settings, open position, trades, totals and latest decisions. */
+async function pumpStatus() {
+  await setup();
+  await setupPump();
+  const sql = db();
+  const pc = pumpSettings();
+  const mode = pc.live ? "live" : "dry";
+  const [trades, logRows, kv, tot] = await Promise.all([
+    sql`select id, window_start, mode, side, stake, shares, price, fees, opened_sec, p_pump, status, sold_shares, proceeds,
+      exit_fees, exit_price, exit_sec, exit_why, result, pnl, reason, opened_at, closed_at from pump_trades
+      order by id desc limit 80`,
+    sql`select id, window_start, at_sec, side, ask, bid, p_pump, choice, did, created_at from pump_log order by id desc limit 80`,
+    sql`select k, v, at from pump_kv where k in ('last_run')`,
+    sql`select mode, count(*)::int as n, count(*) filter (where pnl > 0)::int as wins, coalesce(sum(pnl), 0) as pnl,
+      count(*) filter (where exit_why = 'take profit')::int as tp, count(*) filter (where exit_why = 'stop loss')::int as sl,
+      count(*) filter (where exit_why = 'time')::int as timed from pump_trades where status in ('closed', 'settled') group by mode`,
+  ]);
+  const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
+  return {
+    settings: { ...pc, maxAsk: Math.round(pc.maxAsk * 100), minAsk: Math.round(pc.minAsk * 100), tp: Math.round(pc.tp * 100),
+      sl: Math.round(pc.sl * 100), minProb: Math.round(pc.minProb * 100), slip: Math.round(pc.slip * 100) },
+    mode,
+    today: await pumpToday(mode),
+    lastRun: kv[0] ? { ...(kv[0].v as Record<string, unknown>) } : null,
+    totals: tot,
+    trades,
+    log: logRows,
+    latestFeatures: latest,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "status") return json(await status());
+    // Read-only: the pump bot's page.
+    if (body?.action === "pump-status") return json(await pumpStatus());
     if (body?.action === "auto-replay") {
       // Read-only: what auto mode would have chosen in past windows vs what the bot traded (up to 7 days).
       return json(await autoReplayReport(Math.min(7, Math.max(1, Number(body.days) || 7))));
@@ -4396,6 +4847,24 @@ Deno.serve(async (req) => {
     }
     const authFailure = authenticateCronRequest(req);
     if (authFailure) return authFailure;
+    if (body?.action === "pump") {
+      // The pump bot's own cron (every minute): watch until 2 s before the minute ends.
+      const now = Date.now() / 1000;
+      const start = Math.floor(now / TF) * TF;
+      const m = Math.floor((now - start) / 60);
+      return json({ ok: true, done: await pumpRun(start + m * 60 + 58) });
+    }
+    if (body?.action === "test-pump" && env("FADEBOT_ALLOW_TEST") === "1") {
+      if (body.reset) {
+        await setup();
+        await setupPump();
+        await db()`delete from pump_trades`;
+        await db()`delete from pump_log`;
+        await db()`delete from pump_kv`;
+      }
+      const done = await pumpRun(Date.now() / 1000 + Number(body.watch ?? 10));
+      return json({ done, status: await pumpStatus() });
+    }
     // Test hook (only with FADEBOT_ALLOW_TEST=1, never set in production): decide the current window now.
     if (body?.action === "test-pmhist" && env("FADEBOT_ALLOW_TEST") === "1") {
       await setup();

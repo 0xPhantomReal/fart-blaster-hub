@@ -631,7 +631,10 @@ const Bot = () => {
     <main className="min-h-screen bg-[#0e1116] px-4 py-6 text-[#c9d1d9]">
       <div className="mx-auto max-w-3xl space-y-4">
         <header className="flex items-baseline justify-between">
-          <h1 className="text-lg font-semibold">Fadebot</h1>
+          <h1 className="text-lg font-semibold">
+            Fadebot{" "}
+            <a href="/pump" className="ml-2 text-xs font-normal text-[#8b949e] underline">Pump bot →</a>
+          </h1>
           <span className="text-xs text-[#8b949e]">
             {at ? `updated ${at.toLocaleTimeString()} · refreshes every 20 s` : "loading…"}
           </span>

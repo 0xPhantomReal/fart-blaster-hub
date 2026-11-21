@@ -1201,3 +1201,75 @@ export async function downloadRegimeData(days = 7): Promise<string | null> {
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
   return null;
 }
+
+/** Pump bot (sub-30¢ +100% / −50% scalper): read-only status. */
+export interface PumpStatus {
+  settings: {
+    on: boolean;
+    live: boolean;
+    bet: number;
+    maxAsk: number;
+    minAsk: number;
+    tp: number;
+    sl: number;
+    exitSec: number;
+    minLeft: number;
+    jevEvery: number;
+    minProb: number;
+    slip: number;
+    maxTrades: number;
+    dailyLoss: number;
+  };
+  mode: "live" | "dry";
+  today: number;
+  lastRun: { at: number; window: number; did: string; via?: string; updates?: number; asked?: number } | null;
+  totals: { mode: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number }[];
+  trades: {
+    id: number;
+    window_start: number;
+    mode: string;
+    side: "up" | "down";
+    stake: number;
+    shares: number;
+    price: number;
+    fees: number;
+    opened_sec: number | null;
+    p_pump: number | null;
+    status: string;
+    exit_price: number | null;
+    exit_sec: number | null;
+    exit_why: string | null;
+    result: string | null;
+    pnl: number | null;
+    reason: string | null;
+    opened_at: string;
+    closed_at: string | null;
+  }[];
+  log: {
+    id: number;
+    window_start: number;
+    at_sec: number;
+    side: string | null;
+    ask: number | null;
+    bid: number | null;
+    p_pump: number | null;
+    choice: string | null;
+    did: string;
+    created_at: string;
+  }[];
+  latestFeatures: Record<string, unknown> | null;
+}
+
+export async function fetchPumpStatus(): Promise<PumpStatus | null> {
+  if (!FN_URL) return null;
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+    },
+    body: JSON.stringify({ action: "pump-status" }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json()) as PumpStatus;
+}
