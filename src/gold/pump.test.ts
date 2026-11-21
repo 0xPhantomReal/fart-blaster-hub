@@ -6,6 +6,7 @@ import {
   pumpCandidate,
   pumpExit,
   pumpFeatures,
+  pumpScore,
   sideBooks,
   walkBuy,
   walkSell,
@@ -90,5 +91,53 @@ describe("pump bot: rules", () => {
     const ticks: [number, number][] = Array.from({ length: 30 }, (_, i) => [100 + i, 50000 + (i % 2 ? 3 : 0)]);
     expect(btcVolPerSec(ticks, 130, 60)).toBeCloseTo(3);
     expect(btcVolPerSec(ticks.slice(0, 5), 130, 60)).toBeNull();
+  });
+});
+
+describe("pump bot: microstructure score", () => {
+  const book = (yesBid: number, yesAsk: number, bidQty = 40, askQty = 30) => ({
+    marketSlug: "m",
+    bids: [{ px: yesBid, qty: bidQty }, { px: yesBid - 0.01, qty: 100 }],
+    offers: [{ px: yesAsk, qty: askQty }, { px: yesAsk + 0.01, qty: 100 }],
+  });
+  const buyDown = (q: number) => ({ marketSlug: "m", price: { value: "0.8" }, quantity: { value: String(q) }, taker: { intent: "ORDER_INTENT_BUY_SHORT" } });
+  const sellDown = (q: number) => ({ marketSlug: "m", price: { value: "0.8" }, quantity: { value: String(q) }, taker: { intent: "ORDER_INTENT_BUY_LONG" } });
+
+  it("is low on a quiet, heavy, falling book with BTC far away", () => {
+    let t = 1_000_000;
+    const tape = new MarketTape("m", "up", () => t);
+    tape.takeBook(book(0.75, 0.77));
+    t += 20_000;
+    tape.takeBook(book(0.79, 0.81, 900, 5)); // down ask falls 25 → 21¢; 900 down shares offered, 5 bid
+    tape.takeTrade(sellDown(50));
+    const ticks: [number, number][] = Array.from({ length: 60 }, (_, i) => [t / 1000 - 60 + i, 100100 + (i % 2)]);
+    const f = pumpFeatures(tape, "down", 100, { price: 100100, ref: 100000, ticks }, t);
+    const sc = pumpScore(f, tape, t);
+    expect(sc.parts.flow).toBe(0);
+    expect(sc.parts.turn).toBe(0);
+    expect(sc.parts.btc).toBe(0);
+    expect(sc.score).toBeLessThan(30);
+  });
+
+  it("is high with buyers speeding up, thin offers, stacked bids, a turn up and BTC close", () => {
+    let t = 1_000_000;
+    const tape = new MarketTape("m", "up", () => t);
+    tape.takeBook(book(0.78, 0.8, 40, 30)); // down ask 22¢
+    t += 12_000;
+    tape.takeBook(book(0.8, 0.82, 30, 30)); // down ask 20¢ (the low)
+    t += 13_000;
+    tape.takeBook(book(0.78, 0.8, 5, 400)); // down ask back to 22¢, down bids (YES offers) 400 deep vs 5 offers
+    tape.takeTrade(buyDown(40));
+    tape.takeTrade(buyDown(30));
+    // BTC $6 under the price to beat (Down is ahead yet cheap) and falling over the last 10 s.
+    const ticks: [number, number][] = Array.from({ length: 60 }, (_, i) => [t / 1000 - 60 + i, 100004 - (i >= 50 ? (i - 49) * 1 : 0) + (i % 2) * 2]);
+    const f = pumpFeatures(tape, "down", 120, { price: 99994, ref: 100000, ticks }, t);
+    const sc = pumpScore(f, tape, t);
+    expect(sc.parts.flow).toBe(20);
+    expect(sc.parts.thin).toBeGreaterThanOrEqual(18); // $24 of offers up to 2×
+    expect(sc.parts.bids).toBeGreaterThanOrEqual(14);
+    expect(sc.parts.turn).toBeGreaterThan(0);
+    expect(sc.parts.btc).toBeGreaterThan(10);
+    expect(sc.score).toBeGreaterThan(70);
   });
 });

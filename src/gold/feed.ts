@@ -1219,8 +1219,26 @@ export interface PumpStatus {
     slip: number;
     maxTrades: number;
     dailyLoss: number;
+    minScore?: number;
+    thin?: string;
   };
   mode: "live" | "dry";
+  /** What the bot sees right now (saved every 2 s while it runs). */
+  live?: {
+    at: number;
+    seconds_left?: number;
+    note?: string;
+    side?: "up" | "down";
+    ask?: number;
+    bid?: number | null;
+    holding?: { side: string; paid: number; bid: number | null };
+    score?: { score: number; parts: Record<string, number>; notes: string[] } | null;
+    features?: {
+      book?: { bids_top10?: [number, number][]; asks_top10?: [number, number][]; offers_up_to_2x?: { usd: number } | null };
+      flow_10s?: { trades: number; buy_shares: number; sell_shares: number };
+      btc?: { vs_price_to_beat: number | null; vol_per_sqrt_sec_60s: number | null; sigmas_to_flip: number | null };
+    } | null;
+  } | null;
   today: number;
   lastRun: { at: number; window: number; did: string; via?: string; updates?: number; asked?: number } | null;
   totals: { mode: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number }[];

@@ -1,8 +1,8 @@
 // Pump bot: one question to Jev (TypeSafe) — can this cheap side double from its ask before the stop or the end?
 import { ask } from "./jevTrader.ts";
-import type { PumpFeatures } from "./pumpCore.ts";
+import type { PumpFeatures, PumpScore } from "./pumpCore.ts";
 
-export async function askJevPump(f: PumpFeatures, extra: Record<string, unknown> = {}) {
+export async function askJevPump(f: PumpFeatures, sc: PumpScore, extra: Record<string, unknown> = {}) {
   const ask_c = f.ask_c ?? 0;
   const q = {
     type: "choice",
@@ -19,13 +19,18 @@ export async function askJevPump(f: PumpFeatures, extra: Record<string, unknown>
       "dollars_against_this_side, recent moves, vol_per_sqrt_sec, sigmas_to_flip = how many typical moves over the " +
       "time left bitcoin is from flipping to this side), and seconds_left. A cheap side doubles when bitcoin swings " +
       "back toward the price to beat or the book gets lifted; it rarely does with little time left, bitcoin far away " +
-      "and quiet, or sellers in control. Be realistic: most cheap sides don't double. Answer pump or no.",
+      "and quiet, or sellers in control. " +
+      `The bot's own microstructure read (microstructure_score) scored this ${sc.score}/100 — flow ${sc.parts.flow}, ` +
+      `thin offers ${sc.parts.thin}, bids stacking ${sc.parts.bids}, price turning ${sc.parts.turn}, bitcoin ` +
+      `${sc.parts.btc} (20 each) — which is why you're being asked; check it against the raw book (bids_top10, ` +
+      "asks_top10) and flow yourself. Be realistic: most cheap sides don't double. Answer pump or no, and give your " +
+      "real probability of pump (the bot buys at its own threshold, not at 50%).",
     criteria: {
       pump: `The bid reaches ${f.target_bid_c}¢ before ${f.stop_bid_c}¢ and before the end`,
       no: "It doesn't",
     },
   };
-  const a = await ask({ ...f, ...extra }, { pump: q });
+  const a = await ask({ ...f, microstructure_score: sc, ...extra }, { pump: q });
   const ans = a.pump;
   if (!ans || (ans.choice !== "pump" && ans.choice !== "no")) throw new Error("unexpected TypeSafe response shape");
   const p = ans.probabilities?.pump;

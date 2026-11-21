@@ -78,6 +78,9 @@ export interface TapePoint {
   upBid: number | null;
   downAsk: number | null;
   downBid: number | null;
+  /** Shares bid within 5¢ of the best bid, per side (for "bids stacking"). */
+  upBidDepth?: number;
+  downBidDepth?: number;
 }
 
 /** The market as the websocket pushes it: latest full book, recent trades, and a price history. */
@@ -143,15 +146,24 @@ export class MarketTape {
 
   private point() {
     const b = this.books();
+    const depth = (bk: SideBook) => {
+      const top = bk.bids[0]?.[0];
+      return top === undefined ? 0 : Math.round(bk.bids.filter(([p]) => p >= top - 0.05 - 1e-9).reduce((a, [, q]) => a + q, 0));
+    };
     const p: TapePoint = {
       at: this.now(),
       upAsk: b.up.asks[0]?.[0] ?? null,
       upBid: b.up.bids[0]?.[0] ?? null,
       downAsk: b.down.asks[0]?.[0] ?? null,
       downBid: b.down.bids[0]?.[0] ?? null,
+      upBidDepth: depth(b.up),
+      downBidDepth: depth(b.down),
     };
     const last = this.hist[this.hist.length - 1];
-    if (last && last.upAsk === p.upAsk && last.upBid === p.upBid && last.downAsk === p.downAsk && last.downBid === p.downBid) {
+    const samePx = last && last.upAsk === p.upAsk && last.upBid === p.upBid && last.downAsk === p.downAsk &&
+      last.downBid === p.downBid;
+    // A new point when a price changes, or depth changes (at most 4 a second).
+    if (last && samePx && (p.at - last.at < 250 || (last.upBidDepth === p.upBidDepth && last.downBidDepth === p.downBidDepth))) {
       return;
     }
     this.hist.push(p);
@@ -269,7 +281,9 @@ export function pumpFeatures(tape: MarketTape, side: Side, secondsLeft: number, 
         askDepth5 && bidDepth5 && askDepth5.shares + bidDepth5.shares > 0
           ? r2(bidDepth5.shares / (askDepth5.shares + bidDepth5.shares))
           : null,
-      levels_shown: { bids: b.bids.slice(0, 6).map(([p, q]) => [Math.round(p * 100), Math.round(q)]), asks: b.asks.slice(0, 6).map(([p, q]) => [Math.round(p * 100), Math.round(q)]) },
+      // This side's book, best first: [price ¢, shares].
+      bids_top10: b.bids.slice(0, 10).map(([p, q]) => [Math.round(p * 1000) / 10, Math.round(q)]),
+      asks_top10: b.asks.slice(0, 10).map(([p, q]) => [Math.round(p * 1000) / 10, Math.round(q)]),
       book_age_ms: tape.bookAt ? nowMs - tape.bookAt : null,
     },
     flow_10s: flow(10),
@@ -327,3 +341,95 @@ export function pumpExit(entry: number, bid: number | null, secondsLeft: number,
   if (secondsLeft <= cfg.exitSec) return "time";
   return null;
 }
+
+export interface ScoreCfg {
+  /** Offers between the ask and 2× (in $): at or under `thinLo` scores full points, at or over `thinHi` none. */
+  thinLo: number;
+  thinHi: number;
+}
+export const DEFAULT_SCORE_CFG: ScoreCfg = { thinLo: 20, thinHi: 300 };
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
+/**
+ * The bot's own read of the microstructure for one side: five signals, 20 points each (0–100).
+ *  flow   — aggressive buying of this side in the last 10 s (share of taker volume) and whether it's speeding up
+ *  thin   — few dollars of offers between the ask and 2× (a small wave of buying lifts it)
+ *  bids   — bid depth outweighing ask depth near the touch, and bid depth growing over the last 20 s
+ *  turn   — the ask lifting off its 30 s low, and a higher low (last 10 s low above the 10–30 s low)
+ *  btc    — bitcoin close enough to flip to this side for its volatility and the time left, and moving toward it
+ */
+export function pumpScore(f: PumpFeatures, tape: MarketTape, nowMs: number, cfg: ScoreCfg = DEFAULT_SCORE_CFG) {
+  const side = f.side;
+  const notes: string[] = [];
+  // flow
+  const f10 = f.flow_10s, f60 = f.flow_60s;
+  let flow = 0;
+  if (f10.trades > 0 && f10.buy_shares + f10.sell_shares > 0) {
+    const share = f10.buy_shares / (f10.buy_shares + f10.sell_shares);
+    const rate10 = f10.buy_shares / 10, rate60 = f60.buy_shares / 60;
+    const accel = rate60 > 0 ? clamp01((rate10 / rate60 - 1) / 2) : f10.buy_shares > 0 ? 1 : 0;
+    flow = clamp01((share - 0.5) / 0.4) * 10 + (share > 0.5 ? accel * 10 : 0);
+    notes.push(`buyers ${Math.round(share * 100)}% of the last 10 s${accel > 0 && share > 0.5 ? `, ${(rate60 > 0 ? rate10 / rate60 : 9).toFixed(1)}× the 60 s pace` : ""}`);
+  } else notes.push("no trades in the last 10 s");
+  // thin offers above
+  let thin = 0;
+  const usd = f.book.offers_up_to_2x?.usd ?? null;
+  if (usd !== null) {
+    thin = 20 * clamp01((Math.log(cfg.thinHi) - Math.log(Math.max(usd, 0.01))) / (Math.log(cfg.thinHi) - Math.log(cfg.thinLo)));
+    notes.push(`$${usd} of offers up to 2×`);
+  }
+  // bids stacking
+  let bids = 0;
+  const imb = f.book.imbalance_bid_share;
+  if (imb !== null) bids += 14 * clamp01((imb - 0.5) / 0.3);
+  const key = side === "up" ? "upBidDepth" : "downBidDepth";
+  const nowD = tape.hist.length ? tape.hist[tape.hist.length - 1][key] ?? null : null;
+  let then: number | null = null;
+  for (const p of tape.hist) {
+    if (p.at > nowMs - 20_000) break;
+    then = p[key] ?? null;
+  }
+  if (nowD !== null && then !== null && then > 0 && nowD >= then * 1.3) {
+    bids += 6;
+    notes.push(`bid depth up ${Math.round((nowD / then - 1) * 100)}% in 20 s`);
+  }
+  if (imb !== null) notes.push(`bids ${Math.round(imb * 100)}% of depth near the touch`);
+  // price turning up
+  let turn = 0;
+  const askKey = side === "up" ? "upAsk" : "downAsk";
+  const win = (a: number, b: number) =>
+    tape.hist.filter((p) => p.at >= nowMs - a * 1000 && p.at < nowMs - b * 1000 && p[askKey] !== null).map((p) => p[askKey] as number);
+  const last30 = win(30, -1), last10 = win(10, -1), prior = win(30, 10);
+  const ask = f.ask_c === null ? null : f.ask_c / 100;
+  if (ask !== null && last30.length) {
+    const low = Math.min(...last30);
+    if (ask > low + 1e-9) {
+      turn += 10 * clamp01((ask / low - 1) / 0.2);
+      notes.push(`ask ${Math.round((ask / low - 1) * 100)}% off its 30 s low`);
+    }
+    if (last10.length && prior.length && Math.min(...last10) > Math.min(...prior) + 1e-9) {
+      turn += 10;
+      notes.push("higher low");
+    }
+  }
+  // bitcoin
+  let btc = 0;
+  const sig = f.btc.sigmas_to_flip;
+  if (sig !== null) {
+    btc += 12 * clamp01((2 - sig) / 1.5);
+    notes.push(`BTC ${sig} typical moves from flipping`);
+  }
+  const vol = f.btc.vol_per_sqrt_sec_20s ?? f.btc.vol_per_sqrt_sec_60s;
+  const m10 = f.btc.move_10s;
+  if (m10 !== null && vol) {
+    const toward = side === "up" ? m10 : -m10;
+    if (toward > 0) {
+      btc += 8 * clamp01(toward / (vol * Math.sqrt(10)));
+      notes.push(`BTC moved $${Math.abs(m10)} toward ${side} in 10 s`);
+    }
+  }
+  const parts = { flow: Math.round(flow), thin: Math.round(thin), bids: Math.round(bids), turn: Math.round(turn), btc: Math.round(btc) };
+  const score = parts.flow + parts.thin + parts.bids + parts.turn + parts.btc;
+  return { score, parts, notes };
+}
+export type PumpScore = ReturnType<typeof pumpScore>;

@@ -27,7 +27,7 @@ const Pump = () => {
         setAt(new Date());
       });
     void load();
-    const id = setInterval(load, 10_000);
+    const id = setInterval(load, 5_000);
     return () => {
       alive = false;
       clearInterval(id);
@@ -48,7 +48,7 @@ const Pump = () => {
           <h1 className="text-lg font-semibold">Pump bot</h1>
           <span className="text-xs text-[#8b949e]">
             <Link to="/bot" className="mr-3 underline">Fadebot</Link>
-            {at ? `updated ${at.toLocaleTimeString()} · every 10 s` : "loading…"}
+            {at ? `updated ${at.toLocaleTimeString()} · every 5 s` : "loading…"}
           </span>
         </header>
 
@@ -59,7 +59,8 @@ const Pump = () => {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
                 {st
-                  ? `Buys a side under ${st.maxAsk}¢ when Jev gives it ${st.minProb}%+ to pump ${st.tp}%, $${st.bet} per trade. ` +
+                  ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC; at ${st.minScore ?? 50}+ it asks Jev, ` +
+                    `and buys $${st.bet} if Jev gives ${st.minProb}%+ to pump ${st.tp}%. ` +
                     `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`
                   : "…"}
               </div>
@@ -107,6 +108,8 @@ const Pump = () => {
             </div>
           </section>
         )}
+
+        <LiveRead s={s} />
 
         <section className={card}>
           <div className="mb-2 flex items-center justify-between">
@@ -195,6 +198,8 @@ const Pump = () => {
               pad(`PUMP_SLIP=${st?.slip ?? 2}`, "skip if the ask rose more than this (¢) while Jev thought"),
               pad(`PUMP_MAX_TRADES=${st?.maxTrades ?? 1}`, "buys per window"),
               pad(`PUMP_DAILY_LOSS=${st?.dailyLoss ?? 20}`, "stop buying for the day after losing this ($)"),
+              pad(`PUMP_MIN_SCORE=${st?.minScore ?? 50}`, "microstructure score (0–100) needed before Jev is asked"),
+              pad(`PUMP_THIN=${st?.thin ?? "20-300"}`, "offers up to 2× ($): at/under the first = thin (full points)"),
               pad(`PUMP_ON=${st?.on === false ? "0" : "1"}`, "0 = off"),
             ].join("\n")}
           </pre>
@@ -205,6 +210,87 @@ const Pump = () => {
         </section>
       </div>
     </main>
+  );
+};
+
+const PART_LABEL: Record<string, string> = {
+  flow: "Buying pressure",
+  thin: "Thin offers above",
+  bids: "Bids stacking",
+  turn: "Price turning up",
+  btc: "BTC vol vs distance",
+};
+
+/** The bot's live read: the cheap side's score, each signal, and the top of its book. */
+const LiveRead = ({ s }: { s: PumpStatus | null | undefined }) => {
+  const lv = s?.live;
+  const age = lv ? Math.round(Date.now() / 1000 - lv.at) : null;
+  const min = s?.settings.minScore ?? 50;
+  const sc = lv?.score;
+  const book = lv?.features?.book;
+  return (
+    <section className={card}>
+      <div className="mb-2 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold">Live read</h2>
+        <span className="text-xs text-[#8b949e]">
+          {lv ? `${age} s ago${lv.seconds_left !== undefined ? ` · ${lv.seconds_left} s left in window` : ""}` : "no data yet"}
+          {age !== null && age > 20 ? " (not running right now)" : ""}
+        </span>
+      </div>
+      {!lv ? (
+        <p className="text-xs text-[#8b949e]">Shows up once the bot runs.</p>
+      ) : lv.holding ? (
+        <p className="text-sm">
+          Holding {lv.holding.side}: paid {c(lv.holding.paid)}, bid now {c(lv.holding.bid)}
+        </p>
+      ) : lv.note ? (
+        <p className="text-sm text-[#8b949e]">Watching: {lv.note}.</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-baseline gap-3">
+            <span className="text-3xl font-semibold tabular-nums">{sc?.score ?? "—"}</span>
+            <span className="text-sm text-[#8b949e]">
+              / 100 for {lv.side} at {c(lv.ask)} (bid {lv.bid ?? "—"}¢) ·{" "}
+              {sc && sc.score >= min ? <span className="text-[#26a69a]">at/above {min}: Jev gets asked</span> : `needs ${min} to ask Jev`}
+            </span>
+          </div>
+          <div className="space-y-1">
+            {Object.keys(PART_LABEL).filter((k) => sc?.parts?.[k] !== undefined).map((k) => [k, sc!.parts[k]] as const).map(([k, v]) => (
+              <div key={k} className="flex items-center gap-2 text-xs">
+                <span className="w-36 text-[#8b949e]">{PART_LABEL[k] ?? k}</span>
+                <div className="h-2 flex-1 rounded bg-[#21262d]">
+                  <div className="h-2 rounded bg-[#58a6ff]" style={{ width: `${(v / 20) * 100}%` }} />
+                </div>
+                <span className="w-10 text-right tabular-nums">{v}/20</span>
+              </div>
+            ))}
+          </div>
+          {sc?.notes?.length ? <p className="text-xs text-[#8b949e]">{sc.notes.join(" · ")}</p> : null}
+          {book?.bids_top10 || book?.asks_top10 ? (
+            <div className="grid grid-cols-2 gap-4 text-xs tabular-nums">
+              <div>
+                <div className="mb-1 text-[#8b949e]">Bids ({lv.side})</div>
+                {(book.bids_top10 ?? []).slice(0, 6).map(([p, q], i) => (
+                  <div key={i} className="flex justify-between text-[#26a69a]">
+                    <span>{p}¢</span>
+                    <span>{q}</span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div className="mb-1 text-[#8b949e]">Offers ({lv.side})</div>
+                {(book.asks_top10 ?? []).slice(0, 6).map(([p, q], i) => (
+                  <div key={i} className="flex justify-between text-[#ef5350]">
+                    <span>{p}¢</span>
+                    <span>{q}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </section>
   );
 };
 

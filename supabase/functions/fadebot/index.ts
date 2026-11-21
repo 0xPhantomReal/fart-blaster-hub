@@ -130,6 +130,9 @@ import {
   pumpCandidate,
   pumpExit,
   pumpFeatures,
+  pumpScore,
+  DEFAULT_SCORE_CFG,
+  type PumpScore,
   walkBuy,
   walkSell,
 } from "../_shared/pumpCore.ts";
@@ -4364,6 +4367,13 @@ function pumpSettings() {
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
     maxTrades: Math.max(1, Math.round(n("PUMP_MAX_TRADES", 1))),
     dailyLoss: Math.max(1, n("PUMP_DAILY_LOSS", 20)),
+    // The bot's own microstructure score (0–100) that must be reached before Jev is asked.
+    minScore: Math.min(100, Math.max(0, n("PUMP_MIN_SCORE", 50))),
+    // Offers between the ask and 2×, in $: "lo-hi" — at or under lo is "thin" (full points), at or over hi none.
+    thin: ((x) => {
+      const m = x.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
+      return m && Number(m[1]) > 0 && Number(m[2]) > Number(m[1]) ? { thinLo: Number(m[1]), thinHi: Number(m[2]) } : DEFAULT_SCORE_CFG;
+    })(env("PUMP_THIN")),
   };
 }
 
@@ -4473,6 +4483,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
   const beat = (x: Record<string, unknown>) =>
     sql`insert into pump_kv (k, v, at) values ('last_run', ${sql.json({ at: Date.now() / 1000, window: start, ...x } as never)}, now())
       on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
+  // What the bot sees right now, for the page (every 2 s).
+  const saveLive = (x: Record<string, unknown>) =>
+    sql`insert into pump_kv (k, v, at) values ('live', ${sql.json({ at: Date.now() / 1000, ...x } as never)}, now())
+      on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
   let sock: { close(): void } | null = null;
   const ticks: [number, number][] = [];
   const btcAbort = { stop: false };
@@ -4549,13 +4563,14 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       null;
     let entries = Number((await sql`select count(*)::int as n from pump_trades where window_start = ${start}`)[0].n);
     let today = await pumpToday(mode);
-    let lastJev = 0, lastRef = Date.now(), lastPoll = 0, lastSellTry = 0, sellErrors = 0, asked = 0;
+    let lastJev = 0, lastRef = Date.now(), lastPoll = 0, lastSellTry = 0, sellErrors = 0, asked = 0, lastLive = 0;
+    let bestScore = 0;
     let busy = false;
     let inflight: Promise<void> | null = null;
     const cfg = { maxAsk: pc.maxAsk, minAsk: pc.minAsk, tp: pc.tp, sl: pc.sl, exitSec: pc.exitSec, minLeft: pc.minLeft };
     const did: string[] = [];
 
-    const buy = async (side: Side, f: PumpFeatures, j: { choice: string; pPump: number }) => {
+    const buy = async (side: Side, f: PumpFeatures, sc: PumpScore, j: { choice: string; pPump: number }) => {
       const books = tape.books();
       const ask = books[side].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
@@ -4583,11 +4598,12 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: "buy filled nothing" });
         return;
       }
-      const reason = `Jev ${Math.round(j.pPump * 100)}% pump for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
+      const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → Jev ${Math.round(j.pPump * 100)}% pump for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
         ` → $${pc.bet} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
       pos = (await sql`insert into pump_trades ${sql({
         window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
-        shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason, features: sql.json(f as never),
+        shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason,
+        features: sql.json({ ...f, score: sc } as never),
       })} returning *`)[0];
       entries++;
       did.push(`bought ${side} @ ${(price * 100).toFixed(1)}¢`);
@@ -4669,6 +4685,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       if (pos && !busy) {
         const side = pos.side as Side;
         const bid = books[side].bids[0]?.[0] ?? null;
+        if (nowMs - lastLive >= 2000) {
+          lastLive = nowMs;
+          saveLive({ holding: { side, paid: Number(pos.price), bid }, seconds_left: Math.round(left) });
+        }
         const why = pumpExit(Number(pos.price), bid, left, cfg);
         if (why && bid !== null && nowMs - lastSellTry >= 1500) {
           lastSellTry = nowMs;
@@ -4678,30 +4698,42 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         }
       } else if (!pos && !busy && !inflight && entries < pc.maxTrades && left >= pc.minLeft && today > -pc.dailyLoss) {
         const c = pumpCandidate(books, cfg);
-        // Warm up 5 s first: fresh book pushes and BTC ticks before the first question of a run.
-        if (c && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
+        // The bot's own read, every loop: features and the microstructure score for the cheap side.
+        const btc: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
+        const f = c ? pumpFeatures(tape, c.side, left, btc, nowMs) : null;
+        const sc: PumpScore | null = f ? pumpScore(f, tape, nowMs, pc.thin) : null;
+        if (sc) bestScore = Math.max(bestScore, sc.score);
+        if (nowMs - lastLive >= 2000) {
+          lastLive = nowMs;
+          saveLive(
+            c && f
+              ? { side: c.side, ask: c.ask, bid: f.bid_c, seconds_left: Math.round(left), score: sc, features: f }
+              : { note: `no side between ${Math.round(pc.minAsk * 100)}¢ and ${Math.round(pc.maxAsk * 100)}¢`, seconds_left: Math.round(left) },
+          );
+        }
+        // Warm up 5 s first (fresh book pushes and BTC ticks), then ask Jev only when the score is high enough.
+        if (c && f && sc && sc.score >= pc.minScore && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
           lastJev = nowMs;
           asked++;
-          const btc: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
-          const f = pumpFeatures(tape, c.side, left, btc, nowMs);
           inflight = (async () => {
             try {
               const recent = await sql`select side, price, exit_why, pnl from pump_trades where mode = ${mode}
                 and status in ('closed', 'settled') order by id desc limit 8`;
-              const j = await askJevPump(f, {
+              const j = await askJevPump(f, sc, {
                 our_recent_pump_trades: recent.map((t) => ({
                   side: t.side, paid_c: Math.round(Number(t.price) * 1000) / 10, exit: t.exit_why, pnl: Math.round(Number(t.pnl) * 100) / 100,
                 })),
               });
-              if (j.choice === "pump" && j.pPump >= pc.minProb && !pos && entries < pc.maxTrades) {
+              // The bar is Jev's pump probability (PUMP_MIN_PROB), not his pump/no pick (which means over 50%).
+              if (j.pPump >= pc.minProb && !pos && entries < pc.maxTrades) {
                 busy = true;
-                await buy(c.side, f, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
+                await buy(c.side, f, sc, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
                 busy = false;
               } else {
                 await log({
                   side: c.side, ask: c.ask, bid: books[c.side].bids[0]?.[0] ?? null, p_pump: j.pPump, choice: j.choice,
-                  did: `Jev ${j.choice} (${Math.round(j.pPump * 100)}% pump; need ${Math.round(pc.minProb * 100)}%): no buy`,
-                  features: sql.json(f as never),
+                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% pump (need ${Math.round(pc.minProb * 100)}%): no buy`,
+                  features: sql.json({ ...f, score: sc } as never),
                 });
               }
             } catch (e) {
@@ -4729,7 +4761,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     await sql`insert into pump_kv (k, v, at) values ('tape', ${sql.json({
       slug: market.slug, hist: tape.hist, trades: tape.trades, ticks: ticks.slice(-240),
     } as never)}, now()) on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
-    const summary = `${via}: ${tape.updates} updates, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
+    const summary = `${via}: ${tape.updates} updates, best score ${bestScore}, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
     await beat({ did: summary, via, updates: tape.updates, asked, live: pc.live });
     await sql`delete from pump_log where created_at < now() - interval '7 days'`.catch(() => {});
     return summary;
@@ -4754,7 +4786,7 @@ async function pumpStatus() {
       exit_fees, exit_price, exit_sec, exit_why, result, pnl, reason, opened_at, closed_at from pump_trades
       order by id desc limit 80`,
     sql`select id, window_start, at_sec, side, ask, bid, p_pump, choice, did, created_at from pump_log order by id desc limit 80`,
-    sql`select k, v, at from pump_kv where k in ('last_run')`,
+    sql`select k, v, at from pump_kv where k in ('last_run', 'live')`,
     sql`select mode, count(*)::int as n, count(*) filter (where pnl > 0)::int as wins, coalesce(sum(pnl), 0) as pnl,
       count(*) filter (where exit_why = 'take profit')::int as tp, count(*) filter (where exit_why = 'stop loss')::int as sl,
       count(*) filter (where exit_why = 'time')::int as timed from pump_trades where status in ('closed', 'settled') group by mode`,
@@ -4762,10 +4794,12 @@ async function pumpStatus() {
   const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
   return {
     settings: { ...pc, maxAsk: Math.round(pc.maxAsk * 100), minAsk: Math.round(pc.minAsk * 100), tp: Math.round(pc.tp * 100),
-      sl: Math.round(pc.sl * 100), minProb: Math.round(pc.minProb * 100), slip: Math.round(pc.slip * 100) },
+      sl: Math.round(pc.sl * 100), minProb: Math.round(pc.minProb * 100), slip: Math.round(pc.slip * 100),
+      thin: `${pc.thin.thinLo}-${pc.thin.thinHi}` },
     mode,
     today: await pumpToday(mode),
-    lastRun: kv[0] ? { ...(kv[0].v as Record<string, unknown>) } : null,
+    lastRun: (kv.find((r) => r.k === "last_run")?.v as Record<string, unknown> | undefined) ?? null,
+    live: (kv.find((r) => r.k === "live")?.v as Record<string, unknown> | undefined) ?? null,
     totals: tot,
     trades,
     log: logRows,
