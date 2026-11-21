@@ -1220,6 +1220,7 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
+    hold?: boolean;
     betPct?: number;
     bankroll?: number;
     autoScore?: number;
@@ -1245,7 +1246,7 @@ export interface PumpStatus {
   } | null;
   today: number;
   lastRun: { at: number; window: number; did: string; via?: string; updates?: number; asked?: number } | null;
-  totals: { mode: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number }[];
+  totals: { mode: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number; held?: number }[];
   trades: {
     id: number;
     window_start: number;

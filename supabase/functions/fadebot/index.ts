@@ -4362,6 +4362,8 @@ function pumpSettings() {
     bankroll: Math.max(1, n("PUMP_BANKROLL", 100)),
     maxAsk: Math.min(0.99, n("PUMP_MAX_ASK", 30) / 100),
     minAsk: Math.max(0.01, n("PUMP_MIN_ASK", 2) / 100),
+    // Hold every buy to resolution: no take profit, stop loss or late sell (PUMP_HOLD=0 brings them back).
+    hold: env("PUMP_HOLD") !== "0",
     tp: Math.max(0.01, n("PUMP_TP", 100) / 100),
     sl: Math.min(0.99, Math.max(0.01, n("PUMP_SL", 50) / 100)),
     exitSec: Math.max(1, n("PUMP_EXIT_SEC", 10)),
@@ -4447,7 +4449,16 @@ async function pumpSettle() {
   const now = Math.floor(Date.now() / 1000);
   const open = await sql`select * from pump_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
   for (const t of open) {
-    const won = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
+    let won: Side | null = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
+    if (!won) {
+      // Like the main bot: fall back to BRTI the way Polymarket settles (last minute's average vs the minute before
+      // the window) — at once in test mode, after 15 minutes live (giving the official result time to arrive).
+      const end = Number(t.window_start) + TF;
+      const [fin, before] = await Promise.all([period(end - 60), period(Number(t.window_start) - 60)]);
+      if (fin && before && fin.n >= 20 && before.n >= 20 && (t.mode === "dry" || now > end + 900)) {
+        won = winner(before.avg, fin.avg);
+      }
+    }
     if (!won) {
       if (now > Number(t.window_start) + TF + 3600) {
         await sql`update pump_trades set status = 'void', result = 'could not settle', closed_at = now() where id = ${t.id}`;
@@ -4631,7 +4642,11 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
         j.pPump === null ? `auto-buy (≥ ${pc.autoScore}, Jev not asked)` : `Jev ${Math.round(j.pPump * 100)}% pump`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
-        ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
+        ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; ${
+          pc.hold
+            ? "holding to resolution"
+            : `target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`
+        }`;
       pos = (await sql`insert into pump_trades ${sql({
         window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
         shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason,
@@ -4721,7 +4736,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           lastLive = nowMs;
           saveLive({ holding: { side, paid: Number(pos.price), bid }, seconds_left: Math.round(left) });
         }
-        const why = pumpExit(Number(pos.price), bid, left, cfg);
+        const why = pc.hold ? null : pumpExit(Number(pos.price), bid, left, cfg);
         if (why && bid !== null && nowMs - lastSellTry >= 1500) {
           lastSellTry = nowMs;
           busy = true;
@@ -4828,7 +4843,8 @@ async function pumpStatus() {
     sql`select k, v, at from pump_kv where k in ('last_run', 'live')`,
     sql`select mode, count(*)::int as n, count(*) filter (where pnl > 0)::int as wins, coalesce(sum(pnl), 0) as pnl,
       count(*) filter (where exit_why = 'take profit')::int as tp, count(*) filter (where exit_why = 'stop loss')::int as sl,
-      count(*) filter (where exit_why = 'time')::int as timed from pump_trades where status in ('closed', 'settled') group by mode`,
+      count(*) filter (where exit_why = 'time')::int as timed,
+      count(*) filter (where exit_why = 'held to settlement')::int as held from pump_trades where status in ('closed', 'settled') group by mode`,
   ]);
   const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
   return {

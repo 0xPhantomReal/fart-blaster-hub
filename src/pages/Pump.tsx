@@ -62,7 +62,9 @@ const Pump = () => {
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
                     `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
                     `${st.autoScore ? `; at ${st.autoScore}+ it buys without asking` : ""}. ` +
-                    `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`
+                    (st.hold
+                      ? "Holds every buy to resolution."
+                      : `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`)
                   : "…"}
               </div>
               <span
@@ -97,15 +99,19 @@ const Pump = () => {
                 </div>
               </div>
               <div>
-                <div className="text-xs text-[#8b949e]">+100% / −50% / time</div>
-                <div className="tabular-nums font-medium">{tot ? `${tot.tp} / ${tot.sl} / ${tot.timed}` : "—"}</div>
+                <div className="text-xs text-[#8b949e]">{st?.hold ? "Held to resolution" : "+100% / −50% / time"}</div>
+                <div className="tabular-nums font-medium">
+                  {!tot ? "—" : st?.hold ? `${tot.held ?? 0}` : `${tot.tp} / ${tot.sl} / ${tot.timed}`}
+                </div>
               </div>
             </div>
             <div className="mt-3 text-xs text-[#8b949e]">
               {open
-                ? `Holding ${open.side === "up" ? "Up" : "Down"}: ${open.shares.toFixed(2)} @ ${c(open.price)} — sells at ${c(
-                  open.price * (1 + (st?.tp ?? 100) / 100),
-                )} or ${c(open.price * (1 - (st?.sl ?? 50) / 100))}`
+                ? `Holding ${open.side === "up" ? "Up" : "Down"}: ${open.shares.toFixed(2)} @ ${c(open.price)} — ${
+                  st?.hold
+                    ? `to resolution (pays $${open.shares.toFixed(2)} if ${open.side} wins)`
+                    : `sells at ${c(open.price * (1 + (st?.tp ?? 100) / 100))} or ${c(open.price * (1 - (st?.sl ?? 50) / 100))}`
+                }`
                 : "No open position"}
               {" · "}
               {s?.lastRun
@@ -198,6 +204,7 @@ const Pump = () => {
               pad(`PUMP_BANKROLL=${st?.bankroll ?? 100}`, "test mode's starting paper balance ($)"),
               pad(`PUMP_MAX_ASK=${st?.maxAsk ?? 30}`, "buy only under this (¢)"),
               pad(`PUMP_MIN_ASK=${st?.minAsk ?? 2}`, "…and at least this (¢)"),
+              pad(`PUMP_HOLD=${st?.hold === false ? "0" : "1"}`, "1 = hold to resolution (no TP/SL/late sell); 0 = use the 3 below"),
               pad(`PUMP_TP=${st?.tp ?? 100}`, "take profit, % of price paid (on the bid)"),
               pad(`PUMP_SL=${st?.sl ?? 50}`, "stop loss, %"),
               pad(`PUMP_EXIT_SEC=${st?.exitSec ?? 10}`, "sell with this many seconds left"),
