@@ -1220,6 +1220,7 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
+    autoScore?: number;
     thin?: string;
   };
   mode: "live" | "dry";

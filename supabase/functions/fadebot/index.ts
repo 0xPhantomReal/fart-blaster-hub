@@ -4369,6 +4369,8 @@ function pumpSettings() {
     dailyLoss: Math.max(1, n("PUMP_DAILY_LOSS", 20)),
     // The bot's own microstructure score (0–100) that must be reached before Jev is asked.
     minScore: Math.min(100, Math.max(0, n("PUMP_MIN_SCORE", 50))),
+    // At or above this score the bot buys without asking Jev (0 = always ask Jev).
+    autoScore: Math.min(100, Math.max(0, n("PUMP_AUTO_SCORE", 60))),
     // Offers between the ask and 2×, in $: "lo-hi" — at or under lo is "thin" (full points), at or over hi none.
     thin: ((x) => {
       const m = x.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
@@ -4570,13 +4572,14 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const cfg = { maxAsk: pc.maxAsk, minAsk: pc.minAsk, tp: pc.tp, sl: pc.sl, exitSec: pc.exitSec, minLeft: pc.minLeft };
     const did: string[] = [];
 
-    const buy = async (side: Side, f: PumpFeatures, sc: PumpScore, j: { choice: string; pPump: number }) => {
+    const buy = async (side: Side, f: PumpFeatures, sc: PumpScore, j: { choice: string; pPump: number | null }) => {
+      const why = j.pPump === null ? `score ${sc.score} ≥ ${pc.autoScore}: bought without asking Jev` : `Jev said pump (${Math.round(j.pPump * 100)}%)`;
       const books = tape.books();
       const ask = books[side].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
       const askedAt = (f.ask_c ?? 0) / 100;
       if (ask === null || ask >= pc.maxAsk - 1e-9 || ask > askedAt + pc.slip + 1e-9 || left < pc.minLeft) {
-        await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: `Jev said pump (${Math.round(j.pPump * 100)}%) but the ask moved to ${ask === null ? "—" : Math.round(ask * 100) + "¢"} / ${Math.round(left)} s left: no buy` });
+        await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: `${why} but the ask moved to ${ask === null ? "—" : Math.round(ask * 100) + "¢"} / ${Math.round(left)} s left: no buy` });
         return;
       }
       let shares = 0, price = 0, fees = 0, orderId: string | null = null;
@@ -4598,7 +4601,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: "buy filled nothing" });
         return;
       }
-      const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → Jev ${Math.round(j.pPump * 100)}% pump for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
+      const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
+        j.pPump === null ? `auto-buy (≥ ${pc.autoScore}, Jev not asked)` : `Jev ${Math.round(j.pPump * 100)}% pump`
+      } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
         ` → $${pc.bet} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
       pos = (await sql`insert into pump_trades ${sql({
         window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
@@ -4711,8 +4716,15 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               : { note: `no side between ${Math.round(pc.minAsk * 100)}¢ and ${Math.round(pc.maxAsk * 100)}¢`, seconds_left: Math.round(left) },
           );
         }
-        // Warm up 5 s first (fresh book pushes and BTC ticks), then ask Jev only when the score is high enough.
-        if (c && f && sc && sc.score >= pc.minScore && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
+        // Score at or above PUMP_AUTO_SCORE: buy now, without asking Jev (after the same 5 s warm-up).
+        if (c && f && sc && pc.autoScore > 0 && sc.score >= pc.autoScore && nowMs - runStart >= 5000) {
+          busy = true;
+          await buy(c.side, f, sc, { choice: "auto", pPump: null }).catch((e) =>
+            log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` })
+          );
+          busy = false;
+        } // Warm up 5 s first (fresh book pushes and BTC ticks), then ask Jev only when the score is high enough.
+        else if (c && f && sc && sc.score >= pc.minScore && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
           lastJev = nowMs;
           asked++;
           inflight = (async () => {
