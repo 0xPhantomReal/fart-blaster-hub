@@ -1220,10 +1220,13 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
+    betPct?: number;
+    bankroll?: number;
     autoScore?: number;
     thin?: string;
   };
   mode: "live" | "dry";
+  balance?: number | null;
   /** What the bot sees right now (saved every 2 s while it runs). */
   live?: {
     at: number;

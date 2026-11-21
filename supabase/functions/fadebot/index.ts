@@ -4356,6 +4356,10 @@ function pumpSettings() {
     on: env("PUMP_ON") !== "0",
     live: env("PUMP_MODE") === "live",
     bet: Math.max(1, n("PUMP_BET", 1)),
+    // % of the balance per trade (0 = off → the fixed PUMP_BET). At least $1.
+    betPct: Math.min(100, Math.max(0, n("PUMP_BET_PCT", 0))),
+    // Test mode's starting paper balance.
+    bankroll: Math.max(1, n("PUMP_BANKROLL", 100)),
     maxAsk: Math.min(0.99, n("PUMP_MAX_ASK", 30) / 100),
     minAsk: Math.max(0.01, n("PUMP_MIN_ASK", 2) / 100),
     tp: Math.max(0.01, n("PUMP_TP", 100) / 100),
@@ -4455,6 +4459,28 @@ async function pumpSettle() {
     await sql`update pump_trades set status = 'settled', result = ${won === t.side ? "held: won" : "held: lost"},
         exit_why = coalesce(exit_why, 'held to settlement'), pnl = ${pnl}, closed_at = now() where id = ${t.id} and status = 'open'`;
   }
+}
+
+/** The balance a % bet is taken from: Polymarket buying power (live), or the paper balance (test mode). */
+async function pumpBalance(live: boolean, bankroll: number): Promise<number> {
+  if (live) {
+    const r = await pm().account.balances();
+    const b = r.balances?.find((x) => (x.currency ?? "USD").toUpperCase() === "USD") ?? r.balances?.[0];
+    if (!b) throw new Error("no Polymarket balance");
+    return Number(b.buyingPower ?? b.currentBalance ?? 0);
+  }
+  const r = await db()`select coalesce(sum(pnl), 0) as p from pump_trades where mode = 'dry' and status in ('closed', 'settled')`;
+  const open = await db()`select coalesce(sum(stake), 0) as s from pump_trades where mode = 'dry' and status = 'open'`;
+  return bankroll + Number(r[0].p) - Number(open[0].s);
+}
+
+/** Dollars for the next buy: PUMP_BET_PCT % of the balance (at least $1), or the fixed PUMP_BET. */
+async function pumpBetSize(pc: ReturnType<typeof pumpSettings>) {
+  if (!(pc.betPct > 0)) return { bet: pc.bet, note: "" };
+  const bal = await pumpBalance(pc.live, pc.bankroll);
+  const bet = Math.floor(Math.max(1, (bal * pc.betPct) / 100) * 100) / 100;
+  if (bet > bal) throw new Error(`balance $${bal.toFixed(2)} is under the $1 minimum bet`);
+  return { bet, note: ` (${pc.betPct}% of $${bal.toFixed(2)})` };
 }
 
 async function pumpToday(mode: string) {
@@ -4583,14 +4609,15 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         return;
       }
       let shares = 0, price = 0, fees = 0, orderId: string | null = null;
+      const { bet, note: betNote } = await pumpBetSize(pc);
       if (pc.live) {
-        const r = await marketBuy(market, side, pc.bet);
+        const r = await marketBuy(market, side, bet);
         shares = r.shares;
         price = r.price;
         fees = r.fees;
         orderId = r.id ?? null;
       } else {
-        const w = walkBuy(books[side].asks, pc.bet);
+        const w = walkBuy(books[side].asks, bet);
         if (w) {
           shares = w.shares;
           price = w.price;
@@ -4604,7 +4631,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
         j.pPump === null ? `auto-buy (≥ ${pc.autoScore}, Jev not asked)` : `Jev ${Math.round(j.pPump * 100)}% pump`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
-        ` → $${pc.bet} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
+        ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`;
       pos = (await sql`insert into pump_trades ${sql({
         window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
         shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason,
@@ -4810,6 +4837,7 @@ async function pumpStatus() {
       thin: `${pc.thin.thinLo}-${pc.thin.thinHi}` },
     mode,
     today: await pumpToday(mode),
+    balance: await pumpBalance(pc.live, pc.bankroll).catch(() => null),
     lastRun: (kv.find((r) => r.k === "last_run")?.v as Record<string, unknown> | undefined) ?? null,
     live: (kv.find((r) => r.k === "live")?.v as Record<string, unknown> | undefined) ?? null,
     totals: tot,

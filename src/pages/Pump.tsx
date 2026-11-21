@@ -60,7 +60,7 @@ const Pump = () => {
               <div className="text-sm">
                 {st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
-                    `and buys $${st.bet} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
+                    `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
                     `${st.autoScore ? `; at ${st.autoScore}+ it buys without asking` : ""}. ` +
                     `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`
                   : "…"}
@@ -73,7 +73,13 @@ const Pump = () => {
                 {st?.on === false ? "OFF" : st?.live ? "LIVE" : "TEST"}
               </span>
             </div>
-            <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
+              <div>
+                <div className="text-xs text-[#8b949e]">{st?.live ? "Polymarket balance" : "Paper balance"}</div>
+                <div className="tabular-nums font-medium">
+                  {s?.balance === null || s?.balance === undefined ? "—" : `$${s.balance.toFixed(2)}`}
+                </div>
+              </div>
               <div>
                 <div className="text-xs text-[#8b949e]">Today</div>
                 <div className={`tabular-nums font-medium ${tone(s?.today)}`}>{signed(s?.today)}</div>
@@ -187,7 +193,9 @@ const Pump = () => {
           <pre className="overflow-auto rounded bg-[#0e1116] p-2">
             {[
               pad(`PUMP_MODE=${st?.live ? "live" : "dry"}`, "live = real orders"),
-              pad(`PUMP_BET=${st?.bet ?? 1}`, "$ per trade"),
+              pad(`PUMP_BET=${st?.bet ?? 1}`, "$ per trade (when PUMP_BET_PCT is 0)"),
+              pad(`PUMP_BET_PCT=${st?.betPct ?? 0}`, "% of balance per trade, at least $1 (0 = use PUMP_BET)"),
+              pad(`PUMP_BANKROLL=${st?.bankroll ?? 100}`, "test mode's starting paper balance ($)"),
               pad(`PUMP_MAX_ASK=${st?.maxAsk ?? 30}`, "buy only under this (¢)"),
               pad(`PUMP_MIN_ASK=${st?.minAsk ?? 2}`, "…and at least this (¢)"),
               pad(`PUMP_TP=${st?.tp ?? 100}`, "take profit, % of price paid (on the bid)"),
