@@ -54,6 +54,7 @@ export const PASTE_SPEC: PasteSpec[] = [
   { key: "statsCandles", secret: "FADEBOT_TRADER_STATS_CANDLES", kind: "num", unit: "windows", example: "288", meaning: "stats: history length (288 = 24 h)" },
   { key: "order", secret: "FADEBOT_TRADER_ORDER", kind: "choice", unit: "market | limit", example: "limit", meaning: "market buys, or a limit at limitPrice that fills only if the side's ask comes down to it (else no trade)" },
   { key: "limitPrice", secret: "FADEBOT_TRADER_LIMIT_PRICE", kind: "num", unit: "¢", example: "33", meaning: "limit mode: the limit order's price" },
+  { key: "limitOffset", secret: null, kind: "num", unit: "¢", example: "10", meaning: "REPLAY ONLY, limit mode: place each limit at the call's quote plus this (0 = use limitPrice)" },
   { key: "maxFill", secret: null, kind: "num", unit: "¢", example: "0", meaning: "REPLAY ONLY: buys that would fill above this (quote + gap) don't fill; asks again (0 = off)" },
   { key: "tpPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: take profit (0 = off)" },
   { key: "slPct", secret: null, kind: "num", unit: "% of price paid", example: "0", meaning: "REPLAY ONLY: stop loss (0 = off)" },

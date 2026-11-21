@@ -2226,7 +2226,11 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
   // under the limit at the call, the live bot market-buys instead (quote + gap), and so does the replay.
   const limitOn = tc.order === "limit";
   const lp = tc.limitPrice;
-  let limitFillN = 0, limitMissN = 0, limitCheapN = 0;
+  let limitFillN = 0, limitMissN = 0, limitCheapN = 0, limitNowN = 0;
+  // Limit at quote + X (replay only; ¢, 0 = off → the fixed LIMIT_PRICE): the limit is the call's quote plus X. The
+  // real ask is taken as quote + gap (as for market buys): if that's within the limit it fills at once at quote + gap;
+  // otherwise the order rests at the limit and fills there once a later recorded ask + gap is within it.
+  const limitOff = limitOn ? Math.min(99, Math.max(0, Number(over.limitOffset) || 0)) / 100 : 0;
   const peakOn = tc.peakAt > 0 && !limitOn; // peak-then-dip runs in market mode only (as live)
   let peakMissN = 0;
   let tpN = 0, slN = 0, patchyN = 0;
@@ -2391,7 +2395,32 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       // been at PEAK_AT+ and then falls to PEAK_BUY or less, using the recorded prices. No dip → no trade this window
       // (live, a watch ends the window's asking too).
       let entryAt = at, entryCost = pick.cost, peakPatchy = false, limitFill: number | null = null;
-      if (limitOn) {
+      if (limitOn && limitOff > 0) {
+        const lim = Math.min(0.99, pick.cost + limitOff);
+        if (pick.cost + gap <= lim + 1e-9) limitNowN++; // marketable: fills now at quote + gap
+        else {
+          let lastT = at, found = false;
+          for (const pt of prices) {
+            if (pt.at <= at) continue;
+            if (pt.at - lastT > 20) peakPatchy = true;
+            lastT = pt.at;
+            const c = pick.side === "up" ? pt.up : pt.down;
+            if (c === null || !(c > 0 && c < 1)) continue;
+            if (c + gap <= lim + 1e-9) {
+              entryAt = pt.at;
+              entryCost = c;
+              limitFill = lim;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            limitMissN++;
+            break;
+          }
+          limitFillN++;
+        }
+      } else if (limitOn) {
         if (pick.cost < lp - 1e-9) limitCheapN++; // already under the limit: market buy now, like live
         else {
           let lastT = at, found = false;
@@ -2605,6 +2634,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       peakBuy: Math.round(tc.peakBuy * 100),
       order: tc.order,
       limitPrice: Math.round(lp * 100),
+      limitOffset: Math.round(limitOff * 100),
       minStaleMove: tc.minStaleMove,
       sizing,
       scoreTiers: tiers.map((t) => `${t.lo}${t.hi !== t.lo ? `-${t.hi}` : ""}:${t.pct}`).join(";"),
@@ -2629,6 +2659,7 @@ async function strategyReplay(days: number, gap: number, startBal: number, over:
       limitFilled: limitFillN,
       limitMissed: limitMissN,
       limitCheap: limitCheapN,
+      limitNow: limitNowN,
       scoreSkipped: scoreSkipN,
       staleSkipped: staleSkipN,
       staleUnknown: staleUnknownN,

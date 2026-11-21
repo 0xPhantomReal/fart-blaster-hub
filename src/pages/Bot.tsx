@@ -81,6 +81,11 @@ const FIELDS: { group: string; fields: Field[] }[] = [
         choices: [["market", "Market"], ["limit", "Limit"]],
       },
       { key: "limitPrice", label: "Limit price (¢)", hint: "FADEBOT_TRADER_LIMIT_PRICE" },
+      {
+        key: "limitOffset",
+        label: "…or limit at quote + (¢, 0 = use the limit price)",
+        hint: "replay only: each limit is the call's quote plus this",
+      },
       { key: "maxFill", label: "Max fill price (¢, 0 = off; market only)", hint: "replay only: buys that would fill above this ask again" },
 
       { key: "tpPct", label: "Take profit (% of price paid, 0 = off)", hint: "replay only" },
@@ -157,6 +162,7 @@ function fromLive(t: TraderSettings): Record<string, string> {
     maxFill: "0",
     order: t.order === "limit" ? "limit" : "market",
     limitPrice: c100(t.limitPrice ?? 0.33),
+    limitOffset: "0",
     minStaleMove: String(t.minStaleMove ?? 0),
     peakAt: String(Math.round((t.peakAt ?? 0) * 100)),
     peakBuy: String(Math.round((t.peakBuy ?? 0.33) * 100)),
@@ -178,6 +184,7 @@ function secretsFor(f: Record<string, string>): string[] {
   if (f.order === "limit") {
     put("FADEBOT_TRADER_LIMIT_PRICE", f.limitPrice || "33");
     put("FADEBOT_TRADER_LIMIT_PCT", f.betPct);
+    if (Number(f.limitOffset) > 0) out.push(`# limit at quote + ${f.limitOffset}¢ is replay only: live uses the fixed limit price`);
   }
   put("FADEBOT_TRADER_EDGE", f.edge);
   put("FADEBOT_TRADER_MIN_SEC", f.minSec || "0");
@@ -503,7 +510,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
             {r.used?.peakAt
               ? ` Peak then dip (${r.used.peakAt}¢ → ${r.used.peakBuy}¢): ${tt.peakMissed ?? 0} calls never dipped after peaking, so no trade.`
               : ""}
-            {r.used?.order === "limit"
+            {r.used?.order === "limit" && Number(r.used.limitOffset) > 0
+              ? ` Limit orders at quote + ${r.used.limitOffset}¢: ${tt.limitNow ?? 0} filled at once (quote + gap was within the limit), ${
+                tt.limitFilled ?? 0
+              } rested and filled later, ${tt.limitMissed ?? 0} never filled (no trade).`
+              : r.used?.order === "limit"
               ? ` Limit orders at ${r.used.limitPrice}¢: ${tt.limitFilled ?? 0} filled (the ask came down to ${r.used.limitPrice}¢), ${
                 tt.limitMissed ?? 0
               } never filled (no trade), ${tt.limitCheap ?? 0} were already under ${r.used.limitPrice}¢ so bought at market.`
