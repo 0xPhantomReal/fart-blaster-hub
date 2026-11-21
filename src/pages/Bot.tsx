@@ -511,9 +511,11 @@ const ReplayBox = ({ live, balance }: { live: TraderSettings | undefined; balanc
               ? ` Peak then dip (${r.used.peakAt}¢ → ${r.used.peakBuy}¢): ${tt.peakMissed ?? 0} calls never dipped after peaking, so no trade.`
               : ""}
             {r.used?.order === "limit" && Number(r.used.limitOffset) > 0
-              ? ` Limit orders at quote + ${r.used.limitOffset}¢: ${tt.limitNow ?? 0} filled at once (quote + gap was within the limit), ${
+              ? ` Limit orders at quote + ${r.used.limitOffset}¢: ${tt.limitNow ?? 0} filled at once (the real price was within the limit), ${
                 tt.limitFilled ?? 0
-              } rested and filled later, ${tt.limitMissed ?? 0} never filled (no trade).`
+              } rested and filled later, ${tt.limitMissed ?? 0} never filled (no trade). Real price at the call: checked on ${
+                tt.limitChecked ?? 0
+              } (the recorded price had changed within 2 s), guessed as quote + gap on ${tt.limitGuessed ?? 0} (recorded price stale).`
               : r.used?.order === "limit"
               ? ` Limit orders at ${r.used.limitPrice}¢: ${tt.limitFilled ?? 0} filled (the ask came down to ${r.used.limitPrice}¢), ${
                 tt.limitMissed ?? 0

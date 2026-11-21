@@ -1137,6 +1137,8 @@ export type StatsReplay = {
     limitMissed?: number;
     limitCheap?: number;
     limitNow?: number;
+    limitChecked?: number;
+    limitGuessed?: number;
     scoreSkipped?: number;
     staleSkipped?: number;
     staleUnknown?: number;
