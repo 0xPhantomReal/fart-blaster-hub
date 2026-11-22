@@ -120,6 +120,7 @@ import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
 import { askJevPump } from "../_shared/jevPump.ts";
+import { BtcFlow } from "../_shared/btcFlow.ts";
 import {
   type BtcCtx,
   feePerShare,
@@ -131,6 +132,7 @@ import {
   pumpExit,
   pumpFeatures,
   pumpScore,
+  snapRow,
   DEFAULT_SCORE_CFG,
   type PumpScore,
   walkBuy,
@@ -4404,7 +4406,13 @@ async function setupPump() {
     id bigserial primary key, window_start bigint, at_sec double precision, side text, ask double precision,
     bid double precision, p_pump double precision, choice text, did text, features jsonb, created_at timestamptz default now())`;
   await sql`create table if not exists pump_kv (k text primary key, v jsonb, at timestamptz default now())`;
-  for (const t of ["pump_trades", "pump_log", "pump_kv"]) await sql.unsafe(`alter table ${t} enable row level security`);
+  // The recorder: one row per second per cheap side (2–40¢), with every signal and, once settled, whether it won.
+  await sql`create table if not exists pump_snap (
+    id bigserial primary key, window_start bigint not null, at_sec double precision not null, slug text, long_is text,
+    side text not null, ask double precision, bid double precision, fill10 double precision, fill20 double precision,
+    fair double precision, gap double precision, won boolean, features jsonb, created_at timestamptz default now())`;
+  await sql`create index if not exists pump_snap_window on pump_snap (window_start)`;
+  for (const t of ["pump_trades", "pump_log", "pump_kv", "pump_snap"]) await sql.unsafe(`alter table ${t} enable row level security`);
   pumpReady = true;
 }
 
@@ -4447,9 +4455,35 @@ async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expec
 }
 
 /** Pump trades left open past their window (a sale that never went through): settle on the result. */
+/** Which side won a window: Polymarket's result, else (after 15 min, or at once if `quick`) BRTI like settlement. */
+async function pumpWinner(slug: string, longIs: Side, start: number, quick: boolean): Promise<Side | null> {
+  const won = await settledSide({ slug, longIs } as WindowMarket).catch(() => null);
+  if (won) return won;
+  const end = start + TF;
+  const [fin, before] = await Promise.all([period(end - 60), period(start - 60)]);
+  if (fin && before && fin.n >= 20 && before.n >= 20 && (quick || Date.now() / 1000 > end + 900)) {
+    return winner(before.avg, fin.avg);
+  }
+  return null;
+}
+
+/** Fill in the recorder's outcomes for windows that have ended. */
+async function pumpSettleSnaps() {
+  const sql = db();
+  const now = Math.floor(Date.now() / 1000);
+  const ws = await sql`select distinct window_start, slug, long_is from pump_snap
+    where won is null and window_start + ${TF + 70} <= ${now} and window_start > ${now - 86400 * 2} limit 30`;
+  for (const w of ws) {
+    const won = await pumpWinner(w.slug, w.long_is, Number(w.window_start), false).catch(() => null);
+    if (won) await sql`update pump_snap set won = (side = ${won}) where window_start = ${w.window_start} and won is null`;
+  }
+  await sql`delete from pump_snap where created_at < now() - interval '14 days'`.catch(() => {});
+}
+
 async function pumpSettle() {
   const sql = db();
   const now = Math.floor(Date.now() / 1000);
+  await pumpSettleSnaps().catch((e) => console.error("pump snaps:", (e as Error).message));
   const open = await sql`select * from pump_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
   for (const t of open) {
     let won: Side | null = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
@@ -4530,6 +4564,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     sql`insert into pump_kv (k, v, at) values ('live', ${sql.json({ at: Date.now() / 1000, ...x } as never)}, now())
       on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
   let sock: { close(): void } | null = null;
+  // Bitcoin order flow (Coinbase spot + Hyperliquid perp) over websockets, for this run.
+  const flow = new BtcFlow();
+  flow.start();
+  const snaps: Record<string, unknown>[] = [];
   const ticks: [number, number][] = [];
   const btcAbort = { stop: false };
   try {
@@ -4606,7 +4644,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     let entries = Number((await sql`select count(*)::int as n from pump_trades where window_start = ${start}`)[0].n);
     let today = await pumpToday(mode);
     let lastJev = 0, lastRef = Date.now(), lastPoll = 0, lastSellTry = 0, sellErrors = 0, asked = 0, lastLive = 0;
-    let bestScore = 0;
+    let bestScore = 0, lastSnap = 0;
+    // deno-lint-ignore no-explicit-any
+    let lastFlip: any = null;
     let busy = false;
     let inflight: Promise<void> | null = null;
     const cfg = { maxAsk: pc.maxAsk, minAsk: pc.minAsk, tp: pc.tp, sl: pc.sl, exitSec: pc.exitSec, minLeft: pc.minLeft };
@@ -4734,6 +4774,26 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         ref = (await period(start - 60))?.avg ?? null;
       }
       const books = tape.books();
+      // Recorder: once a second, every side between 2¢ and 40¢ (bought or not), with all signals.
+      if (nowMs - lastSnap >= 1000 && nowMs - runStart >= 3000) {
+        lastSnap = nowMs;
+        const fs = flow.snapshot(nowMs, ticks.length ? ticks[ticks.length - 1][1] : null);
+        for (const sd of ["up", "down"] as Side[]) {
+          const a = books[sd].asks[0]?.[0];
+          if (a === undefined || a < 0.02 || a > 0.4) continue;
+          const row = snapRow(tape, sd, left, { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks }, end, fs, nowMs);
+          snaps.push({
+            window_start: start, at_sec: Math.round((nowMs / 1000 - start) * 10) / 10, slug: market.slug,
+            long_is: market.longIs, side: sd, ask: row.ask, bid: row.bid, fill10: row.fill10, fill20: row.fill20,
+            fair: row.fair, gap: row.gap, features: sql.json(row.features as never),
+          });
+          lastFlip = { side: sd, ...row };
+        }
+        if (snaps.length >= 20) {
+          const batch = snaps.splice(0);
+          await sql`insert into pump_snap ${sql(batch)}`.catch((e) => console.error("snap insert:", (e as Error).message));
+        }
+      }
       if (pos && !busy) {
         const side = pos.side as Side;
         const bid = books[side].bids[0]?.[0] ?? null;
@@ -4759,7 +4819,12 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           lastLive = nowMs;
           saveLive(
             c && f
-              ? { side: c.side, ask: c.ask, bid: f.bid_c, seconds_left: Math.round(left), score: sc, features: f }
+              ? {
+                side: c.side, ask: c.ask, bid: f.bid_c, seconds_left: Math.round(left), score: sc, features: f,
+                flip: lastFlip && lastFlip.side === c.side
+                  ? { fair: lastFlip.fair, gap: lastFlip.gap, fill10: lastFlip.fill10, fill20: lastFlip.fill20, flow: lastFlip.features.flow }
+                  : null,
+              }
               : { note: `no side between ${Math.round(pc.minAsk * 100)}¢ and ${Math.round(pc.maxAsk * 100)}¢`, seconds_left: Math.round(left) },
           );
         }
@@ -4782,6 +4847,8 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               const recent = await sql`select side, price, exit_why, pnl from pump_trades where mode = ${mode}
                 and status in ('closed', 'settled') order by id desc limit 8`;
               const j = await askJevPump(f, sc, {
+                btc_orderflow_coinbase_spot_and_hyperliquid_perp: flow.snapshot(Date.now(), btc.price),
+                fair_chance_from_btc: lastFlip && lastFlip.side === c.side ? { fair: lastFlip.fair, fair_minus_fill10: lastFlip.gap } : null,
                 our_recent_pump_trades: recent.map((t) => ({
                   side: t.side, paid_c: Math.round(Number(t.price) * 1000) / 10, exit: t.exit_why, pnl: Math.round(Number(t.pnl) * 100) / 100,
                 })),
@@ -4809,6 +4876,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       await new Promise((r) => setTimeout(r, 200));
     }
     if (inflight) await Promise.race([inflight, new Promise((r) => setTimeout(r, 3000))]);
+    if (snaps.length) await sql`insert into pump_snap ${sql(snaps.splice(0))}`.catch(() => {});
     btcAbort.stop = true;
     await Promise.race([btcRun, new Promise((r) => setTimeout(r, 1500))]);
     // Keep each minute's BRTI average so the next window has its price to beat even if the main bot is off.
@@ -4823,17 +4891,41 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     await sql`insert into pump_kv (k, v, at) values ('tape', ${sql.json({
       slug: market.slug, hist: tape.hist, trades: tape.trades, ticks: ticks.slice(-240),
     } as never)}, now()) on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
-    const summary = `${via}: ${tape.updates} updates, best score ${bestScore}, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
+    const summary = `${via}: ${tape.updates} updates, BTC flow ${flow.cb.msgs}/${flow.hl.msgs} msgs, best score ${bestScore}, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
     await beat({ did: summary, via, updates: tape.updates, asked, live: pc.live });
     await sql`delete from pump_log where created_at < now() - interval '7 days'`.catch(() => {});
     return summary;
   } finally {
     btcAbort.stop = true;
+    flow.close();
     try {
       sock?.close();
     } catch { /* closed */ }
     await sql`update pump_kv set v = ${sql.json({ until: 0 })} where k = 'lease'`.catch(() => {});
   }
+}
+
+/** Read-only: the recorder's rows between two times (≤ 6 hours) as CSV, features flattened into columns. */
+async function pumpExport(from: number, to: number) {
+  await setup();
+  await setupPump();
+  to = Math.min(to, from + 6 * 3600);
+  const rows = await db()`select window_start, at_sec, side, ask, bid, fill10, fill20, fair, gap, won, features
+    from pump_snap where window_start >= ${from} and window_start < ${to} order by window_start, at_sec, side`;
+  const flat = (o: unknown, pre: string, out: Record<string, unknown>) => {
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      for (const [k, v] of Object.entries(o as Record<string, unknown>)) flat(v, pre ? `${pre}.${k}` : k, out);
+    } else out[pre] = o;
+    return out;
+  };
+  const recs = rows.map((r) => {
+    const { features, ...rest } = r;
+    return { ...rest, seconds_left: Math.round((TF - Number(r.at_sec)) * 10) / 10, ...(features ? flat(features, "", {}) : {}) };
+  });
+  const cols: string[] = [];
+  for (const r of recs) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+  const cell = (v: unknown) => (v === null || v === undefined ? "" : typeof v === "string" && /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : String(v));
+  return [cols.join(","), ...recs.map((r) => cols.map((c) => cell((r as Record<string, unknown>)[c])).join(","))].join("\n");
 }
 
 /** Read-only: the pump bot's settings, open position, trades, totals and latest decisions. */
@@ -4855,6 +4947,9 @@ async function pumpStatus() {
       count(*) filter (where exit_why = 'held to settlement')::int as held from pump_trades where status in ('closed', 'settled') group by mode`,
   ]);
   const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
+  const rec = (await sql`select count(*)::int as rows, count(distinct window_start)::int as windows,
+    count(*) filter (where won is not null)::int as settled, min(window_start) as first
+    from pump_snap where created_at > now() - interval '24 hours'`)[0];
   return {
     settings: { ...pc, maxAsk: Math.round(pc.maxAsk * 100), minAsk: Math.round(pc.minAsk * 100), tp: Math.round(pc.tp * 100),
       sl: Math.round(pc.sl * 100), minProb: Math.round(pc.minProb * 100), slip: Math.round(pc.slip * 100),
@@ -4868,6 +4963,7 @@ async function pumpStatus() {
     trades,
     log: logRows,
     latestFeatures: latest,
+    recorder: { rows24h: rec.rows, windows24h: rec.windows, settled24h: rec.settled, first: rec.first ? Number(rec.first) : null },
   };
 }
 
@@ -4878,6 +4974,13 @@ Deno.serve(async (req) => {
     if (body?.action === "status") return json(await status());
     // Read-only: the pump bot's page.
     if (body?.action === "pump-status") return json(await pumpStatus());
+    // Read-only: the recorder's data as CSV (≤ 6 hours per call).
+    if (body?.action === "pump-export") {
+      const now = Math.floor(Date.now() / 1000);
+      const from = Number(body.from) || now - 3600;
+      const csv = await pumpExport(from, Number(body.to) || now);
+      return new Response(csv, { headers: { ...cors, "Content-Type": "text/csv" } });
+    }
     if (body?.action === "auto-replay") {
       // Read-only: what auto mode would have chosen in past windows vs what the bot traded (up to 7 days).
       return json(await autoReplayReport(Math.min(7, Math.max(1, Number(body.days) || 7))));

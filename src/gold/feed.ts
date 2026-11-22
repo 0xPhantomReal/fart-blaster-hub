@@ -1240,6 +1240,17 @@ export interface PumpStatus {
     bid?: number | null;
     holding?: { side: string; paid: number; bid: number | null };
     score?: { score: number; parts: Record<string, number>; notes: string[] } | null;
+    flip?: {
+      fair: number | null;
+      gap: number | null;
+      fill10: number | null;
+      fill20: number | null;
+      flow: {
+        coinbase: { ofi_5s: number; flow_5s: { net: number }; micro_minus_mid: number | null } | null;
+        hyperliquid: { ofi_5s: number; flow_5s: { net: number }; micro_minus_mid: number | null } | null;
+        coinbase_minus_brti: number | null;
+      } | null;
+    } | null;
     features?: {
       book?: { bids_top10?: [number, number][]; asks_top10?: [number, number][]; offers_up_to_2x?: { usd: number } | null };
       flow_10s?: { trades: number; buy_shares: number; sell_shares: number };
@@ -1283,6 +1294,44 @@ export interface PumpStatus {
     created_at: string;
   }[];
   latestFeatures: Record<string, unknown> | null;
+  recorder?: { rows24h: number; windows24h: number; settled24h: number; first: number | null };
+}
+
+/** The pump recorder's rows as CSV, `hours` back from now, fetched 3 hours at a time. */
+export async function fetchPumpExport(hours: number, onProgress?: (done: number, total: number) => void): Promise<string> {
+  if (!FN_URL) throw new Error("no backend URL");
+  const now = Math.floor(Date.now() / 1000);
+  const parts: string[] = [];
+  const total = Math.ceil(hours / 3);
+  for (let i = 0; i < total; i++) {
+    const from = now - hours * 3600 + i * 3 * 3600;
+    const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+      },
+      body: JSON.stringify({ action: "pump-export", from, to: Math.min(now + 300, from + 3 * 3600) }),
+    });
+    if (!res.ok) throw new Error(`export failed (${res.status})`);
+    parts.push(await res.text());
+    onProgress?.(i + 1, total);
+  }
+  // One header (columns can differ between chunks: union them).
+  const cols: string[] = [];
+  const chunks = parts.map((p) => p.split("\n")).filter((ls) => ls.length > 1 && ls[0]);
+  for (const ls of chunks) for (const c of ls[0].split(",")) if (!cols.includes(c)) cols.push(c);
+  const out = [cols.join(",")];
+  for (const ls of chunks) {
+    const head = ls[0].split(",");
+    const idx = cols.map((c) => head.indexOf(c));
+    for (const line of ls.slice(1)) {
+      if (!line) continue;
+      const cells = line.match(/("([^"]|"")*"|[^,]*)(,|$)/g)?.map((x) => x.replace(/,$/, "")) ?? [];
+      out.push(idx.map((j) => (j < 0 ? "" : cells[j] ?? "")).join(","));
+    }
+  }
+  return out.join("\n");
 }
 
 export async function fetchPumpStatus(): Promise<PumpStatus | null> {

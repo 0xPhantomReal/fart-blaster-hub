@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchPumpStatus, type PumpStatus } from "@/gold/feed";
+import { fetchPumpExport, fetchPumpStatus, type PumpStatus } from "@/gold/feed";
 
 /** /pump — the pump bot: buys a cheap side (under 30¢) when Jev expects a +100% pump; sells at +100%, −50% or late. */
 const signed = (x: number | null | undefined) =>
@@ -124,6 +124,8 @@ const Pump = () => {
 
         <LiveRead s={s} />
 
+        <Recorder s={s} />
+
         <section className={card}>
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-semibold">Jev's calls</h2>
@@ -232,6 +234,58 @@ const Pump = () => {
   );
 };
 
+/** The recorder: what's been captured, and a CSV download of it. */
+const Recorder = ({ s }: { s: PumpStatus | null | undefined }) => {
+  const [hours, setHours] = useState(24);
+  const [busy, setBusy] = useState<string | null>(null);
+  const rec = s?.recorder;
+  const go = async () => {
+    setBusy("starting…");
+    try {
+      const csv = await fetchPumpExport(hours, (d, t) => setBusy(`${d}/${t}`));
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pump-recorder-${hours}h-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBusy(null);
+    } catch (e) {
+      setBusy(`failed: ${(e as Error).message}`);
+    }
+  };
+  return (
+    <section className={card}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold">Recorder</h2>
+          <p className="text-xs text-[#8b949e]">
+            Every second, every side between 2¢ and 40¢: the book, real fill prices, BTC, Coinbase + perp order flow, and
+            who won. {rec ? `Last 24 h: ${rec.rows24h.toLocaleString()} rows in ${rec.windows24h} windows, ${rec.settled24h.toLocaleString()} settled.` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <select
+            className="rounded border border-[#30363d] bg-[#0e1116] px-2 py-1"
+            value={hours}
+            onChange={(e) => setHours(Number(e.target.value))}
+          >
+            {[3, 6, 12, 24, 48, 72].map((h) => <option key={h} value={h}>last {h} h</option>)}
+          </select>
+          <button
+            className="rounded border border-[#30363d] px-3 py-1 hover:bg-[#21262d] disabled:opacity-50"
+            disabled={!!busy && !busy.startsWith("failed")}
+            onClick={go}
+          >
+            {busy && !busy.startsWith("failed") ? `Exporting ${busy}` : "Export CSV"}
+          </button>
+        </div>
+      </div>
+      {busy?.startsWith("failed") ? <p className="mt-1 text-xs text-[#ef5350]">{busy}</p> : null}
+    </section>
+  );
+};
+
 const PART_LABEL: Record<string, string> = {
   flow: "Buying pressure",
   thin: "Thin offers above",
@@ -294,6 +348,16 @@ const LiveRead = ({ s }: { s: PumpStatus | null | undefined }) => {
             ))}
           </div>
           {sc?.notes?.length ? <p className="text-xs text-[#8b949e]">{sc.notes.join(" · ")}</p> : null}
+          {lv.flip ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular-nums sm:grid-cols-3">
+              <span className="text-[#8b949e]">Fair chance (BTC): <b className="text-[#c9d1d9]">{lv.flip.fair === null ? "—" : `${(lv.flip.fair * 100).toFixed(1)}%`}</b></span>
+              <span className="text-[#8b949e]">$10 fills at: <b className="text-[#c9d1d9]">{c(lv.flip.fill10)}</b></span>
+              <span className="text-[#8b949e]">Fair − fill: <b className={tone(lv.flip.gap)}>{lv.flip.gap === null ? "—" : `${(lv.flip.gap * 100).toFixed(1)} pts`}</b></span>
+              <span className="text-[#8b949e]">Coinbase OFI 5 s: <b className="text-[#c9d1d9]">{lv.flip.flow?.coinbase?.ofi_5s ?? "—"}</b></span>
+              <span className="text-[#8b949e]">Coinbase net buys 5 s: <b className="text-[#c9d1d9]">{lv.flip.flow?.coinbase?.flow_5s?.net ?? "—"}</b></span>
+              <span className="text-[#8b949e]">Perp net buys 5 s: <b className="text-[#c9d1d9]">{lv.flip.flow?.hyperliquid?.flow_5s?.net ?? "—"}</b></span>
+            </div>
+          ) : null}
           {book?.bids_top10 || book?.asks_top10 ? (
             <div className="grid grid-cols-2 gap-4 text-xs tabular-nums">
               <div>

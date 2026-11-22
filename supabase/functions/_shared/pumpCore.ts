@@ -433,3 +433,136 @@ export function pumpScore(f: PumpFeatures, tape: MarketTape, nowMs: number, cfg:
   return { score, parts, notes };
 }
 export type PumpScore = ReturnType<typeof pumpScore>;
+
+const Phi = (x: number) => {
+  // Normal CDF (Abramowitz–Stegun 7.1.26 via erf)
+  const t = 1 / (1 + 0.3275911 * Math.abs(x / Math.SQRT2));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t *
+      Math.exp(-(x * x) / 2);
+  return 0.5 * (1 + (x >= 0 ? y : -y));
+};
+
+/**
+ * Fair chance this side wins from bitcoin alone: its distance from the price to beat against its volatility over the
+ * time left. Settlement averages BRTI over the last minute, so the effective time shrinks by ~40 s before the last
+ * minute; inside it, the part of the average already locked in is accounted for.
+ */
+export function fairChance(
+  side: Side,
+  btc: number,
+  ref: number,
+  volPerSqrtSec: number,
+  secondsLeft: number,
+  lastMinute: { sum: number; n: number } | null,
+) {
+  const dir = side === "up" ? 1 : -1;
+  if (!(volPerSqrtSec > 0)) return null;
+  if (secondsLeft > 60 || !lastMinute || !lastMinute.n) {
+    const teff = Math.max(secondsLeft - 40, 5);
+    return Phi((dir * (btc - ref)) / (volPerSqrtSec * Math.sqrt(teff)));
+  }
+  // In the last minute: final average = (locked sum + sum of the rest) / total. The rest averages ~btc with
+  // st. dev. vol·√(left/3) (an average of a random walk).
+  const left = Math.max(secondsLeft, 1);
+  const total = lastMinute.n + left;
+  const need = (ref * total - lastMinute.sum) / left; // the rest must average this for a tie
+  const sd = volPerSqrtSec * Math.sqrt(left / 3);
+  return Phi((dir * (btc - need)) / Math.max(sd, 0.01));
+}
+
+/** Everything about one side at one second, for the recorder (and the flip-signal search later). */
+export function snapRow(
+  tape: MarketTape,
+  side: Side,
+  secondsLeft: number,
+  btc: BtcCtx,
+  windowEnd: number,
+  flowSnap: Record<string, unknown> | null,
+  nowMs = Date.now(),
+) {
+  const b = tape.books()[side];
+  const ask = b.asks[0]?.[0] ?? null, bid = b.bids[0]?.[0] ?? null;
+  const askSz = b.asks[0]?.[1] ?? 0, bidSz = b.bids[0]?.[1] ?? 0;
+  const fill = (usd: number) => {
+    const w = walkBuy(b.asks, usd);
+    return w ? Math.round(w.price * 10000) / 10000 : null;
+  };
+  const depthAt = (lv: Level[], top: number | undefined, dir: 1 | -1) =>
+    top === undefined ? 0 : lv.filter(([p]) => (dir > 0 ? p <= top + 0.05 + 1e-9 : p >= top - 0.05 - 1e-9))
+      .reduce((a, [, q]) => a + q, 0);
+  const nowSec = nowMs / 1000;
+  const vol10 = btcVolPerSec(btc.ticks, nowSec, 10), vol60 = btcVolPerSec(btc.ticks, nowSec, 60);
+  const dir = side === "up" ? 1 : -1;
+  const btcAgo = (s: number) => {
+    const old = btc.ticks.find(([t]) => t >= nowSec - s);
+    return old && btc.price !== null ? Math.round(dir * (btc.price - old[1]) * 100) / 100 : null;
+  };
+  const lm = btc.ticks.filter(([t]) => t >= windowEnd - 60 && t <= nowSec);
+  const lastMinute = secondsLeft <= 60 && lm.length ? { sum: lm.reduce((a, [, p]) => a + p, 0), n: lm.length } : null;
+  const vol = vol60 ?? vol10;
+  const fair = btc.price !== null && btc.ref !== null && vol
+    ? fairChance(side, btc.price, btc.ref, vol, secondsLeft, lastMinute)
+    : null;
+  const askKey = side === "up" ? "upAsk" : "downAsk";
+  const depthKey = side === "up" ? "upBidDepth" : "downBidDepth";
+  const at = (s: number) => {
+    let v: TapePoint | null = null;
+    for (const p of tape.hist) {
+      if (p.at > nowMs - s * 1000) break;
+      v = p;
+    }
+    return v;
+  };
+  const p5 = at(5), p30 = at(30);
+  const flowS = (sec: number) => {
+    let buy = 0, sell = 0;
+    for (const t of tape.trades) {
+      if (t.at < nowMs - sec * 1000) continue;
+      if (t.takerBought === side) buy += t.qty;
+      else sell += t.qty;
+    }
+    return Math.round(buy - sell);
+  };
+  const fill10 = fill(10), fill20 = fill(20);
+  return {
+    ask,
+    bid,
+    fill10,
+    fill20,
+    fair: fair === null ? null : Math.round(fair * 10000) / 10000,
+    gap: fair !== null && fill10 !== null ? Math.round((fair - fill10) * 10000) / 10000 : null,
+    features: {
+      pm: {
+        spread: ask !== null && bid !== null ? r4(ask - bid) : null,
+        micro_minus_mid: ask !== null && bid !== null && askSz + bidSz > 0
+          ? r4((bid * askSz + ask * bidSz) / (askSz + bidSz) - (ask + bid) / 2)
+          : null,
+        top_imbalance: askSz + bidSz > 0 ? r2((bidSz - askSz) / (bidSz + askSz)) : null,
+        ask_depth5: Math.round(depthAt(b.asks, b.asks[0]?.[0], 1)),
+        bid_depth5: Math.round(depthAt(b.bids, b.bids[0]?.[0], -1)),
+        offers_to_2x_usd: ask === null ? null : r2(b.asks.filter(([p]) => p <= Math.min(0.99, ask * 2) + 1e-9)
+          .reduce((a, [p, q]) => a + p * q, 0)),
+        ask_chg_5s: ask !== null && p5?.[askKey] != null ? r4(ask - (p5[askKey] as number)) : null,
+        ask_chg_30s: ask !== null && p30?.[askKey] != null ? r4(ask - (p30[askKey] as number)) : null,
+        bid_depth_chg_5s: p5?.[depthKey] != null ? Math.round(depthAt(b.bids, b.bids[0]?.[0], -1) - (p5[depthKey] as number)) : null,
+        taker_net_10s: flowS(10),
+        taker_net_30s: flowS(30),
+        book_age_ms: tape.bookAt ? nowMs - tape.bookAt : null,
+      },
+      btc: {
+        price: btc.price,
+        ref: btc.ref,
+        toward: btc.price !== null && btc.ref !== null ? Math.round(dir * (btc.price - btc.ref) * 100) / 100 : null,
+        vol10: vol10 === null ? null : r2(vol10),
+        vol60: vol60 === null ? null : r2(vol60),
+        move5: btcAgo(5),
+        move10: btcAgo(10),
+        move30: btcAgo(30),
+        last_minute_locked: lastMinute ? lastMinute.n : 0,
+      },
+      // Coinbase spot + Hyperliquid perp order flow (+ = buying / toward UP; flip the sign for Down).
+      flow: flowSnap,
+    },
+  };
+}
+export type SnapRow = ReturnType<typeof snapRow>;
