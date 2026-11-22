@@ -1220,6 +1220,7 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
+    maxLeft?: number;
     hold?: boolean;
     betPct?: number;
     bankroll?: number;

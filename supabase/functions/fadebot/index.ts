@@ -4370,6 +4370,8 @@ function pumpSettings() {
     sl: Math.min(0.99, Math.max(0.01, n("PUMP_SL", 50) / 100)),
     exitSec: Math.max(1, n("PUMP_EXIT_SEC", 10)),
     minLeft: Math.max(0, n("PUMP_MIN_LEFT", 200)),
+    // No buys while more than this many seconds are left (0 = off): e.g. 45 = only buy in the last 45 s.
+    maxLeft: Math.max(0, n("PUMP_MAX_LEFT", 0)),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
@@ -4658,7 +4660,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       const ask = books[side].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
       const askedAt = (f.ask_c ?? 0) / 100;
-      if (ask === null || ask >= pc.maxAsk - 1e-9 || ask > askedAt + pc.slip + 1e-9 || left < pc.minLeft) {
+      if (
+        ask === null || ask >= pc.maxAsk - 1e-9 || ask > askedAt + pc.slip + 1e-9 || left < pc.minLeft ||
+        (pc.maxLeft > 0 && left > pc.maxLeft)
+      ) {
         await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: `${why} but the ask moved to ${ask === null ? "—" : Math.round(ask * 100) + "¢"} / ${Math.round(left)} s left: no buy` });
         return;
       }
@@ -4808,7 +4813,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           await sell(why, bid).catch((e) => log({ side, did: `sell error: ${(e as Error).message.slice(0, 160)}` }));
           busy = false;
         }
-      } else if (!pos && !busy && !inflight && entries < pc.maxTrades && left >= pc.minLeft && today > -pc.dailyLoss) {
+      } else if (!pos && !busy && !inflight && entries < pc.maxTrades && today > -pc.dailyLoss) {
+        // Buys (and Jev questions) only between PUMP_MAX_LEFT and PUMP_MIN_LEFT seconds left; the read runs throughout.
+        const canBuy = left >= pc.minLeft && (pc.maxLeft <= 0 || left <= pc.maxLeft);
         const c = pumpCandidate(books, cfg);
         // The bot's own read, every loop: features and the microstructure score for the cheap side.
         const btc: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
@@ -4830,7 +4837,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         }
         // Score at or above PUMP_AUTO_SCORE: buy now, without asking Jev (after the same 5 s warm-up).
         if (
-          c && f && sc && pc.autoScore > 0 && sc.score >= pc.autoScore && sc.parts.flow >= pc.autoFlow &&
+          canBuy && c && f && sc && pc.autoScore > 0 && sc.score >= pc.autoScore && sc.parts.flow >= pc.autoFlow &&
           sc.parts.turn >= pc.autoTurn && nowMs - runStart >= 5000
         ) {
           busy = true;
@@ -4839,7 +4846,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           );
           busy = false;
         } // Warm up 5 s first (fresh book pushes and BTC ticks), then ask Jev only when the score is high enough.
-        else if (c && f && sc && sc.score >= pc.minScore && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
+        else if (canBuy && c && f && sc && sc.score >= pc.minScore && nowMs - runStart >= 5000 && nowMs - lastJev >= pc.jevEvery * 1000) {
           lastJev = nowMs;
           asked++;
           inflight = (async () => {
