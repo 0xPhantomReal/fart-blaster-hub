@@ -208,7 +208,7 @@ const Pump = () => {
               pad(`PUMP_TP=${st?.tp ?? 100}`, "take profit, % of price paid (on the bid)"),
               pad(`PUMP_SL=${st?.sl ?? 50}`, "stop loss, %"),
               pad(`PUMP_EXIT_SEC=${st?.exitSec ?? 10}`, "sell with this many seconds left"),
-              pad(`PUMP_MIN_LEFT=${st?.minLeft ?? 45}`, "no buys with fewer seconds left"),
+              pad(`PUMP_MIN_LEFT=${st?.minLeft ?? 200}`, "no buys with fewer seconds left"),
               pad(`PUMP_JEV_EVERY=${st?.jevEvery ?? 5}`, "ask Jev every N s while a side is cheap"),
               pad(`PUMP_MIN_PROB=${st?.minProb ?? 40}`, "Jev's pump chance needed to buy (%)"),
               pad(`PUMP_SLIP=${st?.slip ?? 2}`, "skip if the ask rose more than this (¢) while Jev thought"),

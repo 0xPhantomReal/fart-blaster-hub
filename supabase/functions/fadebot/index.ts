@@ -4367,7 +4367,7 @@ function pumpSettings() {
     tp: Math.max(0.01, n("PUMP_TP", 100) / 100),
     sl: Math.min(0.99, Math.max(0.01, n("PUMP_SL", 50) / 100)),
     exitSec: Math.max(1, n("PUMP_EXIT_SEC", 10)),
-    minLeft: Math.max(0, n("PUMP_MIN_LEFT", 45)),
+    minLeft: Math.max(0, n("PUMP_MIN_LEFT", 200)),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
