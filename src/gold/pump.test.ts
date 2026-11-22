@@ -86,6 +86,7 @@ describe("pump bot: rules", () => {
     expect(pumpExit(0.2, 0.1, 100, cfg)).toBe("stop loss");
     expect(pumpExit(0.2, 0.25, 9, cfg)).toBe("time");
     expect(pumpExit(0.2, null, 100, cfg)).toBeNull();
+    expect(pumpExit(0.2, 0.25, 3, { ...cfg, exitSec: 0 })).toBeNull(); // late sell off
   });
   it("measures bitcoin volatility per √s", () => {
     const ticks: [number, number][] = Array.from({ length: 30 }, (_, i) => [100 + i, 50000 + (i % 2 ? 3 : 0)]);

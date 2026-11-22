@@ -338,7 +338,7 @@ export function pumpExit(entry: number, bid: number | null, secondsLeft: number,
   | null {
   if (bid !== null && bid >= entry * (1 + cfg.tp) - 1e-9) return "take profit";
   if (bid !== null && bid <= entry * (1 - cfg.sl) + 1e-9) return "stop loss";
-  if (secondsLeft <= cfg.exitSec) return "time";
+  if (cfg.exitSec > 0 && secondsLeft <= cfg.exitSec) return "time";
   return null;
 }
 

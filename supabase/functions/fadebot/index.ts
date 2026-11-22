@@ -4368,7 +4368,8 @@ function pumpSettings() {
     hold: env("PUMP_HOLD") !== "0",
     tp: Math.max(0.01, n("PUMP_TP", 100) / 100),
     sl: Math.min(0.99, Math.max(0.01, n("PUMP_SL", 50) / 100)),
-    exitSec: Math.max(1, n("PUMP_EXIT_SEC", 10)),
+    // Sell what's still open with this many seconds left (0 = off: TP/SL only, then held to resolution).
+    exitSec: Math.max(0, n("PUMP_EXIT_SEC", 0)),
     minLeft: Math.max(0, n("PUMP_MIN_LEFT", 200)),
     // No buys while more than this many seconds are left (0 = off): e.g. 45 = only buy in the last 45 s.
     maxLeft: Math.max(0, n("PUMP_MAX_LEFT", 0)),

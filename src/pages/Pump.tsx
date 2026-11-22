@@ -64,7 +64,7 @@ const Pump = () => {
                     `${st.autoScore ? `; at ${st.autoScore}+ with flow ${st.autoFlow ?? 15}+ and turn ${st.autoTurn ?? 10}+ it buys without asking` : ""}. ` +
                     (st.hold
                       ? "Holds every buy to resolution."
-                      : `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`)
+                      : `Sells at +${st.tp}% or −${st.sl}%${st.exitSec ? `, or with ${st.exitSec} s left` : "; otherwise holds to resolution"}.`)
                   : "…"}
               </div>
               <span
@@ -209,7 +209,7 @@ const Pump = () => {
               pad(`PUMP_HOLD=${st?.hold === false ? "0" : "1"}`, "1 = hold to resolution (no TP/SL/late sell); 0 = use the 3 below"),
               pad(`PUMP_TP=${st?.tp ?? 100}`, "take profit, % of price paid (on the bid)"),
               pad(`PUMP_SL=${st?.sl ?? 50}`, "stop loss, %"),
-              pad(`PUMP_EXIT_SEC=${st?.exitSec ?? 10}`, "sell with this many seconds left"),
+              pad(`PUMP_EXIT_SEC=${st?.exitSec ?? 0}`, "sell with this many seconds left (0 = off)"),
               pad(`PUMP_MIN_LEFT=${st?.minLeft ?? 200}`, "no buys with fewer seconds left"),
               pad(`PUMP_MAX_LEFT=${st?.maxLeft ?? 0}`, "no buys with more seconds left (0 = off; 45 = last 45 s only)"),
               pad(`PUMP_JEV_EVERY=${st?.jevEvery ?? 5}`, "ask Jev every N s while a side is cheap"),
