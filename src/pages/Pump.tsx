@@ -61,7 +61,7 @@ const Pump = () => {
                 {st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
                     `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
-                    `${st.autoScore ? `; at ${st.autoScore}+ it buys without asking` : ""}. ` +
+                    `${st.autoScore ? `; at ${st.autoScore}+ with flow ${st.autoFlow ?? 15}+ and turn ${st.autoTurn ?? 10}+ it buys without asking` : ""}. ` +
                     (st.hold
                       ? "Holds every buy to resolution."
                       : `Sells at +${st.tp}%, −${st.sl}%, or with ${st.exitSec} s left.`)
@@ -215,7 +215,9 @@ const Pump = () => {
               pad(`PUMP_MAX_TRADES=${st?.maxTrades ?? 1}`, "buys per window"),
               pad(`PUMP_DAILY_LOSS=${st?.dailyLoss ?? 20}`, "stop buying for the day after losing this ($)"),
               pad(`PUMP_MIN_SCORE=${st?.minScore ?? 50}`, "microstructure score (0–100) needed before Jev is asked"),
-              pad(`PUMP_AUTO_SCORE=${st?.autoScore ?? 60}`, "at/above this score: buy without asking Jev (0 = off)"),
+              pad(`PUMP_AUTO_SCORE=${st?.autoScore ?? 60}`, "auto-buy without Jev: score at/above this (0 = off)…"),
+              pad(`PUMP_AUTO_FLOW=${st?.autoFlow ?? 15}`, "…and buying pressure at/above this (of 20; 0 = not needed)"),
+              pad(`PUMP_AUTO_TURN=${st?.autoTurn ?? 10}`, "…and price turning up at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_THIN=${st?.thin ?? "20-300"}`, "offers up to 2× ($): at/under the first = thin (full points)"),
               pad(`PUMP_ON=${st?.on === false ? "0" : "1"}`, "0 = off"),
             ].join("\n")}
@@ -268,11 +270,16 @@ const LiveRead = ({ s }: { s: PumpStatus | null | undefined }) => {
             <span className="text-3xl font-semibold tabular-nums">{sc?.score ?? "—"}</span>
             <span className="text-sm text-[#8b949e]">
               / 100 for {lv.side} at {c(lv.ask)} (bid {lv.bid ?? "—"}¢) ·{" "}
-              {sc && s?.settings.autoScore && sc.score >= s.settings.autoScore
-                ? <span className="text-[#26a69a]">at/above {s.settings.autoScore}: buys without Jev</span>
+              {sc && s?.settings.autoScore && sc.score >= s.settings.autoScore &&
+                  (sc.parts.flow ?? 0) >= (s.settings.autoFlow ?? 15) && (sc.parts.turn ?? 0) >= (s.settings.autoTurn ?? 10)
+                ? <span className="text-[#26a69a]">auto-buy level reached: buys without Jev</span>
                 : sc && sc.score >= min
                 ? <span className="text-[#26a69a]">at/above {min}: Jev gets asked</span>
-                : `needs ${min} to ask Jev${s?.settings.autoScore ? `, ${s.settings.autoScore} to buy outright` : ""}`}
+                : `needs ${min} to ask Jev${
+                  s?.settings.autoScore
+                    ? `; ${s.settings.autoScore} + flow ${s.settings.autoFlow ?? 15} + turn ${s.settings.autoTurn ?? 10} to buy outright`
+                    : ""
+                }`}
             </span>
           </div>
           <div className="space-y-1">

@@ -1224,6 +1224,8 @@ export interface PumpStatus {
     betPct?: number;
     bankroll?: number;
     autoScore?: number;
+    autoFlow?: number;
+    autoTurn?: number;
     thin?: string;
   };
   mode: "live" | "dry";

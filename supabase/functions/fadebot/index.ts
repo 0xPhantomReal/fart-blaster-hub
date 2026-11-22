@@ -4377,6 +4377,9 @@ function pumpSettings() {
     minScore: Math.min(100, Math.max(0, n("PUMP_MIN_SCORE", 50))),
     // At or above this score the bot buys without asking Jev (0 = always ask Jev).
     autoScore: Math.min(100, Math.max(0, n("PUMP_AUTO_SCORE", 60))),
+    // …and auto-buy also needs at least this much buying pressure (flow) and price turn (0–20 each; 0 = not needed).
+    autoFlow: Math.min(20, Math.max(0, n("PUMP_AUTO_FLOW", 15))),
+    autoTurn: Math.min(20, Math.max(0, n("PUMP_AUTO_TURN", 10))),
     // Offers between the ask and 2×, in $: "lo-hi" — at or under lo is "thin" (full points), at or over hi none.
     thin: ((x) => {
       const m = x.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
@@ -4610,7 +4613,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const did: string[] = [];
 
     const buy = async (side: Side, f: PumpFeatures, sc: PumpScore, j: { choice: string; pPump: number | null }) => {
-      const why = j.pPump === null ? `score ${sc.score} ≥ ${pc.autoScore}: bought without asking Jev` : `Jev said pump (${Math.round(j.pPump * 100)}%)`;
+      const why = j.pPump === null ? `score ${sc.score} auto-buy` : `Jev said pump (${Math.round(j.pPump * 100)}%)`;
       const books = tape.books();
       const ask = books[side].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
@@ -4640,7 +4643,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         return;
       }
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
-        j.pPump === null ? `auto-buy (≥ ${pc.autoScore}, Jev not asked)` : `Jev ${Math.round(j.pPump * 100)}% pump`
+        j.pPump === null
+          ? `auto-buy (score ≥ ${pc.autoScore}, flow ≥ ${pc.autoFlow}, turn ≥ ${pc.autoTurn}; Jev not asked)`
+          : `Jev ${Math.round(j.pPump * 100)}% pump`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
         ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; ${
           pc.hold
@@ -4759,7 +4764,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           );
         }
         // Score at or above PUMP_AUTO_SCORE: buy now, without asking Jev (after the same 5 s warm-up).
-        if (c && f && sc && pc.autoScore > 0 && sc.score >= pc.autoScore && nowMs - runStart >= 5000) {
+        if (
+          c && f && sc && pc.autoScore > 0 && sc.score >= pc.autoScore && sc.parts.flow >= pc.autoFlow &&
+          sc.parts.turn >= pc.autoTurn && nowMs - runStart >= 5000
+        ) {
           busy = true;
           await buy(c.side, f, sc, { choice: "auto", pPump: null }).catch((e) =>
             log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` })
