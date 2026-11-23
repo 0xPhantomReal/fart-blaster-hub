@@ -1220,6 +1220,11 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
+    seesaw?: boolean;
+    seesawScore?: number;
+    seesawBet?: number;
+    seesawEvery?: number;
+    seesawMax?: number;
     maxLeft?: number;
     hold?: boolean;
     betPct?: number;
@@ -1260,11 +1265,12 @@ export interface PumpStatus {
   } | null;
   today: number;
   lastRun: { at: number; window: number; did: string; via?: string; updates?: number; asked?: number } | null;
-  totals: { mode: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number; held?: number }[];
+  totals: { mode: string; kind?: string; n: number; wins: number; pnl: number; tp: number; sl: number; timed: number; held?: number }[];
   trades: {
     id: number;
     window_start: number;
     mode: string;
+    kind?: string;
     side: "up" | "down";
     stake: number;
     shares: number;

@@ -4373,6 +4373,15 @@ function pumpSettings() {
     minLeft: Math.max(0, n("PUMP_MIN_LEFT", 200)),
     // No buys while more than this many seconds are left (0 = off): e.g. 45 = only buy in the last 45 s.
     maxLeft: Math.max(0, n("PUMP_MAX_LEFT", 0)),
+    // Seesaw mode (PUMP_SEESAW=1): watch both sides; every time a side's score reaches PUMP_SEESAW_SCORE, buy
+    // $PUMP_SEESAW_BET at market and hold to resolution. Many entries per window. It replaces the normal buys
+    // (auto-buy / Jev) while on.
+    seesaw: env("PUMP_SEESAW") === "1",
+    seesawScore: Math.min(100, Math.max(0, n("PUMP_SEESAW_SCORE", 50))),
+    seesawBet: Math.max(1, n("PUMP_SEESAW_BET", 1)),
+    // While a side stays at/above the score, buy again every this many seconds (it always buys when it first gets there).
+    seesawEvery: Math.max(1, n("PUMP_SEESAW_EVERY", 15)),
+    seesawMax: Math.max(1, Math.round(n("PUMP_SEESAW_MAX", 30))),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
@@ -4405,6 +4414,7 @@ async function setupPump() {
     proceeds double precision default 0, exit_fees double precision default 0, exit_price double precision,
     exit_sec double precision, exit_why text, result text, pnl double precision, reason text, features jsonb,
     opened_at timestamptz default now(), closed_at timestamptz)`;
+  await sql`alter table if exists pump_trades add column if not exists kind text default 'pump'`.catch(() => {});
   await sql`create table if not exists pump_log (
     id bigserial primary key, window_start bigint, at_sec double precision, side text, ask double precision,
     bid double precision, p_pump double precision, choice text, did text, features jsonb, created_at timestamptz default now())`;
@@ -4642,8 +4652,12 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     }).catch(() => ({ ticks: [], source: "?" }));
     let ref = (await period(start - 60))?.avg ?? null;
     // deno-lint-ignore no-explicit-any
-    let pos: any = (await sql`select * from pump_trades where market_slug = ${market.slug} and status = 'open' order by id desc limit 1`)[0] ??
-      null;
+    let pos: any = pc.seesaw ? null
+      : (await sql`select * from pump_trades where market_slug = ${market.slug} and status = 'open' and coalesce(kind, 'pump') = 'pump'
+          order by id desc limit 1`)[0] ?? null;
+    // Seesaw state per side: was it at/above the score last loop, and when did it last buy.
+    const wasHot: Record<Side, boolean> = { up: false, down: false };
+    const lastFire: Record<Side, number> = { up: 0, down: 0 };
     let entries = Number((await sql`select count(*)::int as n from pump_trades where window_start = ${start}`)[0].n);
     let today = await pumpToday(mode);
     let lastJev = 0, lastRef = Date.now(), lastPoll = 0, lastSellTry = 0, sellErrors = 0, asked = 0, lastLive = 0;
@@ -4800,7 +4814,68 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           await sql`insert into pump_snap ${sql(batch)}`.catch((e) => console.error("snap insert:", (e as Error).message));
         }
       }
-      if (pos && !busy) {
+      if (pc.seesaw) {
+        const canBuy = left >= pc.minLeft && (pc.maxLeft <= 0 || left <= pc.maxLeft);
+        const btcS: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
+        let shown = false;
+        for (const sd of ["up", "down"] as Side[]) {
+          const a = books[sd].asks[0]?.[0];
+          if (a === undefined || a < pc.minAsk - 1e-9 || a >= pc.maxAsk - 1e-9) {
+            wasHot[sd] = false;
+            continue;
+          }
+          const fs = pumpFeatures(tape, sd, left, btcS, nowMs);
+          const ss = pumpScore(fs, tape, nowMs, pc.thin);
+          bestScore = Math.max(bestScore, ss.score);
+          if (!shown && nowMs - lastLive >= 2000) {
+            shown = true;
+            lastLive = nowMs;
+            saveLive({ side: sd, ask: a, bid: fs.bid_c, seconds_left: Math.round(left), score: ss, features: fs, seesaw: true });
+          }
+          const hot = ss.score >= pc.seesawScore;
+          const fire = hot && canBuy && !busy && nowMs - runStart >= 5000 && entries < pc.seesawMax &&
+            today > -pc.dailyLoss && (!wasHot[sd] || nowMs - lastFire[sd] >= pc.seesawEvery * 1000);
+          wasHot[sd] = hot;
+          if (!fire) continue;
+          lastFire[sd] = nowMs;
+          busy = true;
+          try {
+            let shares = 0, price = 0, fees = 0, orderId: string | null = null;
+            if (pc.live) {
+              const r = await marketBuy(market, sd, pc.seesawBet);
+              shares = r.shares;
+              price = r.price;
+              fees = r.fees;
+              orderId = r.id ?? null;
+            } else {
+              const w = walkBuy(books[sd].asks, pc.seesawBet);
+              if (w) {
+                shares = w.shares;
+                price = w.price;
+                fees = shares * feePerShare(price);
+              }
+            }
+            if (!(shares > 0)) {
+              await log({ side: sd, ask: a, did: `seesaw: score ${ss.score} but the $${pc.seesawBet} buy filled nothing` });
+            } else {
+              const reason = `seesaw: score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
+                pc.seesawBet
+              } ${sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
+              await sql`insert into pump_trades ${sql({
+                window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: sd, stake: shares * price,
+                shares, price, fees, opened_sec: TF - left, p_pump: null, order_id: orderId, reason, kind: "seesaw",
+                features: sql.json({ ...fs, score: ss } as never),
+              })}`;
+              entries++;
+              did.push(`seesaw ${sd} @ ${(price * 100).toFixed(1)}¢`);
+              await log({ side: sd, ask: a, did: reason });
+            }
+          } catch (e) {
+            await log({ side: sd, ask: a, did: `seesaw buy error: ${(e as Error).message.slice(0, 160)}` });
+          }
+          busy = false;
+        }
+      } else if (pos && !busy) {
         const side = pos.side as Side;
         const bid = books[side].bids[0]?.[0] ?? null;
         if (nowMs - lastLive >= 2000) {
@@ -4944,7 +5019,7 @@ async function pumpStatus() {
   const pc = pumpSettings();
   const mode = pc.live ? "live" : "dry";
   const [trades, logRows, kv, tot] = await Promise.all([
-    sql`select id, window_start, mode, side, stake, shares, price, fees, opened_sec, p_pump, status, sold_shares, proceeds,
+    sql`select id, window_start, mode, coalesce(kind, 'pump') as kind, side, stake, shares, price, fees, opened_sec, p_pump, status, sold_shares, proceeds,
       exit_fees, exit_price, exit_sec, exit_why, result, pnl, reason, opened_at, closed_at from pump_trades
       order by id desc limit 80`,
     sql`select id, window_start, at_sec, side, ask, bid, p_pump, choice, did, created_at from pump_log order by id desc limit 80`,
@@ -4952,7 +5027,8 @@ async function pumpStatus() {
     sql`select mode, count(*)::int as n, count(*) filter (where pnl > 0)::int as wins, coalesce(sum(pnl), 0) as pnl,
       count(*) filter (where exit_why = 'take profit')::int as tp, count(*) filter (where exit_why = 'stop loss')::int as sl,
       count(*) filter (where exit_why = 'time')::int as timed,
-      count(*) filter (where exit_why = 'held to settlement')::int as held from pump_trades where status in ('closed', 'settled') group by mode`,
+      count(*) filter (where exit_why = 'held to settlement')::int as held, coalesce(kind, 'pump') as kind
+      from pump_trades where status in ('closed', 'settled') group by mode, coalesce(kind, 'pump')`,
   ]);
   const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
   const rec = (await sql`select count(*)::int as rows, count(distinct window_start)::int as windows,

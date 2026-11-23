@@ -35,8 +35,10 @@ const Pump = () => {
   }, []);
 
   const st = s?.settings;
-  const tot = s?.totals.find((t) => t.mode === s.mode);
-  const open = s?.trades.find((t) => t.status === "open");
+  const tot = s?.totals.find((t) => t.mode === s.mode && (t.kind ?? "pump") === "pump");
+  const seeTot = s?.totals.find((t) => t.mode === s.mode && t.kind === "seesaw");
+  const open = s?.trades.find((t) => t.status === "open" && (t.kind ?? "pump") === "pump");
+  const seeOpen = (s?.trades ?? []).filter((t) => t.status === "open" && t.kind === "seesaw").length;
   const ran = s?.lastRun ? Math.round(Date.now() / 1000 - s.lastRun.at) : null;
   const trades = (s?.trades ?? []).filter((t) => t.mode === s?.mode);
   const log = (s?.log ?? []).filter((l) => showAll || !/no buy$/.test(l.did) || (l.p_pump ?? 0) >= 0.3).slice(0, 40);
@@ -58,7 +60,10 @@ const Pump = () => {
           <section className={card}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
-                {st
+                {st?.seesaw
+                  ? `SEESAW: watches both sides under ${st.maxAsk}¢; every time a side's score reaches ${st.seesawScore}, buys $${st.seesawBet} ` +
+                    `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window) and holds to resolution.`
+                  : st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
                     `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
                     `${st.autoScore ? `; at ${st.autoScore}+ with flow ${st.autoFlow ?? 15}+ and turn ${st.autoTurn ?? 10}+ it buys without asking` : ""}. ` +
@@ -105,6 +110,14 @@ const Pump = () => {
                 </div>
               </div>
             </div>
+            {seeTot || seeOpen ? (
+              <div className="mt-3 text-sm">
+                <span className="text-xs text-[#8b949e]">Seesaw: </span>
+                {seeTot ? `${seeTot.n} settled, ${seeTot.wins} won (${seeTot.n ? Math.round((seeTot.wins / seeTot.n) * 100) : 0}%), ` : ""}
+                <span className={`tabular-nums ${tone(seeTot ? Number(seeTot.pnl) : null)}`}>{seeTot ? signed(Number(seeTot.pnl)) : ""}</span>
+                {seeOpen ? <span className="text-xs text-[#8b949e]"> · {seeOpen} open</span> : null}
+              </div>
+            ) : null}
             <div className="mt-3 text-xs text-[#8b949e]">
               {open
                 ? `Holding ${open.side === "up" ? "Up" : "Down"}: ${open.shares.toFixed(2)} @ ${c(open.price)} — ${
@@ -181,7 +194,10 @@ const Pump = () => {
                 {trades.map((t) => (
                   <tr key={t.id} className="border-t border-[#21262d]" title={t.reason ?? ""}>
                     <td className="py-1 tabular-nums">{hhmm(t.window_start)}</td>
-                    <td>{t.side}</td>
+                    <td>
+                      {t.side}
+                      {t.kind === "seesaw" ? <span className="ml-1 text-[10px] text-[#d29922]">seesaw</span> : null}
+                    </td>
                     <td className="tabular-nums">{c(t.price)}</td>
                     <td className="tabular-nums">{t.p_pump !== null ? `${Math.round(t.p_pump * 100)}%` : ""}</td>
                     <td>{t.status === "open" ? "open" : t.exit_why ?? t.result}</td>
@@ -222,6 +238,11 @@ const Pump = () => {
               pad(`PUMP_AUTO_FLOW=${st?.autoFlow ?? 15}`, "…and buying pressure at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_AUTO_TURN=${st?.autoTurn ?? 10}`, "…and price turning up at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_THIN=${st?.thin ?? "20-300"}`, "offers up to 2× ($): at/under the first = thin (full points)"),
+              pad(`PUMP_SEESAW=${st?.seesaw ? "1" : "0"}`, "1 = seesaw mode (replaces auto-buy/Jev buys)"),
+              pad(`PUMP_SEESAW_SCORE=${st?.seesawScore ?? 50}`, "seesaw: buy when a side's score reaches this"),
+              pad(`PUMP_SEESAW_BET=${st?.seesawBet ?? 1}`, "seesaw: $ per buy (at least $1)"),
+              pad(`PUMP_SEESAW_EVERY=${st?.seesawEvery ?? 15}`, "seesaw: re-buy every N s while the score stays up"),
+              pad(`PUMP_SEESAW_MAX=${st?.seesawMax ?? 30}`, "seesaw: most buys per window"),
               pad(`PUMP_ON=${st?.on === false ? "0" : "1"}`, "0 = off"),
             ].join("\n")}
           </pre>
