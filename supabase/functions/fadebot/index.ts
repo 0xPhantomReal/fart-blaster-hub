@@ -4670,7 +4670,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const did: string[] = [];
 
     const buy = async (side: Side, f: PumpFeatures, sc: PumpScore, j: { choice: string; pPump: number | null }) => {
-      const why = j.pPump === null ? `score ${sc.score} auto-buy` : `Jev said pump (${Math.round(j.pPump * 100)}%)`;
+      const why = j.pPump === null ? `score ${sc.score} auto-buy` : `Jev gave it ${Math.round(j.pPump * 100)}% to win`;
       const books = tape.books();
       const ask = books[side].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
@@ -4705,7 +4705,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
         j.pPump === null
           ? `auto-buy (score ≥ ${pc.autoScore}, flow ≥ ${pc.autoFlow}, turn ≥ ${pc.autoTurn}; Jev not asked)`
-          : `Jev ${Math.round(j.pPump * 100)}% pump`
+          : `Jev ${Math.round(j.pPump * 100)}% win`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
         ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; ${
           pc.hold
@@ -4936,7 +4936,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                   side: t.side, paid_c: Math.round(Number(t.price) * 1000) / 10, exit: t.exit_why, pnl: Math.round(Number(t.pnl) * 100) / 100,
                 })),
               });
-              // The bar is Jev's pump probability (PUMP_MIN_PROB), not his pump/no pick (which means over 50%).
+              // The bar is Jev's win probability (PUMP_MIN_PROB), not his win/lose pick (which means over 50%).
               if (j.pPump >= pc.minProb && !pos && entries < pc.maxTrades) {
                 busy = true;
                 await buy(c.side, f, sc, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
@@ -4944,7 +4944,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               } else {
                 await log({
                   side: c.side, ask: c.ask, bid: books[c.side].bids[0]?.[0] ?? null, p_pump: j.pPump, choice: j.choice,
-                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% pump (need ${Math.round(pc.minProb * 100)}%): no buy`,
+                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% win (need ${Math.round(pc.minProb * 100)}%): no buy`,
                   features: sql.json({ ...f, score: sc } as never),
                 });
               }

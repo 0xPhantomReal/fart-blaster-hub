@@ -65,7 +65,7 @@ const Pump = () => {
                     `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window) and holds to resolution.`
                   : st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
-                    `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives ${st.minProb}%+ to pump ${st.tp}%` +
+                    `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives it ${st.minProb}%+ to win` +
                     `${st.autoScore ? `; at ${st.autoScore}+ with flow ${st.autoFlow ?? 15}+ and turn ${st.autoTurn ?? 10}+ it buys without asking` : ""}. ` +
                     (st.hold
                       ? "Holds every buy to resolution."
@@ -229,7 +229,7 @@ const Pump = () => {
               pad(`PUMP_MIN_LEFT=${st?.minLeft ?? 200}`, "no buys with fewer seconds left"),
               pad(`PUMP_MAX_LEFT=${st?.maxLeft ?? 0}`, "no buys with more seconds left (0 = off; 45 = last 45 s only)"),
               pad(`PUMP_JEV_EVERY=${st?.jevEvery ?? 5}`, "ask Jev every N s while a side is cheap"),
-              pad(`PUMP_MIN_PROB=${st?.minProb ?? 40}`, "Jev's pump chance needed to buy (%)"),
+              pad(`PUMP_MIN_PROB=${st?.minProb ?? 40}`, "Jev's win chance needed to buy (%)"),
               pad(`PUMP_SLIP=${st?.slip ?? 2}`, "skip if the ask rose more than this (¢) while Jev thought"),
               pad(`PUMP_MAX_TRADES=${st?.maxTrades ?? 1}`, "buys per window"),
               pad(`PUMP_DAILY_LOSS=${st?.dailyLoss ?? 20}`, "stop buying for the day after losing this ($)"),
