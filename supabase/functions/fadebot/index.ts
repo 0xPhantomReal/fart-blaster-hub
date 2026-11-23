@@ -4384,9 +4384,13 @@ function pumpSettings() {
     seesawMax: Math.max(1, Math.round(n("PUMP_SEESAW_MAX", 30))),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
-    // Which side of PUMP_MIN_PROB buys: "below" (default) = buy when Jev's win chance is UNDER it (fade Jev);
-    // "above" = buy when it's at or over it.
-    jevBelow: env("PUMP_JEV_DIR") !== "above",
+    // Which Jev win chances buy, against PUMP_MIN_PROB: "below" (default) = under it (fade Jev); "above" = at or over.
+    jevDir: (env("PUMP_JEV_DIR") === "above" ? "above" : "below") as "below" | "above",
+    // A band instead (overrides the line): PUMP_JEV_RANGE=10-11 buys only when Jev says 10%–11% (ends included).
+    jevRange: ((x) => {
+      const m = x.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
+      return m && Number(m[2]) >= Number(m[1]) ? { lo: Number(m[1]), hi: Number(m[2]) } : null;
+    })(env("PUMP_JEV_RANGE")),
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
     maxTrades: Math.max(1, Math.round(n("PUMP_MAX_TRADES", 1))),
     dailyLoss: Math.max(1, n("PUMP_DAILY_LOSS", 20)),
@@ -4708,7 +4712,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
         j.pPump === null
           ? `auto-buy (score ≥ ${pc.autoScore}, flow ≥ ${pc.autoFlow}, turn ≥ ${pc.autoTurn}; Jev not asked)`
-          : `Jev ${Math.round(j.pPump * 100)}% win`
+          : `Jev ${Math.round(j.pPump * 1000) / 10}% win`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
         ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; ${
           pc.hold
@@ -4941,7 +4945,12 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               });
               // The bar is Jev's win probability (PUMP_MIN_PROB), not his win/lose pick (which means over 50%):
               // buy when it's below the bar (PUMP_JEV_DIR=below, the default) or at/above it (PUMP_JEV_DIR=above).
-              const pass = pc.jevBelow ? j.pPump < pc.minProb : j.pPump >= pc.minProb;
+              const pct = Math.round(j.pPump * 1000) / 10; // to 0.1%
+              const pass = pc.jevRange
+                ? pct >= pc.jevRange.lo && pct <= pc.jevRange.hi
+                : pc.jevDir === "below"
+                ? j.pPump < pc.minProb
+                : j.pPump >= pc.minProb;
               if (pass && !pos && entries < pc.maxTrades) {
                 busy = true;
                 await buy(c.side, f, sc, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
@@ -4949,7 +4958,11 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               } else {
                 await log({
                   side: c.side, ask: c.ask, bid: books[c.side].bids[0]?.[0] ?? null, p_pump: j.pPump, choice: j.choice,
-                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% win (buys ${pc.jevBelow ? "under" : "at/over"} ${Math.round(pc.minProb * 100)}%): no buy`,
+                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 1000) / 10}% win (buys ${
+                    pc.jevRange
+                      ? `at ${pc.jevRange.lo}–${pc.jevRange.hi}`
+                      : `${pc.jevDir === "below" ? "under" : "at/over"} ${Math.round(pc.minProb * 100)}`
+                  }%): no buy`,
                   features: sql.json({ ...f, score: sc } as never),
                 });
               }

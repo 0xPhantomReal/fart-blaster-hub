@@ -1220,7 +1220,8 @@ export interface PumpStatus {
     maxTrades: number;
     dailyLoss: number;
     minScore?: number;
-    jevBelow?: boolean;
+    jevDir?: "below" | "above";
+    jevRange?: { lo: number; hi: number } | null;
     seesaw?: boolean;
     seesawScore?: number;
     seesawBet?: number;
