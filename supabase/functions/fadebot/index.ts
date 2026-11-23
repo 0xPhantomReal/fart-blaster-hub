@@ -4384,6 +4384,9 @@ function pumpSettings() {
     seesawMax: Math.max(1, Math.round(n("PUMP_SEESAW_MAX", 30))),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
+    // Which side of PUMP_MIN_PROB buys: "below" (default) = buy when Jev's win chance is UNDER it (fade Jev);
+    // "above" = buy when it's at or over it.
+    jevBelow: env("PUMP_JEV_DIR") !== "above",
     slip: Math.max(0, n("PUMP_SLIP", 2) / 100),
     maxTrades: Math.max(1, Math.round(n("PUMP_MAX_TRADES", 1))),
     dailyLoss: Math.max(1, n("PUMP_DAILY_LOSS", 20)),
@@ -4936,15 +4939,17 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                   side: t.side, paid_c: Math.round(Number(t.price) * 1000) / 10, exit: t.exit_why, pnl: Math.round(Number(t.pnl) * 100) / 100,
                 })),
               });
-              // The bar is Jev's win probability (PUMP_MIN_PROB), not his win/lose pick (which means over 50%).
-              if (j.pPump >= pc.minProb && !pos && entries < pc.maxTrades) {
+              // The bar is Jev's win probability (PUMP_MIN_PROB), not his win/lose pick (which means over 50%):
+              // buy when it's below the bar (PUMP_JEV_DIR=below, the default) or at/above it (PUMP_JEV_DIR=above).
+              const pass = pc.jevBelow ? j.pPump < pc.minProb : j.pPump >= pc.minProb;
+              if (pass && !pos && entries < pc.maxTrades) {
                 busy = true;
                 await buy(c.side, f, sc, j).catch((e) => log({ side: c.side, did: `buy error: ${(e as Error).message.slice(0, 160)}` }));
                 busy = false;
               } else {
                 await log({
                   side: c.side, ask: c.ask, bid: books[c.side].bids[0]?.[0] ?? null, p_pump: j.pPump, choice: j.choice,
-                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% win (need ${Math.round(pc.minProb * 100)}%): no buy`,
+                  did: `score ${sc.score} → Jev ${Math.round(j.pPump * 100)}% win (buys ${pc.jevBelow ? "under" : "at/over"} ${Math.round(pc.minProb * 100)}%): no buy`,
                   features: sql.json({ ...f, score: sc } as never),
                 });
               }
