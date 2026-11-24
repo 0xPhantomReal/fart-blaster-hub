@@ -4403,6 +4403,13 @@ function pumpSettings() {
     avgBet: Math.max(1, n("PUMP_AVG_BET", 1)),
     avgAdds: Math.max(0, Math.round(n("PUMP_AVG_ADDS", 5))),
     avgTp: Math.max(0, n("PUMP_AVG_TP", 2) / 100),
+    // Smart adds: a drop only makes a side ELIGIBLE. Before each add Jev is asked the chance the side's bid recovers
+    // to the WHOLE position's after-fee break-even (all buys + this add) before the window ends; add only at
+    // PUMP_AVG_JEV_MIN % or more (PUMP_AVG_JEV=0 skips Jev). Optionally the microstructure score must be at least
+    // PUMP_AVG_SCORE too (0 = not needed). After a "no", it waits PUMP_SEESAW_EVERY s before asking again.
+    avgJev: env("PUMP_AVG_JEV") !== "0",
+    avgJevMin: Math.min(1, Math.max(0, n("PUMP_AVG_JEV_MIN", 50) / 100)),
+    avgScore: Math.min(100, Math.max(0, n("PUMP_AVG_SCORE", 0))),
     seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
     // Bands instead (override the minimum): PUMP_SEESAW_JEV_RANGE=10-20,40-60 buys only when Jev says 10–20% or
     // 40–60% (ends included). Any unreadable part makes the whole setting unreadable (then the minimum applies).
@@ -4711,6 +4718,8 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const seeAsking: Record<Side, boolean> = { up: false, down: false };
     // Averaging-down adds made this window, per side.
     const seeAdds: Record<Side, number> = { up: 0, down: 0 };
+    // When an add was last considered per side (so a "no" isn't re-asked every half second).
+    const avgAskedAt: Record<Side, number> = { up: 0, down: 0 };
     if (pc.seesaw) {
       for (const r of await sql`select side, count(*)::int as n from pump_trades where coalesce(kind, 'pump') = 'seesaw'
           and window_start = ${start} and reason like 'seesaw: average down%' group by side`) {
@@ -5018,21 +5027,95 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 const last = grp.reduce((a, x) => (Number(x.p.id) > Number(a.p.id) ? x : a)).p;
                 const askNow = tape.books()[sd].asks[0]?.[0];
                 const leftNow = end - Date.now() / 1000;
-                if (
-                  askNow !== undefined && askNow >= 0.02 && askNow <= Number(last.price) * (1 - pc.avgDrop) + 1e-9 &&
-                  seeAdds[sd] < pc.avgAdds && !seeLocked && entries < pc.seesawMax && leftNow >= pc.minLeft &&
-                  today > -pc.dailyLoss
-                ) {
-                  seeAdds[sd]++;
+                const eligible = askNow !== undefined && askNow >= 0.02 &&
+                  askNow <= Number(last.price) * (1 - pc.avgDrop) + 1e-9 && seeAdds[sd] < pc.avgAdds && !seeLocked &&
+                  entries < pc.seesawMax && leftNow >= pc.minLeft && today > -pc.dailyLoss && !seeAsking[sd] &&
+                  Date.now() - avgAskedAt[sd] >= pc.seesawEvery * 1000;
+                if (eligible && askNow !== undefined) {
+                  avgAskedAt[sd] = Date.now();
                   const btcA: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
                   const fsA = pumpFeatures(tape, sd, leftNow, btcA, Date.now());
                   const ssA = pumpScore(fsA, tape, Date.now(), pc.thin);
-                  await seeBuy(
-                    sd, fsA, ssA,
-                    `average down (add ${seeAdds[sd]}/${pc.avgAdds}: ask ${Math.round(askNow * 100)}¢ is ${Math.round((1 - askNow / Number(last.price)) * 100)}% under the last fill ${(Number(last.price) * 100).toFixed(1)}¢; ${sd} position ${(g * 100).toFixed(1)}%) → `,
-                    null,
-                    { direct: true, bet: pc.avgBet },
-                  );
+                  const drop = `ask ${Math.round(askNow * 100)}¢ is ${Math.round((1 - askNow / Number(last.price)) * 100)}% under the last fill ${(Number(last.price) * 100).toFixed(1)}¢; ${sd} position ${(g * 100).toFixed(1)}%`;
+                  if (pc.avgScore > 0 && ssA.score < pc.avgScore) {
+                    await log({ side: sd, ask: askNow, did: `seesaw ${sd}: ${drop}, but score ${ssA.score} < ${pc.avgScore}: no add` });
+                  } else {
+                    // The whole position's after-fee break-even bid if we add $PUMP_AVG_BET now:
+                    // shares·(b − 0.095·b·(1−b)) = everything paid so far (stakes + both fees) − what's been sold.
+                    const fillA = walkBuy(tape.books()[sd].asks, pc.avgBet)?.price ?? askNow;
+                    const sharesAfter = grp.reduce((a, x) => a + x.m.leftSh, 0) + pc.avgBet / fillA;
+                    const paid = grp.reduce(
+                      (a, x) => a + Number(x.p.stake) + Number(x.p.fees) + Number(x.p.exit_fees) - Number(x.p.proceeds),
+                      0,
+                    ) + pc.avgBet * (1 + 0.095 * (1 - fillA));
+                    const k = paid / sharesAfter;
+                    const beBid = (-0.905 + Math.sqrt(0.905 * 0.905 + 4 * 0.095 * k)) / (2 * 0.095);
+                    const beC = Math.round(beBid * 1000) / 10;
+                    const avgC = Math.round(((grp.reduce((a, x) => a + Number(x.p.stake), 0) + pc.avgBet) / sharesAfter) * 1000) / 10;
+                    const addNow = async (jevNote: string, pJ: number | null) => {
+                      while (busy) await new Promise((r) => setTimeout(r, 50));
+                      const ask2 = tape.books()[sd].asks[0]?.[0];
+                      if (
+                        ask2 === undefined || ask2 > askNow + 0.01 + 1e-9 || seeAdds[sd] >= pc.avgAdds || seeLocked ||
+                        entries >= pc.seesawMax
+                      ) {
+                        await log({ side: sd, ask: ask2 ?? null, did: `seesaw ${sd}: ${jevNote}but the ask moved to ${ask2 === undefined ? "—" : Math.round(ask2 * 100) + "¢"}: no add` });
+                        return;
+                      }
+                      busy = true;
+                      try {
+                        seeAdds[sd]++;
+                        await seeBuy(
+                          sd, fsA, ssA,
+                          `average down (add ${seeAdds[sd]}/${pc.avgAdds}: ${drop}; ${jevNote}position break-even ${beC}¢, avg ${avgC}¢) → `,
+                          pJ,
+                          { direct: true, bet: pc.avgBet },
+                        );
+                      } finally {
+                        busy = false;
+                      }
+                    };
+                    if (!pc.avgJev) {
+                      busy = false;
+                      await addNow("", null);
+                      busy = true;
+                    } else {
+                      seeAsking[sd] = true;
+                      const btcNow = btcA.price;
+                      const job = (async () => {
+                        try {
+                          const j = await askJevBreakeven(
+                            fsA, ssA, beC,
+                            {
+                              btc_orderflow_coinbase_spot_and_hyperliquid_perp: flow.snapshot(Date.now(), btcNow),
+                              our_position_on_this_side: {
+                                buys: grp.length, shares_after_add: Math.round(sharesAfter * 100) / 100,
+                                average_price_after_add_c: avgC, break_even_bid_after_fees_c: beC,
+                                position_now_pct: Math.round(g * 1000) / 10,
+                              },
+                            },
+                            `This is an AVERAGE-DOWN decision: we already hold ${grp.length} buy${grp.length > 1 ? "s" : ""} of this side ` +
+                              `and its price has fallen. Adding now lowers our average to ${avgC}¢; the whole position breaks even ` +
+                              `after fees if the bid reaches ${beC}¢. Only say reach if you expect a real bounce (bitcoin turning ` +
+                              "toward this side, sellers exhausted, buyers stepping in) — not a falling knife that keeps falling.",
+                          );
+                          const pct = Math.round(j.p * 1000) / 10;
+                          const note = `Jev ${pct}% to recover to ${beC}¢; `;
+                          if (j.p < pc.avgJevMin) {
+                            await log({ side: sd, ask: askNow, p_pump: j.p, did: `seesaw ${sd}: ${drop}; ${note}(need ${Math.round(pc.avgJevMin * 100)}%): no add`, features: sql.json({ ...fsA, score: ssA } as never) });
+                          } else {
+                            await addNow(note, j.p);
+                          }
+                        } catch (e) {
+                          await log({ side: sd, did: `seesaw add: Jev error: ${(e as Error).message.slice(0, 160)}` });
+                        } finally {
+                          seeAsking[sd] = false;
+                        }
+                      })();
+                      seePending.add(job);
+                      job.finally(() => seePending.delete(job));
+                    }
+                  }
                 }
               }
             } else if (pc.seesawTp > 0) {

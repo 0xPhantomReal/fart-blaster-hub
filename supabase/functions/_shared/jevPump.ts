@@ -49,7 +49,13 @@ async function askJevHold(f: PumpFeatures, sc: PumpScore, extra: Record<string, 
 }
 
 /** Seesaw: will this side's bid reach the price that breaks even after both fees, before the window ends? */
-export async function askJevBreakeven(f: PumpFeatures, sc: PumpScore, beC: number, extra: Record<string, unknown> = {}) {
+export async function askJevBreakeven(
+  f: PumpFeatures,
+  sc: PumpScore,
+  beC: number,
+  extra: Record<string, unknown> = {},
+  context = "",
+) {
   const ask_c = f.ask_c ?? 0;
   const side = f.side === "up" ? "Up" : "Down";
   const q = {
@@ -68,7 +74,7 @@ export async function askJevBreakeven(f: PumpFeatures, sc: PumpScore, beC: numbe
       `The bot's microstructure score is ${sc.score}/100 (flow ${sc.parts.flow}, thin offers ${sc.parts.thin}, bids ` +
       `${sc.parts.bids}, turn ${sc.parts.turn}, bitcoin ${sc.parts.btc}). Be realistic: the round trip costs about a ` +
       "fifth of the price, so the bid has to rise well above where it is now. Answer reach or no, with your real " +
-      "probability that it reaches the break-even.",
+      "probability that it reaches the break-even." + (context ? " " + context : ""),
     criteria: {
       reach: `This side's bid reaches ${beC}¢ before the window ends`,
       no: `It doesn't reach ${beC}¢`,

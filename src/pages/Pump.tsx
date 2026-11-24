@@ -65,7 +65,9 @@ const Pump = () => {
                     `${st.seesawJev !== false ? ` and Jev gives ${st.seesawJevRange ? `${st.seesawJevRange.map((r) => `${r.lo}–${r.hi}`).join(" or ")}%` : `${Math.round((st.seesawJevMin ?? 0.5) * 100)}%+`} that its bid reaches break-even after fees` : ""}, buys $${st.seesawBet} ` +
                     `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window). ` +
                     (st.avg
-                      ? `Averages down: another $${st.avgBet} each time a side's ask is ${Math.round((st.avgDrop ?? 0.1) * 100)}% under its last fill (up to ${st.avgAdds} adds), and sells all of a side once its buys are +${Math.round((st.avgTp ?? 0.02) * 100)}% together after fees; `
+                      ? `Averages down: when a side's ask is ${Math.round((st.avgDrop ?? 0.1) * 100)}% under its last fill` +
+                        `${st.avgJev !== false ? ` and Jev gives ${Math.round((st.avgJevMin ?? 0.5) * 100)}%+ that it bounces to the whole position's break-even` : ""}` +
+                        `${st.avgScore ? ` with score ${st.avgScore}+` : ""}, adds $${st.avgBet} (up to ${st.avgAdds}), and sells all of a side once its buys are +${Math.round((st.avgTp ?? 0.02) * 100)}% together after fees; `
                       : `${st.seesawTp ? `Sells a buy at +${Math.round(st.seesawTp * 100)}% after fees; ` : ""}`) +
                     `${st.seesawTarget ? `once the window's buys are +${Math.round(st.seesawTarget * 100)}% in total it sells the rest and stops; ` : ""}` +
                     "anything left holds to resolution."
@@ -280,6 +282,9 @@ const Pump = () => {
               pad(`PUMP_AVG_BET=${st?.avgBet ?? 1}`, "$ per average-down add"),
               pad(`PUMP_AVG_ADDS=${st?.avgAdds ?? 5}`, "most adds per side per window"),
               pad(`PUMP_AVG_TP=${st?.avgTp !== undefined ? Math.round(st.avgTp * 100) : 2}`, "sell all of a side when its buys are up this % together (after fees)"),
+              pad(`PUMP_AVG_JEV=${st?.avgJev === false ? "0" : "1"}`, "ask Jev before each add (0 = add on the drop alone)"),
+              pad(`PUMP_AVG_JEV_MIN=${st?.avgJevMin !== undefined ? Math.round(st.avgJevMin * 100) : 50}`, "Jev's chance of a bounce to the position's break-even needed (%)"),
+              pad(`PUMP_AVG_SCORE=${st?.avgScore ?? 0}`, "score needed for an add too (0 = not needed)"),
               pad(`PUMP_SEESAW_TP=${st?.seesawTp !== undefined ? Math.round(st.seesawTp * 100) : 3}`, "seesaw: sell a buy at +this % after fees (0 = off)"),
               pad(`PUMP_SEESAW_TARGET=${st?.seesawTarget !== undefined ? Math.round(st.seesawTarget * 100) : 5}`, "seesaw: window up this % in total → sell all, stop (0 = off)"),
               pad(`PUMP_SEESAW_JEV=${st?.seesawJev === false ? "0" : "1"}`, "seesaw: ask Jev to grade each buy (0 = off)"),
