@@ -62,7 +62,7 @@ const Pump = () => {
               <div className="text-sm">
                 {st?.seesaw
                   ? `SEESAW: watches both sides under ${st.maxAsk}¢; every time a side's score reaches ${st.seesawScore}` +
-                    `${st.seesawJev !== false ? ` and Jev gives ${st.seesawJevRange ? `${st.seesawJevRange.lo}–${st.seesawJevRange.hi}%` : `${Math.round((st.seesawJevMin ?? 0.5) * 100)}%+`} that its bid reaches break-even after fees` : ""}, buys $${st.seesawBet} ` +
+                    `${st.seesawJev !== false ? ` and Jev gives ${st.seesawJevRange ? `${st.seesawJevRange.map((r) => `${r.lo}–${r.hi}`).join(" or ")}%` : `${Math.round((st.seesawJevMin ?? 0.5) * 100)}%+`} that its bid reaches break-even after fees` : ""}, buys $${st.seesawBet} ` +
                     `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window). ` +
                     `${st.seesawTp ? `Sells a buy at +${Math.round(st.seesawTp * 100)}% after fees; ` : ""}` +
                     `${st.seesawTarget ? `once the window's buys are +${Math.round(st.seesawTarget * 100)}% in total it sells the rest and stops; ` : ""}` +
@@ -275,7 +275,7 @@ const Pump = () => {
               pad(`PUMP_SEESAW_TP=${st?.seesawTp !== undefined ? Math.round(st.seesawTp * 100) : 3}`, "seesaw: sell a buy at +this % after fees (0 = off)"),
               pad(`PUMP_SEESAW_TARGET=${st?.seesawTarget !== undefined ? Math.round(st.seesawTarget * 100) : 5}`, "seesaw: window up this % in total → sell all, stop (0 = off)"),
               pad(`PUMP_SEESAW_JEV=${st?.seesawJev === false ? "0" : "1"}`, "seesaw: ask Jev to grade each buy (0 = off)"),
-              pad(`PUMP_SEESAW_JEV_RANGE=${st?.seesawJevRange ? `${st.seesawJevRange.lo}-${st.seesawJevRange.hi}` : ""}`, "seesaw: e.g. 30-50 — buy only when Jev says 30–50% (overrides the min)"),
+              pad(`PUMP_SEESAW_JEV_RANGE=${st?.seesawJevRange ? st.seesawJevRange.map((r) => `${r.lo}-${r.hi}`).join(",") : ""}`, "seesaw: e.g. 10-20,40-60 — buy only when Jev is in a range (overrides the min)"),
               pad(`PUMP_SEESAW_JEV_MIN=${st?.seesawJevMin !== undefined ? Math.round(st.seesawJevMin * 100) : 50}`, "seesaw: Jev's chance the bid reaches break-even needed (%)"),
               pad(`PUMP_ON=${st?.on === false ? "0" : "1"}`, "0 = off"),
             ].join("\n")}

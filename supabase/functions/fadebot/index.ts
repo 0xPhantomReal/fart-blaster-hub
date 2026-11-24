@@ -4392,10 +4392,17 @@ function pumpSettings() {
     // before the window ends; buy only at PUMP_SEESAW_JEV_MIN % or more. PUMP_SEESAW_JEV=0 skips Jev.
     seesawJev: env("PUMP_SEESAW_JEV") !== "0",
     seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
-    // A band instead (overrides the minimum): PUMP_SEESAW_JEV_RANGE=30-50 buys only when Jev says 30%–50% (ends in).
+    // Bands instead (override the minimum): PUMP_SEESAW_JEV_RANGE=10-20,40-60 buys only when Jev says 10–20% or
+    // 40–60% (ends included). Any unreadable part makes the whole setting unreadable (then the minimum applies).
     seesawJevRange: ((x) => {
-      const m = x.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
-      return m && Number(m[2]) >= Number(m[1]) ? { lo: Number(m[1]), hi: Number(m[2]) } : null;
+      if (!x.trim()) return null;
+      const out: { lo: number; hi: number }[] = [];
+      for (const part of x.split(",")) {
+        const m = part.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
+        if (!m || Number(m[2]) < Number(m[1])) return null;
+        out.push({ lo: Number(m[1]), hi: Number(m[2]) });
+      }
+      return out.length ? out : null;
     })(env("PUMP_SEESAW_JEV_RANGE")),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
@@ -5022,9 +5029,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               const askNow = tape.books()[sd].asks[0]?.[0];
               const leftNow = end - Date.now() / 1000;
               const jr = pc.seesawJevRange;
-              const jevOk = jr ? pct >= jr.lo && pct <= jr.hi : j.p >= pc.seesawJevMin;
+              const jevOk = jr ? jr.some((r) => pct >= r.lo && pct <= r.hi) : j.p >= pc.seesawJevMin;
               if (!jevOk) {
-                await log({ side: sd, ask: a, p_pump: j.p, choice: j.choice, did: `seesaw: score ${ss.score} → ${note} (buys at ${jr ? `${jr.lo}–${jr.hi}` : `${Math.round(pc.seesawJevMin * 100)}+`}%): no buy`, features: sql.json({ ...fs, score: ss } as never) });
+                await log({ side: sd, ask: a, p_pump: j.p, choice: j.choice, did: `seesaw: score ${ss.score} → ${note} (buys at ${jr ? jr.map((r) => `${r.lo}–${r.hi}`).join(" or ") : `${Math.round(pc.seesawJevMin * 100)}+`}%): no buy`, features: sql.json({ ...fs, score: ss } as never) });
               } else if (
                 askNow === undefined || askNow > a + 0.02 + 1e-9 || seeLocked || entries >= pc.seesawMax ||
                 leftNow < pc.minLeft || today <= -pc.dailyLoss
