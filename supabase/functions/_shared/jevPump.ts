@@ -47,3 +47,36 @@ async function askJevHold(f: PumpFeatures, sc: PumpScore, extra: Record<string, 
     confidence: typeof ans.confidence === "number" ? ans.confidence : null,
   };
 }
+
+/** Seesaw: will this side's bid reach the price that breaks even after both fees, before the window ends? */
+export async function askJevBreakeven(f: PumpFeatures, sc: PumpScore, beC: number, extra: Record<string, unknown> = {}) {
+  const ask_c = f.ask_c ?? 0;
+  const side = f.side === "up" ? "Up" : "Down";
+  const q = {
+    type: "choice",
+    instructions:
+      "You are grading a quick trade on Polymarket US's 5-minute bitcoin Up/Down market. We would BUY the " +
+      `${side.toUpperCase()} side now at market (ask ${ask_c}¢) and try to SELL it back into the bid later in this ` +
+      `window. After both fees and the spread, it only breaks even if this side's BID reaches ${beC}¢. Will the bid ` +
+      `reach ${beC}¢ at any point before the window ends (seconds_left)? A cheap side's bid only rises that far when ` +
+      "bitcoin moves toward this side (Up wants bitcoin above price_to_beat, Down below) or buyers lift its book. " +
+      "Judge it from: bitcoin's distance from the price to beat and its volatility over the time left " +
+      "(btc: dollars_against_this_side, sigmas_to_flip, vol_per_sqrt_sec), its latest moves and order flow on " +
+      "Coinbase spot and the Hyperliquid perp (aggressive buying/selling, order-flow imbalance, microprice), this " +
+      "side's Polymarket book (bids_top10, asks_top10, depth, imbalance) and trade flow, how fast its price has been " +
+      "moving (price_moves, ask_trace), and seconds_left. " +
+      `The bot's microstructure score is ${sc.score}/100 (flow ${sc.parts.flow}, thin offers ${sc.parts.thin}, bids ` +
+      `${sc.parts.bids}, turn ${sc.parts.turn}, bitcoin ${sc.parts.btc}). Be realistic: the round trip costs about a ` +
+      "fifth of the price, so the bid has to rise well above where it is now. Answer reach or no, with your real " +
+      "probability that it reaches the break-even.",
+    criteria: {
+      reach: `This side's bid reaches ${beC}¢ before the window ends`,
+      no: `It doesn't reach ${beC}¢`,
+    },
+  };
+  const a = await ask({ ...f, microstructure_score: sc, break_even_bid_c: beC, ...extra }, { be: q });
+  const ans = a.be;
+  if (!ans || (ans.choice !== "reach" && ans.choice !== "no")) throw new Error("unexpected TypeSafe response shape");
+  const p = ans.probabilities?.reach;
+  return { choice: ans.choice as "reach" | "no", p: typeof p === "number" ? p : ans.choice === "reach" ? 1 : 0 };
+}

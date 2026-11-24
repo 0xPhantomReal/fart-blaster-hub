@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  breakEvenBid,
   btcVolPerSec,
   feePerShare,
   MarketTape,
@@ -140,5 +141,17 @@ describe("pump bot: microstructure score", () => {
     expect(sc.parts.turn).toBeGreaterThan(0);
     expect(sc.parts.btc).toBeGreaterThan(10);
     expect(sc.score).toBeGreaterThan(70);
+  });
+});
+
+describe("break-even bid after fees", () => {
+  it("is the bid that pays back the fill plus both fees", () => {
+    for (const f of [0.1, 0.21, 0.3]) {
+      const b = breakEvenBid(f);
+      const net = (b - 0.095 * b * (1 - b)) / f - 1 - 0.095 * (1 - f);
+      expect(net).toBeCloseTo(0, 6);
+      expect(b).toBeGreaterThan(f);
+    }
+    expect(breakEvenBid(0.21)).toBeCloseTo(0.243, 2); // a 21¢ fill needs a ~24.3¢ bid
   });
 });

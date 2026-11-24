@@ -119,7 +119,7 @@ import { lightspeedCore } from "../_shared/lightspeedCore.ts";
 import { lightspeedLive } from "../_shared/lightspeedLive.ts";
 import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
-import { askJevPump } from "../_shared/jevPump.ts";
+import { askJevBreakeven, askJevPump } from "../_shared/jevPump.ts";
 import { BtcFlow } from "../_shared/btcFlow.ts";
 import {
   type BtcCtx,
@@ -132,6 +132,7 @@ import {
   pumpExit,
   pumpFeatures,
   pumpScore,
+  breakEvenBid,
   snapRow,
   DEFAULT_SCORE_CFG,
   type PumpScore,
@@ -4387,6 +4388,10 @@ function pumpSettings() {
     // stop buying for that window (0 = off). Anything not sold holds to resolution.
     seesawTp: Math.max(0, n("PUMP_SEESAW_TP", 3) / 100),
     seesawTarget: Math.max(0, n("PUMP_SEESAW_TARGET", 5) / 100),
+    // Seesaw + Jev: before each seesaw buy, ask Jev the chance this side's bid reaches the after-fees break-even
+    // before the window ends; buy only at PUMP_SEESAW_JEV_MIN % or more. PUMP_SEESAW_JEV=0 skips Jev.
+    seesawJev: env("PUMP_SEESAW_JEV") !== "0",
+    seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
     // Which Jev win chances buy, against PUMP_MIN_PROB: "below" (default) = under it (fade Jev); "above" = at or over.
@@ -4677,6 +4682,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     // deno-lint-ignore no-explicit-any
     let seeOpen: any[] = [];
     let seeDeployed = 0, seeRealized = 0, seeLocked = false, lastMgmt = 0;
+    // Jev questions in flight, one per side.
+    const seeAsking: Record<Side, boolean> = { up: false, down: false };
+    const seePending = new Set<Promise<void>>();
     if (pc.seesaw) {
       seeOpen = [...await sql`select * from pump_trades where coalesce(kind, 'pump') = 'seesaw' and market_slug = ${market.slug}
         and status = 'open' order by id`];
@@ -4808,6 +4816,48 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
             exit_price = ${px}, exit_why = ${why} where id = ${pos.id}`;
         pos = (await sql`select * from pump_trades where id = ${pos.id}`)[0];
         await log({ side, bid, did: `${why}: sold ${sold.toFixed(2)} of ${left.toFixed(2)} @ ${(px * 100).toFixed(1)}¢, selling the rest` });
+      }
+    };
+
+    // One seesaw buy: $PUMP_SEESAW_BET at market on `sd`, tracked for the seesaw exits.
+    const seeBuy = async (sd: Side, fs: PumpFeatures, ss: PumpScore, jevNote: string, pJev: number | null = null) => {
+      const a = tape.books()[sd].asks[0]?.[0] ?? null;
+      const left = end - Date.now() / 1000;
+      try {
+        let shares = 0, price = 0, fees = 0, orderId: string | null = null;
+        if (pc.live) {
+          const r = await marketBuy(market, sd, pc.seesawBet);
+          shares = r.shares;
+          price = r.price;
+          fees = r.fees;
+          orderId = r.id ?? null;
+        } else {
+          const w = walkBuy(tape.books()[sd].asks, pc.seesawBet);
+          if (w) {
+            shares = w.shares;
+            price = w.price;
+            fees = shares * feePerShare(price);
+          }
+        }
+        if (!(shares > 0)) {
+          await log({ side: sd, ask: a, did: `seesaw: score ${ss.score} but the $${pc.seesawBet} buy filled nothing` });
+        } else {
+          const reason = `seesaw: ${jevNote}score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
+            pc.seesawBet
+          } ${sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
+          const row = (await sql`insert into pump_trades ${sql({
+            window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: sd, stake: shares * price,
+            shares, price, fees, opened_sec: TF - left, p_pump: pJev, order_id: orderId, reason, kind: "seesaw",
+            features: sql.json({ ...fs, score: ss } as never),
+          })} returning *`)[0];
+          seeOpen.push(row);
+          seeDeployed += shares * price;
+          entries++;
+          did.push(`seesaw ${sd} @ ${(price * 100).toFixed(1)}¢`);
+          await log({ side: sd, ask: a, did: reason });
+        }
+      } catch (e) {
+        await log({ side: sd, ask: a, did: `seesaw buy error: ${(e as Error).message.slice(0, 160)}` });
       }
     };
 
@@ -4944,44 +4994,51 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           wasHot[sd] = hot;
           if (!fire) continue;
           lastFire[sd] = nowMs;
-          busy = true;
-          try {
-            let shares = 0, price = 0, fees = 0, orderId: string | null = null;
-            if (pc.live) {
-              const r = await marketBuy(market, sd, pc.seesawBet);
-              shares = r.shares;
-              price = r.price;
-              fees = r.fees;
-              orderId = r.id ?? null;
-            } else {
-              const w = walkBuy(books[sd].asks, pc.seesawBet);
-              if (w) {
-                shares = w.shares;
-                price = w.price;
-                fees = shares * feePerShare(price);
-              }
-            }
-            if (!(shares > 0)) {
-              await log({ side: sd, ask: a, did: `seesaw: score ${ss.score} but the $${pc.seesawBet} buy filled nothing` });
-            } else {
-              const reason = `seesaw: score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
-                pc.seesawBet
-              } ${sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
-              const row = (await sql`insert into pump_trades ${sql({
-                window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: sd, stake: shares * price,
-                shares, price, fees, opened_sec: TF - left, p_pump: null, order_id: orderId, reason, kind: "seesaw",
-                features: sql.json({ ...fs, score: ss } as never),
-              })} returning *`)[0];
-              seeOpen.push(row);
-              seeDeployed += shares * price;
-              entries++;
-              did.push(`seesaw ${sd} @ ${(price * 100).toFixed(1)}¢`);
-              await log({ side: sd, ask: a, did: reason });
-            }
-          } catch (e) {
-            await log({ side: sd, ask: a, did: `seesaw buy error: ${(e as Error).message.slice(0, 160)}` });
+          if (!pc.seesawJev) {
+            busy = true;
+            await seeBuy(sd, fs, ss, "");
+            busy = false;
+            continue;
           }
-          busy = false;
+          if (seeAsking[sd]) continue;
+          // Ask Jev to grade it: will the bid reach the after-fees break-even before the window ends?
+          seeAsking[sd] = true;
+          const fill0 = walkBuy(books[sd].asks, pc.seesawBet)?.price ?? a;
+          const beC = Math.round(breakEvenBid(fill0) * 1000) / 10;
+          const btcNow = btcS.price;
+          const job = (async () => {
+            try {
+              const j = await askJevBreakeven(fs, ss, beC, {
+                btc_orderflow_coinbase_spot_and_hyperliquid_perp: flow.snapshot(Date.now(), btcNow),
+              });
+              const pct = Math.round(j.p * 1000) / 10;
+              const note = `Jev ${pct}% to reach break-even ${beC}¢`;
+              const askNow = tape.books()[sd].asks[0]?.[0];
+              const leftNow = end - Date.now() / 1000;
+              if (j.p < pc.seesawJevMin) {
+                await log({ side: sd, ask: a, p_pump: j.p, choice: j.choice, did: `seesaw: score ${ss.score} → ${note} (need ${Math.round(pc.seesawJevMin * 100)}%): no buy`, features: sql.json({ ...fs, score: ss } as never) });
+              } else if (
+                askNow === undefined || askNow > a + 0.02 + 1e-9 || seeLocked || entries >= pc.seesawMax ||
+                leftNow < pc.minLeft || today <= -pc.dailyLoss
+              ) {
+                await log({ side: sd, ask: askNow ?? null, p_pump: j.p, did: `seesaw: ${note}, but the ask moved to ${askNow === undefined ? "—" : Math.round(askNow * 100) + "¢"} / ${Math.round(leftNow)} s left: no buy` });
+              } else {
+                while (busy) await new Promise((r) => setTimeout(r, 50));
+                busy = true;
+                try {
+                  await seeBuy(sd, fs, ss, `${note} → `, j.p);
+                } finally {
+                  busy = false;
+                }
+              }
+            } catch (e) {
+              await log({ side: sd, ask: a, did: `seesaw Jev error: ${(e as Error).message.slice(0, 160)}` });
+            } finally {
+              seeAsking[sd] = false;
+            }
+          })();
+          seePending.add(job);
+          job.finally(() => seePending.delete(job));
         }
       } else if (pos && !busy) {
         const side = pos.side as Side;
@@ -5078,6 +5135,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       await new Promise((r) => setTimeout(r, 200));
     }
     if (inflight) await Promise.race([inflight, new Promise((r) => setTimeout(r, 3000))]);
+    if (seePending.size) await Promise.race([Promise.all([...seePending]), new Promise((r) => setTimeout(r, 4000))]);
     if (snaps.length) await sql`insert into pump_snap ${sql(snaps.splice(0))}`.catch(() => {});
     btcAbort.stop = true;
     await Promise.race([btcRun, new Promise((r) => setTimeout(r, 1500))]);

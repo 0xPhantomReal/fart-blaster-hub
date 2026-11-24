@@ -566,3 +566,13 @@ export function snapRow(
   };
 }
 export type SnapRow = ReturnType<typeof snapRow>;
+
+/**
+ * The bid at which a buy filled at `fill` breaks even after both fees (0.095·p·(1−p) per share each way):
+ * solve b − 0.095·b·(1−b) = fill·(1 + 0.095·(1−fill)).
+ */
+export function breakEvenBid(fill: number, rate = 0.095) {
+  const k = fill * (1 + rate * (1 - fill));
+  const a = rate, b = 1 - rate;
+  return (-b + Math.sqrt(b * b + 4 * a * k)) / (2 * a);
+}
