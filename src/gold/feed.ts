@@ -1227,6 +1227,8 @@ export interface PumpStatus {
     seesawBet?: number;
     seesawEvery?: number;
     seesawMax?: number;
+    seesawTp?: number;
+    seesawTarget?: number;
     maxLeft?: number;
     hold?: boolean;
     betPct?: number;

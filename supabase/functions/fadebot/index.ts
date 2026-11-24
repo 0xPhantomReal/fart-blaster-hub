@@ -4382,6 +4382,11 @@ function pumpSettings() {
     // While a side stays at/above the score, buy again every this many seconds (it always buys when it first gets there).
     seesawEvery: Math.max(1, n("PUMP_SEESAW_EVERY", 15)),
     seesawMax: Math.max(1, Math.round(n("PUMP_SEESAW_MAX", 30))),
+    // Seesaw exits (after fees): sell a buy once it's up PUMP_SEESAW_TP % (0 = off), and once the window's seesaw
+    // buys together — sold plus still open — are up PUMP_SEESAW_TARGET % of what went in, sell everything left and
+    // stop buying for that window (0 = off). Anything not sold holds to resolution.
+    seesawTp: Math.max(0, n("PUMP_SEESAW_TP", 3) / 100),
+    seesawTarget: Math.max(0, n("PUMP_SEESAW_TARGET", 5) / 100),
     jevEvery: Math.max(1, n("PUMP_JEV_EVERY", 5)),
     minProb: Math.min(1, Math.max(0, n("PUMP_MIN_PROB", 40) / 100)),
     // Which Jev win chances buy, against PUMP_MIN_PROB: "below" (default) = under it (fade Jev); "above" = at or over.
@@ -4437,15 +4442,19 @@ async function setupPump() {
 }
 
 /** Sell exactly `shares` of `side` (immediate-or-cancel at any price), never the whole position in the market. */
-async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expect: number) {
+async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expect: number, floor = 0.01) {
   const yes = side === m.longIs;
+  // The lowest price per share we'll accept (our side's price), in whole cents: up for YES, and for NO it's a
+  // ceiling on the YES price we buy back at (1 − floor), rounded down.
+  const yesPx = yes ? Math.min(0.99, Math.ceil(Math.max(0.01, floor) * 100 - 1e-9) / 100)
+    : Math.max(0.01, Math.floor((1 - Math.max(0.01, floor)) * 100 + 1e-9) / 100);
   const order = (q: number) =>
     pm().orders.create({
       marketSlug: m.slug,
       intent: yes ? "ORDER_INTENT_SELL_LONG" : "ORDER_INTENT_SELL_SHORT",
       type: "ORDER_TYPE_LIMIT",
-      // Prices are YES prices: selling YES at 1¢ or better; selling NO = buying YES back at up to 99¢.
-      price: { value: yes ? "0.01" : "0.99", currency: "USD" },
+      // Prices are YES prices: selling YES at the floor or better; selling NO = buying YES back at up to 1 − floor.
+      price: { value: yesPx.toFixed(2), currency: "USD" },
       quantity: q,
       tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
       manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
@@ -4664,6 +4673,20 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           order by id desc limit 1`)[0] ?? null;
     // Seesaw state per side: was it at/above the score last loop, and when did it last buy.
     const wasHot: Record<Side, boolean> = { up: false, down: false };
+    // Seesaw bookkeeping for this window: open buys, what's been put in, profit already taken, and the lock.
+    // deno-lint-ignore no-explicit-any
+    let seeOpen: any[] = [];
+    let seeDeployed = 0, seeRealized = 0, seeLocked = false, lastMgmt = 0;
+    if (pc.seesaw) {
+      seeOpen = [...await sql`select * from pump_trades where coalesce(kind, 'pump') = 'seesaw' and market_slug = ${market.slug}
+        and status = 'open' order by id`];
+      const t = (await sql`select coalesce(sum(stake), 0) as dep, coalesce(sum(pnl) filter (where status = 'closed'), 0) as real
+        from pump_trades where coalesce(kind, 'pump') = 'seesaw' and window_start = ${start}`)[0];
+      seeDeployed = Number(t.dep);
+      seeRealized = Number(t.real);
+      const lk = (await sql`select v from pump_kv where k = 'seesaw_lock'`)[0]?.v as { window?: number } | undefined;
+      seeLocked = lk?.window === start;
+    }
     const lastFire: Record<Side, number> = { up: 0, down: 0 };
     let entries = Number((await sql`select count(*)::int as n from pump_trades where window_start = ${start}`)[0].n);
     let today = await pumpToday(mode);
@@ -4822,7 +4845,83 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         }
       }
       if (pc.seesaw) {
-        const canBuy = left >= pc.minLeft && (pc.maxLeft <= 0 || left <= pc.maxLeft);
+        // ── Seesaw exits, twice a second: mark every open buy at what it would sell for now (walking the bids,
+        // after both fees), take single buys at +PUMP_SEESAW_TP %, and lock the window at +PUMP_SEESAW_TARGET %.
+        if (!busy && nowMs - lastMgmt >= 500 && (seeOpen.length || (!seeLocked && seeDeployed > 0))) {
+          lastMgmt = nowMs;
+          // deno-lint-ignore no-explicit-any
+          const mark = (p: any) => {
+            const leftSh = Number(p.shares) - Number(p.sold_shares);
+            const w = walkSell(tape.books()[p.side as Side].bids, leftSh);
+            const fee = w.sold * feePerShare(w.price);
+            const cost = Number(p.stake) + Number(p.fees) + Number(p.exit_fees);
+            const net = Number(p.proceeds) + w.proceeds - fee - cost;
+            return { leftSh, full: w.sold >= leftSh - 1e-6, net, gain: Number(p.stake) > 0 ? net / Number(p.stake) : 0 };
+          };
+          // deno-lint-ignore no-explicit-any
+          const sellSee = async (p: any, why: string, floor: number) => {
+            const sd = p.side as Side;
+            const leftSh = Number(p.shares) - Number(p.sold_shares);
+            const bid = tape.books()[sd].bids[0]?.[0] ?? 0;
+            let sold = 0, px = 0, fees = 0;
+            if (pc.live) {
+              const r = await pumpSellShares(market, sd, leftSh, bid, floor);
+              sold = Math.min(leftSh, r.sold);
+              px = r.price;
+              fees = r.fees;
+            } else {
+              const w = walkSell(tape.books()[sd].bids.filter(([q]) => q >= floor - 1e-9), leftSh);
+              sold = w.sold;
+              px = w.price;
+              fees = sold * feePerShare(px);
+            }
+            if (!(sold > 0)) return;
+            p.sold_shares = Number(p.sold_shares) + sold;
+            p.proceeds = Number(p.proceeds) + sold * px;
+            p.exit_fees = Number(p.exit_fees) + fees;
+            if (p.sold_shares >= Number(p.shares) - 1e-6) {
+              const pnl = p.proceeds - Number(p.stake) - Number(p.fees) - p.exit_fees;
+              await sql`update pump_trades set status = 'closed', sold_shares = shares, proceeds = ${p.proceeds},
+                  exit_fees = ${p.exit_fees}, exit_price = ${px}, exit_sec = ${nowMs / 1000 - start}, exit_why = ${why},
+                  result = ${pnl > 0 ? "win" : "loss"}, pnl = ${pnl}, closed_at = now() where id = ${p.id}`;
+              seeRealized += pnl;
+              today += pnl;
+              seeOpen = seeOpen.filter((x) => x.id !== p.id);
+              did.push(`seesaw ${why}: ${sd} sold @ ${(px * 100).toFixed(1)}¢ (${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)})`);
+              await log({ side: sd, bid, did: `seesaw ${why}: sold ${sold.toFixed(2)} ${sd} @ ${(px * 100).toFixed(1)}¢ → ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` });
+            } else {
+              await sql`update pump_trades set sold_shares = ${p.sold_shares}, proceeds = ${p.proceeds},
+                  exit_fees = ${p.exit_fees}, exit_price = ${px}, exit_why = ${why} where id = ${p.id}`;
+              await log({ side: sd, bid, did: `seesaw ${why}: sold ${sold.toFixed(2)} of ${leftSh.toFixed(2)} ${sd} @ ${(px * 100).toFixed(1)}¢` });
+            }
+          };
+          busy = true;
+          try {
+            const marks = seeOpen.map((p) => ({ p, m: mark(p) }));
+            const total = seeRealized + marks.reduce((a, x) => a + x.m.net, 0);
+            const pct = seeDeployed > 0 ? total / seeDeployed : 0;
+            if (pc.seesawTarget > 0 && !seeLocked && seeDeployed > 0 && pct >= pc.seesawTarget && marks.every((x) => x.m.full)) {
+              // Window target hit: sell everything left, stop buying this window.
+              seeLocked = true;
+              await sql`insert into pump_kv (k, v, at) values ('seesaw_lock', ${sql.json({ window: start })}, now())
+                on conflict (k) do update set v = excluded.v, at = now()`;
+              await log({ did: `seesaw window target: +${(pct * 100).toFixed(1)}% on $${seeDeployed.toFixed(2)} in (target ${Math.round(pc.seesawTarget * 100)}%) → selling ${marks.length} open, no more buys this window` });
+              for (const { p } of marks) await sellSee(p, "window target", 0.01);
+            } else if (pc.seesawTp > 0) {
+              for (const { p, m } of marks) {
+                if (!m.full || m.gain < pc.seesawTp) continue;
+                // Floor: never below the price that still breaks even after fees on what's left.
+                const costLeft = (Number(p.stake) + Number(p.fees) + Number(p.exit_fees) - Number(p.proceeds)) / m.leftSh;
+                const floor = Math.min(0.99, costLeft / (1 - 0.095 * (1 - Math.min(0.99, costLeft))));
+                await sellSee(p, `take profit +${(m.gain * 100).toFixed(1)}%`, floor);
+              }
+            }
+          } catch (e) {
+            await log({ did: `seesaw exit error: ${(e as Error).message.slice(0, 160)}` });
+          }
+          busy = false;
+        }
+        const canBuy = !seeLocked && left >= pc.minLeft && (pc.maxLeft <= 0 || left <= pc.maxLeft);
         const btcS: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
         let shown = false;
         for (const sd of ["up", "down"] as Side[]) {
@@ -4868,11 +4967,13 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               const reason = `seesaw: score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
                 pc.seesawBet
               } ${sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
-              await sql`insert into pump_trades ${sql({
+              const row = (await sql`insert into pump_trades ${sql({
                 window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: sd, stake: shares * price,
                 shares, price, fees, opened_sec: TF - left, p_pump: null, order_id: orderId, reason, kind: "seesaw",
                 features: sql.json({ ...fs, score: ss } as never),
-              })}`;
+              })} returning *`)[0];
+              seeOpen.push(row);
+              seeDeployed += shares * price;
               entries++;
               did.push(`seesaw ${sd} @ ${(price * 100).toFixed(1)}¢`);
               await log({ side: sd, ask: a, did: reason });

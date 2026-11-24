@@ -62,7 +62,10 @@ const Pump = () => {
               <div className="text-sm">
                 {st?.seesaw
                   ? `SEESAW: watches both sides under ${st.maxAsk}¢; every time a side's score reaches ${st.seesawScore}, buys $${st.seesawBet} ` +
-                    `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window) and holds to resolution.`
+                    `(again every ${st.seesawEvery} s while it stays there, up to ${st.seesawMax} buys a window). ` +
+                    `${st.seesawTp ? `Sells a buy at +${Math.round(st.seesawTp * 100)}% after fees; ` : ""}` +
+                    `${st.seesawTarget ? `once the window's buys are +${Math.round(st.seesawTarget * 100)}% in total it sells the rest and stops; ` : ""}` +
+                    "anything left holds to resolution."
                   : st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
                     `and buys ${st.betPct ? `${st.betPct}% of the balance` : `$${st.bet}`} if Jev gives it ${st.jevRange ? `${st.jevRange.lo}–${st.jevRange.hi}%` : st.jevDir === "above" ? `${st.minProb}%+` : `under ${st.minProb}%`} to win` +
@@ -245,6 +248,8 @@ const Pump = () => {
               pad(`PUMP_SEESAW_BET=${st?.seesawBet ?? 1}`, "seesaw: $ per buy (at least $1)"),
               pad(`PUMP_SEESAW_EVERY=${st?.seesawEvery ?? 15}`, "seesaw: re-buy every N s while the score stays up"),
               pad(`PUMP_SEESAW_MAX=${st?.seesawMax ?? 30}`, "seesaw: most buys per window"),
+              pad(`PUMP_SEESAW_TP=${st?.seesawTp !== undefined ? Math.round(st.seesawTp * 100) : 3}`, "seesaw: sell a buy at +this % after fees (0 = off)"),
+              pad(`PUMP_SEESAW_TARGET=${st?.seesawTarget !== undefined ? Math.round(st.seesawTarget * 100) : 5}`, "seesaw: window up this % in total → sell all, stop (0 = off)"),
               pad(`PUMP_ON=${st?.on === false ? "0" : "1"}`, "0 = off"),
             ].join("\n")}
           </pre>
