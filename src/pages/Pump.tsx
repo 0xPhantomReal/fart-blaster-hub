@@ -92,7 +92,7 @@ const Pump = () => {
                 </div>
               </div>
               <div>
-                <div className="text-xs text-[#8b949e]">Today</div>
+                <div className="text-xs text-[#8b949e]">Today (UTC)</div>
                 <div className={`tabular-nums font-medium ${tone(s?.today)}`}>{signed(s?.today)}</div>
               </div>
               <div>
@@ -117,7 +117,7 @@ const Pump = () => {
             {s?.feesToday ? (
               <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
                 <div>
-                  <div className="text-xs text-[#8b949e]">Fees paid today</div>
+                  <div className="text-xs text-[#8b949e]">Fees paid today (UTC)</div>
                   <div className="tabular-nums font-medium text-[#ef5350]">${s.feesToday.total.toFixed(2)}</div>
                   <div className="text-[11px] text-[#8b949e]">
                     buys ${s.feesToday.buy.toFixed(2)} · sells ${s.feesToday.sell.toFixed(2)} · {s.feesToday.buys} buys

@@ -4565,9 +4565,10 @@ async function pumpBetSize(pc: ReturnType<typeof pumpSettings>) {
   return { bet, note: ` (${pc.betPct}% of $${bal.toFixed(2)})` };
 }
 
+/** P&L of trades closed since midnight UTC (today's P&L on /pump and the PUMP_DAILY_LOSS stop). */
 async function pumpToday(mode: string) {
   const r = await db()`select coalesce(sum(pnl), 0) as p from pump_trades where mode = ${mode} and closed_at >=
-    (date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
+    (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')`;
   return Number(r[0]?.p ?? 0);
 }
 
@@ -5217,9 +5218,9 @@ async function pumpStatus() {
       thin: `${pc.thin.thinLo}-${pc.thin.thinHi}` },
     mode,
     today: await pumpToday(mode),
-    // Fees paid today (New York day): buy fees on trades opened today + sell fees on trades closed today.
+    // Fees paid today (UTC day): buy fees on trades opened today + sell fees on trades closed today.
     feesToday: await (async () => {
-      const day = sql`(date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
+      const day = sql`(date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')`;
       const r = (await sql`select
           coalesce(sum(fees) filter (where opened_at >= ${day}), 0) as buy,
           coalesce(sum(exit_fees) filter (where closed_at >= ${day}), 0) as sell,
