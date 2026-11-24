@@ -4394,6 +4394,15 @@ function pumpSettings() {
     // Seesaw + Jev: before each seesaw buy, ask Jev the chance this side's bid reaches the after-fees break-even
     // before the window ends; buy only at PUMP_SEESAW_JEV_MIN % or more. PUMP_SEESAW_JEV=0 skips Jev.
     seesawJev: env("PUMP_SEESAW_JEV") !== "0",
+    // Seesaw averaging down (PUMP_AVG=1, default on): when a side's ask falls PUMP_AVG_DROP % below the last fill on
+    // that side, buy another $PUMP_AVG_BET of it (up to PUMP_AVG_ADDS adds per side per window). Each side's open
+    // buys are then one position: when they're up PUMP_AVG_TP % together after fees, sell them all (this replaces
+    // the per-buy take profit while on).
+    avg: env("PUMP_AVG") !== "0",
+    avgDrop: Math.max(0.01, n("PUMP_AVG_DROP", 10) / 100),
+    avgBet: Math.max(1, n("PUMP_AVG_BET", 1)),
+    avgAdds: Math.max(0, Math.round(n("PUMP_AVG_ADDS", 5))),
+    avgTp: Math.max(0, n("PUMP_AVG_TP", 2) / 100),
     seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
     // Bands instead (override the minimum): PUMP_SEESAW_JEV_RANGE=10-20,40-60 buys only when Jev says 10–20% or
     // 40–60% (ends included). Any unreadable part makes the whole setting unreadable (then the minimum applies).
@@ -4700,6 +4709,14 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     let seeDeployed = 0, seeRealized = 0, seeLocked = false, lastMgmt = 0;
     // Jev questions in flight, one per side.
     const seeAsking: Record<Side, boolean> = { up: false, down: false };
+    // Averaging-down adds made this window, per side.
+    const seeAdds: Record<Side, number> = { up: 0, down: 0 };
+    if (pc.seesaw) {
+      for (const r of await sql`select side, count(*)::int as n from pump_trades where coalesce(kind, 'pump') = 'seesaw'
+          and window_start = ${start} and reason like 'seesaw: average down%' group by side`) {
+        seeAdds[r.side as Side] = r.n;
+      }
+    }
     const seePending = new Set<Promise<void>>();
     if (pc.seesaw) {
       seeOpen = [...await sql`select * from pump_trades where coalesce(kind, 'pump') = 'seesaw' and market_slug = ${market.slug}
@@ -4839,21 +4856,29 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     };
 
     // One seesaw buy: $PUMP_SEESAW_BET at market on `sd`, tracked for the seesaw exits.
-    const seeBuy = async (sd: Side, fs: PumpFeatures, ss: PumpScore, jevNote: string, pJev: number | null = null) => {
+    const seeBuy = async (
+      sd: Side,
+      fs: PumpFeatures,
+      ss: PumpScore,
+      jevNote: string,
+      pJev: number | null = null,
+      opts: { direct?: boolean; bet?: number } = {},
+    ) => {
+      const bet = opts.bet ?? pc.seesawBet;
       const a = tape.books()[sd].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
       // Inverse mode: the signal is `sd`; the order goes on the other side.
-      const tgt: Side = pc.inverse ? (sd === "up" ? "down" : "up") : sd;
+      const tgt: Side = !opts.direct && pc.inverse ? (sd === "up" ? "down" : "up") : sd;
       try {
         let shares = 0, price = 0, fees = 0, orderId: string | null = null;
         if (pc.live) {
-          const r = await marketBuy(market, tgt, pc.seesawBet);
+          const r = await marketBuy(market, tgt, bet);
           shares = r.shares;
           price = r.price;
           fees = r.fees;
           orderId = r.id ?? null;
         } else {
-          const w = walkBuy(tape.books()[tgt].asks, pc.seesawBet);
+          const w = walkBuy(tape.books()[tgt].asks, bet);
           if (w) {
             shares = w.shares;
             price = w.price;
@@ -4861,11 +4886,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           }
         }
         if (!(shares > 0)) {
-          await log({ side: sd, ask: a, did: `seesaw: score ${ss.score} but the $${pc.seesawBet} buy filled nothing` });
+          await log({ side: sd, ask: a, did: `seesaw: score ${ss.score} but the $${bet} buy filled nothing` });
         } else {
-          const reason = `seesaw: ${jevNote}score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
-            pc.seesawBet
-          } ${pc.inverse ? `${tgt} (INVERSE of ${sd})` : sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
+          const reason = `seesaw: ${jevNote}score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${bet} ${!opts.direct && pc.inverse ? `${tgt} (INVERSE of ${sd})` : sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
           const row = (await sql`insert into pump_trades ${sql({
             window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: tgt, stake: shares * price,
             shares, price, fees, opened_sec: TF - left, p_pump: pJev, order_id: orderId, reason, kind: "seesaw",
@@ -4978,6 +5001,40 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 on conflict (k) do update set v = excluded.v, at = now()`;
               await log({ did: `seesaw window target: +${(pct * 100).toFixed(1)}% on $${seeDeployed.toFixed(2)} in (target ${Math.round(pc.seesawTarget * 100)}%) → selling ${marks.length} open, no more buys this window` });
               for (const { p } of marks) await sellSee(p, "window target", 0.01);
+            } else if (pc.avg) {
+              for (const sd of ["up", "down"] as Side[]) {
+                const grp = marks.filter((x) => x.p.side === sd);
+                if (!grp.length) continue;
+                const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
+                const net = grp.reduce((a, x) => a + x.m.net, 0);
+                const g = stake > 0 ? net / stake : 0;
+                // The side's buys together are up PUMP_AVG_TP % after fees: sell them all.
+                if (pc.avgTp > 0 && g >= pc.avgTp && grp.every((x) => x.m.full)) {
+                  await log({ side: sd, did: `seesaw ${sd}: ${grp.length} buy${grp.length > 1 ? "s" : ""} up ${(g * 100).toFixed(1)}% together after fees (target ${Math.round(pc.avgTp * 100)}%) → selling all` });
+                  for (const { p } of grp) await sellSee(p, `${sd} position +${(g * 100).toFixed(1)}%`, 0.01);
+                  continue;
+                }
+                // Average down: the ask is PUMP_AVG_DROP % under the last fill on this side → buy another $PUMP_AVG_BET.
+                const last = grp.reduce((a, x) => (Number(x.p.id) > Number(a.p.id) ? x : a)).p;
+                const askNow = tape.books()[sd].asks[0]?.[0];
+                const leftNow = end - Date.now() / 1000;
+                if (
+                  askNow !== undefined && askNow >= 0.02 && askNow <= Number(last.price) * (1 - pc.avgDrop) + 1e-9 &&
+                  seeAdds[sd] < pc.avgAdds && !seeLocked && entries < pc.seesawMax && leftNow >= pc.minLeft &&
+                  today > -pc.dailyLoss
+                ) {
+                  seeAdds[sd]++;
+                  const btcA: BtcCtx = { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks };
+                  const fsA = pumpFeatures(tape, sd, leftNow, btcA, Date.now());
+                  const ssA = pumpScore(fsA, tape, Date.now(), pc.thin);
+                  await seeBuy(
+                    sd, fsA, ssA,
+                    `average down (add ${seeAdds[sd]}/${pc.avgAdds}: ask ${Math.round(askNow * 100)}¢ is ${Math.round((1 - askNow / Number(last.price)) * 100)}% under the last fill ${(Number(last.price) * 100).toFixed(1)}¢; ${sd} position ${(g * 100).toFixed(1)}%) → `,
+                    null,
+                    { direct: true, bet: pc.avgBet },
+                  );
+                }
+              }
             } else if (pc.seesawTp > 0) {
               for (const { p, m } of marks) {
                 if (!m.full || m.gain < pc.seesawTp) continue;
