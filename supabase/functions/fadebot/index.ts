@@ -5217,6 +5217,16 @@ async function pumpStatus() {
       thin: `${pc.thin.thinLo}-${pc.thin.thinHi}` },
     mode,
     today: await pumpToday(mode),
+    // Fees paid today (New York day): buy fees on trades opened today + sell fees on trades closed today.
+    feesToday: await (async () => {
+      const day = sql`(date_trunc('day', now() at time zone 'America/New_York') at time zone 'America/New_York')`;
+      const r = (await sql`select
+          coalesce(sum(fees) filter (where opened_at >= ${day}), 0) as buy,
+          coalesce(sum(exit_fees) filter (where closed_at >= ${day}), 0) as sell,
+          count(*) filter (where opened_at >= ${day})::int as buys
+        from pump_trades where mode = ${mode}`)[0];
+      return { buy: Number(r.buy), sell: Number(r.sell), total: Number(r.buy) + Number(r.sell), buys: r.buys };
+    })().catch(() => null),
     balance: await pumpBalance(pc.live, pc.bankroll).catch(() => null),
     lastRun: (kv.find((r) => r.k === "last_run")?.v as Record<string, unknown> | undefined) ?? null,
     live: (kv.find((r) => r.k === "live")?.v as Record<string, unknown> | undefined) ?? null,

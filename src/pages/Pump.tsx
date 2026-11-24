@@ -114,6 +114,29 @@ const Pump = () => {
                 </div>
               </div>
             </div>
+            {s?.feesToday ? (
+              <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+                <div>
+                  <div className="text-xs text-[#8b949e]">Fees paid today</div>
+                  <div className="tabular-nums font-medium text-[#ef5350]">${s.feesToday.total.toFixed(2)}</div>
+                  <div className="text-[11px] text-[#8b949e]">
+                    buys ${s.feesToday.buy.toFixed(2)} · sells ${s.feesToday.sell.toFixed(2)} · {s.feesToday.buys} buys
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#8b949e]">Rebate at 70%</div>
+                  <div className="tabular-nums font-medium text-[#26a69a]">+${(s.feesToday.total * 0.7).toFixed(2)}</div>
+                  <div className="text-[11px] text-[#8b949e]">estimate, if 70% of fees came back</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#8b949e]">Today after rebate</div>
+                  <div className={`tabular-nums font-medium ${tone((s.today ?? 0) + s.feesToday.total * 0.7)}`}>
+                    {signed((s.today ?? 0) + s.feesToday.total * 0.7)}
+                  </div>
+                  <div className="text-[11px] text-[#8b949e]">today's P&L + the 70% rebate</div>
+                </div>
+              </div>
+            ) : null}
             {seeTot || seeOpen ? (
               <div className="mt-3 text-sm">
                 <span className="text-xs text-[#8b949e]">Seesaw: </span>

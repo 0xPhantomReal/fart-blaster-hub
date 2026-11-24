@@ -992,6 +992,7 @@ export interface TraderAsk {
 export interface TraderStatus {
   live: boolean;
   balance?: number | null;
+  feesToday?: { buy: number; sell: number; total: number; buys: number } | null;
   /** Latest finished 15-minute BTC markets (newest first) for FADEBOT_TRADER_STREAK15. */
   streak15?: {
     blocked: boolean;
@@ -1242,6 +1243,7 @@ export interface PumpStatus {
   };
   mode: "live" | "dry";
   balance?: number | null;
+  feesToday?: { buy: number; sell: number; total: number; buys: number } | null;
   /** What the bot sees right now (saved every 2 s while it runs). */
   live?: {
     at: number;
