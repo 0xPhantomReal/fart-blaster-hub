@@ -4378,6 +4378,9 @@ function pumpSettings() {
     // $PUMP_SEESAW_BET at market and hold to resolution. Many entries per window. It replaces the normal buys
     // (auto-buy / Jev) while on.
     seesaw: env("PUMP_SEESAW") === "1",
+    // Inverse: every buy decision (auto-buy, Jev, seesaw) is made exactly as usual on the cheap side, but the order
+    // goes on the OPPOSITE side. Exits then manage what was actually bought.
+    inverse: env("PUMP_INVERSE") === "1",
     seesawScore: Math.min(100, Math.max(0, n("PUMP_SEESAW_SCORE", 50))),
     seesawBet: Math.max(1, n("PUMP_SEESAW_BET", 1)),
     // While a side stays at/above the score, buy again every this many seconds (it always buys when it first gets there).
@@ -4735,14 +4738,16 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
       }
       let shares = 0, price = 0, fees = 0, orderId: string | null = null;
       const { bet, note: betNote } = await pumpBetSize(pc);
+      // Inverse mode: the signal is `side`; the order goes on the other one.
+      const tgt: Side = pc.inverse ? (side === "up" ? "down" : "up") : side;
       if (pc.live) {
-        const r = await marketBuy(market, side, bet);
+        const r = await marketBuy(market, tgt, bet);
         shares = r.shares;
         price = r.price;
         fees = r.fees;
         orderId = r.id ?? null;
       } else {
-        const w = walkBuy(books[side].asks, bet);
+        const w = walkBuy(books[tgt].asks, bet);
         if (w) {
           shares = w.shares;
           price = w.price;
@@ -4750,7 +4755,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         }
       }
       if (!(shares > 0)) {
-        await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: "buy filled nothing" });
+        await log({ side: tgt, ask, p_pump: j.pPump, choice: j.choice, did: "buy filled nothing" });
         return;
       }
       const reason = `score ${sc.score} (${Object.entries(sc.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → ${
@@ -4758,19 +4763,20 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           ? `auto-buy (score ≥ ${pc.autoScore}, flow ≥ ${pc.autoFlow}, turn ≥ ${pc.autoTurn}; Jev not asked)`
           : `Jev ${Math.round(j.pPump * 1000) / 10}% win`
       } for ${side} at ${Math.round(ask * 100)}¢, ${Math.round(left)} s left` +
+        `${pc.inverse ? ` → INVERSE: bought ${tgt} instead` : ""}` +
         ` → $${bet}${betNote} bought ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢; ${
           pc.hold
             ? "holding to resolution"
             : `target bid ${(price * (1 + pc.tp) * 100).toFixed(1)}¢, stop ${(price * (1 - pc.sl) * 100).toFixed(1)}¢`
         }`;
       pos = (await sql`insert into pump_trades ${sql({
-        window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side, stake: shares * price,
+        window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: tgt, stake: shares * price,
         shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason,
         features: sql.json({ ...f, score: sc } as never),
       })} returning *`)[0];
       entries++;
-      did.push(`bought ${side} @ ${(price * 100).toFixed(1)}¢`);
-      await log({ side, ask, p_pump: j.pPump, choice: j.choice, did: reason });
+      did.push(`bought ${tgt} @ ${(price * 100).toFixed(1)}¢`);
+      await log({ side: tgt, ask, p_pump: j.pPump, choice: j.choice, did: reason });
     };
 
     const sell = async (why: string, bid: number) => {
@@ -4836,16 +4842,18 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const seeBuy = async (sd: Side, fs: PumpFeatures, ss: PumpScore, jevNote: string, pJev: number | null = null) => {
       const a = tape.books()[sd].asks[0]?.[0] ?? null;
       const left = end - Date.now() / 1000;
+      // Inverse mode: the signal is `sd`; the order goes on the other side.
+      const tgt: Side = pc.inverse ? (sd === "up" ? "down" : "up") : sd;
       try {
         let shares = 0, price = 0, fees = 0, orderId: string | null = null;
         if (pc.live) {
-          const r = await marketBuy(market, sd, pc.seesawBet);
+          const r = await marketBuy(market, tgt, pc.seesawBet);
           shares = r.shares;
           price = r.price;
           fees = r.fees;
           orderId = r.id ?? null;
         } else {
-          const w = walkBuy(tape.books()[sd].asks, pc.seesawBet);
+          const w = walkBuy(tape.books()[tgt].asks, pc.seesawBet);
           if (w) {
             shares = w.shares;
             price = w.price;
@@ -4857,16 +4865,16 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         } else {
           const reason = `seesaw: ${jevNote}score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${
             pc.seesawBet
-          } ${sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
+          } ${pc.inverse ? `${tgt} (INVERSE of ${sd})` : sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
           const row = (await sql`insert into pump_trades ${sql({
-            window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: sd, stake: shares * price,
+            window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: tgt, stake: shares * price,
             shares, price, fees, opened_sec: TF - left, p_pump: pJev, order_id: orderId, reason, kind: "seesaw",
             features: sql.json({ ...fs, score: ss } as never),
           })} returning *`)[0];
           seeOpen.push(row);
           seeDeployed += shares * price;
           entries++;
-          did.push(`seesaw ${sd} @ ${(price * 100).toFixed(1)}¢`);
+          did.push(`seesaw ${tgt} @ ${(price * 100).toFixed(1)}¢`);
           await log({ side: sd, ask: a, did: reason });
         }
       } catch (e) {
