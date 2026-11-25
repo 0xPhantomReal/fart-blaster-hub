@@ -4378,6 +4378,8 @@ function pumpSettings() {
     // $PUMP_SEESAW_BET at market and hold to resolution. Many entries per window. It replaces the normal buys
     // (auto-buy / Jev) while on.
     seesaw: env("PUMP_SEESAW") === "1",
+    // The recorder (pump_snap: every second, every side 2–40¢, all signals). Off unless PUMP_RECORDER=1.
+    recorder: env("PUMP_RECORDER") === "1",
     // Inverse: every buy decision (auto-buy, Jev, seesaw) is made exactly as usual on the cheap side, but the order
     // goes on the OPPOSITE side. Exits then manage what was actually bought.
     inverse: env("PUMP_INVERSE") === "1",
@@ -4935,7 +4937,8 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           const a = books[sd].asks[0]?.[0];
           if (a === undefined || a < 0.02 || a > 0.4) continue;
           const row = snapRow(tape, sd, left, { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks }, end, fs, nowMs);
-          snaps.push({
+          // Saved only with the recorder on; the read itself (fair value, flow) still feeds Jev and the Live read.
+          if (pc.recorder) snaps.push({
             window_start: start, at_sec: Math.round((nowMs / 1000 - start) * 10) / 10, slug: market.slug,
             long_is: market.longIs, side: sd, ask: row.ask, bid: row.bid, fill10: row.fill10, fill20: row.fill20,
             fair: row.fair, gap: row.gap, features: sql.json(row.features as never),

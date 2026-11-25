@@ -271,6 +271,7 @@ const Pump = () => {
               pad(`PUMP_AUTO_FLOW=${st?.autoFlow ?? 15}`, "…and buying pressure at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_AUTO_TURN=${st?.autoTurn ?? 10}`, "…and price turning up at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_THIN=${st?.thin ?? "20-300"}`, "offers up to 2× ($): at/under the first = thin (full points)"),
+              pad(`PUMP_RECORDER=${st?.recorder ? "1" : "0"}`, "1 = record every second for analysis (off by default)"),
               pad(`PUMP_INVERSE=${st?.inverse ? "1" : "0"}`, "1 = buy the OPPOSITE side of every buy decision"),
               pad(`PUMP_SEESAW=${st?.seesaw ? "1" : "0"}`, "1 = seesaw mode (replaces auto-buy/Jev buys)"),
               pad(`PUMP_SEESAW_SCORE=${st?.seesawScore ?? 50}`, "seesaw: buy when a side's score reaches this"),
@@ -327,7 +328,12 @@ const Recorder = ({ s }: { s: PumpStatus | null | undefined }) => {
     <section className={card}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h2 className="text-sm font-semibold">Recorder</h2>
+          <h2 className="text-sm font-semibold">
+            Recorder{" "}
+            <span className={`ml-1 text-xs font-normal ${s?.settings.recorder ? "text-[#26a69a]" : "text-[#8b949e]"}`}>
+              {s?.settings.recorder ? "ON" : "OFF (PUMP_RECORDER=1 to turn on)"}
+            </span>
+          </h2>
           <p className="text-xs text-[#8b949e]">
             Every second, every side between 2¢ and 40¢: the book, real fill prices, BTC, Coinbase + perp order flow, and
             who won. {rec ? `Last 24 h: ${rec.rows24h.toLocaleString()} rows in ${rec.windows24h} windows, ${rec.settled24h.toLocaleString()} settled.` : ""}
