@@ -4475,6 +4475,7 @@ async function setupPump() {
     side text not null, ask double precision, bid double precision, fill10 double precision, fill20 double precision,
     fair double precision, gap double precision, won boolean, features jsonb, created_at timestamptz default now())`;
   await sql`create index if not exists pump_snap_window on pump_snap (window_start)`;
+  await sql`create index if not exists pump_log_window on pump_log (window_start)`;
   for (const t of ["pump_trades", "pump_log", "pump_kv", "pump_snap"]) await sql.unsafe(`alter table ${t} enable row level security`);
   pumpReady = true;
 }
@@ -4544,7 +4545,10 @@ async function pumpSettleSnaps() {
     const won = await pumpWinner(w.slug, w.long_is, Number(w.window_start), false).catch(() => null);
     if (won) await sql`update pump_snap set won = (side = ${won}) where window_start = ${w.window_start} and won is null`;
   }
-  await sql`delete from pump_snap where created_at < now() - interval '14 days'`.catch(() => {});
+  // Cleanup once an hour (minute 0), on the indexed window_start column (not a full-table scan every minute).
+  if (new Date().getUTCMinutes() === 0) {
+    await sql`delete from pump_snap where window_start < ${now - 14 * 86400}`.catch(() => {});
+  }
 }
 
 async function pumpSettle() {
@@ -5319,7 +5323,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     } as never)}, now()) on conflict (k) do update set v = excluded.v, at = now()`.catch(() => {});
     const summary = `${via}: ${tape.updates} updates, BTC flow ${flow.cb.msgs}/${flow.hl.msgs} msgs, best score ${bestScore}, asked Jev ${asked}×${did.length ? "; " + did.join("; ") : ""}`;
     await beat({ did: summary, via, updates: tape.updates, asked, live: pc.live });
-    await sql`delete from pump_log where created_at < now() - interval '7 days'`.catch(() => {});
+    if (new Date().getUTCMinutes() === 0) {
+      await sql`delete from pump_log where window_start < ${Math.floor(Date.now() / 1000) - 7 * 86400}`.catch(() => {});
+    }
     return summary;
   } finally {
     btcAbort.stop = true;
@@ -5376,7 +5382,7 @@ async function pumpStatus() {
   const latest = (await sql`select features from pump_log where features is not null order by id desc limit 1`)[0]?.features ?? null;
   const rec = (await sql`select count(*)::int as rows, count(distinct window_start)::int as windows,
     count(*) filter (where won is not null)::int as settled, min(window_start) as first
-    from pump_snap where created_at > now() - interval '24 hours'`)[0];
+    from pump_snap where window_start > ${Math.floor(Date.now() / 1000) - 86400}`)[0];
   return {
     settings: { ...pc, maxAsk: Math.round(pc.maxAsk * 100), minAsk: Math.round(pc.minAsk * 100), tp: Math.round(pc.tp * 100),
       sl: Math.round(pc.sl * 100), minProb: Math.round(pc.minProb * 100), slip: Math.round(pc.slip * 100),

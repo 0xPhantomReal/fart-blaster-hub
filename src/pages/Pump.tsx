@@ -27,7 +27,10 @@ const Pump = () => {
         setAt(new Date());
       });
     void load();
-    const id = setInterval(load, 5_000);
+    // Every 15 s, and only while the tab is visible (each refresh queries the database).
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 15_000);
     return () => {
       alive = false;
       clearInterval(id);
@@ -50,7 +53,7 @@ const Pump = () => {
           <h1 className="text-lg font-semibold">Pump bot</h1>
           <span className="text-xs text-[#8b949e]">
             <Link to="/bot" className="mr-3 underline">Fadebot</Link>
-            {at ? `updated ${at.toLocaleTimeString()} · every 5 s` : "loading…"}
+            {at ? `updated ${at.toLocaleTimeString()} · every 15 s` : "loading…"}
           </span>
         </header>
 
