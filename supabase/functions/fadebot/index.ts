@@ -661,13 +661,13 @@ function slugTime(t: number): string {
 }
 
 /** Window start from an event: the time in its slug (2026-11-04-1915z or a unix timestamp), else its start/end times. */
-function windowOf(e: Ev): number | null {
+function windowOf(e: Ev, tf = TF): number | null {
   const dt = e.slug.match(/(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})z/i);
   if (dt) return Date.UTC(+dt[1], +dt[2] - 1, +dt[3], +dt[4], +dt[5]) / 1000;
   const ts = e.slug.match(/(\d{10})(?!\d)/);
   if (ts) return Number(ts[1]);
   const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
-  if (Number.isFinite(en)) return en - TF;
+  if (Number.isFinite(en)) return en - tf;
   const s = e.startTime ? Date.parse(e.startTime) / 1000 : NaN;
   return Number.isFinite(s) ? s : null;
 }
@@ -679,13 +679,19 @@ async function marketsOf(e: Ev) {
 }
 
 /** The BTC 5-minute Up/Down market covering [start, start + 300). */
-async function findMarket(start: number): Promise<WindowMarket | null> {
+async function findMarket(start: number, tf = TF): Promise<WindowMarket | null> {
+  const hourly = tf === 3600;
   const client = pm();
   const seen = new Map<string, Ev>();
   // 1. Direct slugs. Polymarket US: btc-updown-5m-2026-11-04-1915z (window start, UTC); the international site
   //    uses a unix timestamp. Search alone only turned up the previous window's market.
   let direct = "";
-  for (const slug of [`btc-updown-5m-${slugTime(start)}`, `btc-updown-5m-${start}`]) {
+  // Hourly (pump bot with PUMP_TF=1h): the US naming isn't confirmed, so try the likely forms, then fall back to the
+  // end-time list and search below (which find the 5-minute market the same way).
+  const directSlugs = hourly
+    ? [`btc-updown-1h-${slugTime(start)}`, `btc-updown-60m-${slugTime(start)}`, `btc-updown-1h-${start}`, `btc-updown-hourly-${slugTime(start)}`]
+    : [`btc-updown-5m-${slugTime(start)}`, `btc-updown-5m-${start}`];
+  for (const slug of directSlugs) {
     const r = await client.events.retrieveBySlug(slug).catch((e) => {
       direct ||= `${slug}: ${(e as Error).message}`.slice(0, 160);
       return null;
@@ -699,8 +705,8 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
   // 2. Events ending around this window's close (doesn't depend on how search ranks things).
   const iso = (t: number) => new Date(t * 1000).toISOString();
   for (const params of [
-    { active: true, closed: false, endDateMin: iso(start + TF - 30), endDateMax: iso(start + TF + 30), limit: 100 },
-    { closed: false, endDateMin: iso(start + TF - 30), endDateMax: iso(start + TF + 30), limit: 100 },
+    { active: true, closed: false, endDateMin: iso(start + tf - 30), endDateMax: iso(start + tf + 30), limit: 100 },
+    { closed: false, endDateMin: iso(start + tf - 30), endDateMax: iso(start + tf + 30), limit: 100 },
   ]) {
     const r = await client.events.list(params).catch((e) => {
       lastListError = (e as Error).message;
@@ -709,7 +715,11 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     for (const e of (r.events ?? []) as Ev[]) seen.set(e.slug, e);
   }
   // 3. Search.
-  for (const query of ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 5 minutes", "BTC 5m"]) {
+  for (
+    const query of hourly
+      ? ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down Hourly", "BTC Up or Down Hourly", "BTC 1h"]
+      : ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 5 minutes", "BTC 5m"]
+  ) {
     const r = await client.search.query({ query, limit: 100 }).catch(() => ({ events: [] }));
     for (const e of (r.events ?? []) as Ev[]) seen.set(e.slug, e);
   }
@@ -718,13 +728,19 @@ async function findMarket(start: number): Promise<WindowMarket | null> {
     const s = e.startTime ? Date.parse(e.startTime) / 1000 : NaN;
     const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
     const text = `${e.slug} ${e.title ?? ""}`;
+    if (hourly) {
+      // The hourly market: labelled 1h / 60m / hourly, or (no label) lasting an hour. Not 5/15/30-minute, 4h or daily.
+      if (/(^|[^0-9])(5|1[05]|30)\s?(m|min)|\b(4h|daily|1d)\b/i.test(text)) return false;
+      if (/\b(1h|60\s?m|60\s?min|hourly|hour)\b/i.test(text)) return true;
+      return Math.abs(en - s - tf) < 5;
+    }
     // Not the 15-minute, hourly or longer markets (their start times can line up with a 5-minute window).
     if (/(^|[^0-9])(1[05]|30|60)\s?(m|min)|\b(1h|4h|hour|daily|1d)\b/i.test(text)) return false;
     if (/(^|[^0-9])5\s?(m|min)/i.test(text)) return true;
-    return Math.abs(en - s - TF) < 5; // no label: go by duration (start time may be when the event was created)
+    return Math.abs(en - s - tf) < 5; // no label: go by duration (start time may be when the event was created)
   });
   for (const e of fiveMin) {
-    const w = windowOf(e);
+    const w = windowOf(e, tf);
     if (w === null || Math.abs(w - start) >= 5) continue;
     const markets = await marketsOf(e);
     for (const m of markets) {
@@ -4359,6 +4375,9 @@ function pumpSettings() {
   return {
     on: env("PUMP_ON") !== "0",
     live: env("PUMP_MODE") === "live",
+    // Which bitcoin up/down market: PUMP_TF=5m (default) or 1h. Time settings (PUMP_MIN_LEFT etc.) stay in seconds
+    // of that market's window; "per window" limits become per hour on 1h.
+    tf: /^\s*(1h|60m?|3600|hour|hourly)\s*$/i.test(env("PUMP_TF")) ? 3600 : 300,
     bet: Math.max(1, n("PUMP_BET", 1)),
     // % of the balance per trade (0 = off → the fixed PUMP_BET). At least $1.
     betPct: Math.min(100, Math.max(0, n("PUMP_BET_PCT", 0))),
@@ -4474,6 +4493,8 @@ async function setupPump() {
     exit_sec double precision, exit_why text, result text, pnl double precision, reason text, features jsonb,
     opened_at timestamptz default now(), closed_at timestamptz)`;
   await sql`alter table if exists pump_trades add column if not exists kind text default 'pump'`.catch(() => {});
+  await sql`alter table if exists pump_trades add column if not exists tf int default 300`.catch(() => {});
+  await sql`alter table if exists pump_snap add column if not exists tf int default 300`.catch(() => {});
   await sql`create table if not exists pump_log (
     id bigserial primary key, window_start bigint, at_sec double precision, side text, ask double precision,
     bid double precision, p_pump double precision, choice text, did text, features jsonb, created_at timestamptz default now())`;
@@ -4533,9 +4554,11 @@ async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expec
 
 /** Pump trades left open past their window (a sale that never went through): settle on the result. */
 /** Which side won a window: Polymarket's result, else (after 15 min, or at once if `quick`) BRTI like settlement. */
-async function pumpWinner(slug: string, longIs: Side, start: number, quick: boolean): Promise<Side | null> {
+async function pumpWinner(slug: string, longIs: Side, start: number, quick: boolean, tf = TF): Promise<Side | null> {
   const won = await settledSide({ slug, longIs } as WindowMarket).catch(() => null);
   if (won) return won;
+  // The BRTI fallback copies the 5-minute market's rule; the hourly market waits for Polymarket's own result.
+  if (tf !== TF) return null;
   const end = start + TF;
   const [fin, before] = await Promise.all([period(end - 60), period(start - 60)]);
   if (fin && before && fin.n >= 20 && before.n >= 20 && (quick || Date.now() / 1000 > end + 900)) {
@@ -4548,10 +4571,10 @@ async function pumpWinner(slug: string, longIs: Side, start: number, quick: bool
 async function pumpSettleSnaps() {
   const sql = db();
   const now = Math.floor(Date.now() / 1000);
-  const ws = await sql`select distinct window_start, slug, long_is from pump_snap
-    where won is null and window_start + ${TF + 70} <= ${now} and window_start > ${now - 86400 * 2} limit 30`;
+  const ws = await sql`select distinct window_start, slug, long_is, coalesce(tf, 300) as tf from pump_snap
+    where won is null and window_start + coalesce(tf, 300) + 70 <= ${now} and window_start > ${now - 86400 * 2} limit 30`;
   for (const w of ws) {
-    const won = await pumpWinner(w.slug, w.long_is, Number(w.window_start), false).catch(() => null);
+    const won = await pumpWinner(w.slug, w.long_is, Number(w.window_start), false, Number(w.tf)).catch(() => null);
     if (won) await sql`update pump_snap set won = (side = ${won}) where window_start = ${w.window_start} and won is null`;
   }
   // Cleanup once an hour (minute 0), on the indexed window_start column (not a full-table scan every minute).
@@ -4564,10 +4587,11 @@ async function pumpSettle() {
   const sql = db();
   const now = Math.floor(Date.now() / 1000);
   await pumpSettleSnaps().catch((e) => console.error("pump snaps:", (e as Error).message));
-  const open = await sql`select * from pump_trades where status = 'open' and window_start + ${TF + 70} <= ${now}`;
+  const open = await sql`select * from pump_trades where status = 'open' and window_start + coalesce(tf, 300) + 70 <= ${now}`;
   for (const t of open) {
+    const ttf = Number(t.tf ?? 300);
     let won: Side | null = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
-    if (!won) {
+    if (!won && ttf === TF) {
       // Like the main bot: fall back to BRTI the way Polymarket settles (last minute's average vs the minute before
       // the window) — at once in test mode, after 15 minutes live (giving the official result time to arrive).
       const end = Number(t.window_start) + TF;
@@ -4577,7 +4601,8 @@ async function pumpSettle() {
       }
     }
     if (!won) {
-      if (now > Number(t.window_start) + TF + 3600) {
+      // Give the official result time (hourly results can take longer): 1 h after a 5-minute window, 6 h after an hour.
+      if (now > Number(t.window_start) + ttf + (ttf === TF ? 3600 : 6 * 3600)) {
         await sql`update pump_trades set status = 'void', result = 'could not settle', closed_at = now() where id = ${t.id}`;
       }
       continue;
@@ -4633,8 +4658,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     on conflict (k) do update set v = excluded.v, at = now()
     where coalesce((pump_kv.v->>'until')::float, 0) < ${nowS} returning k`;
   if (!lease.length) return "another pump run is still going";
-  const start = opts.forceStart ?? Math.floor(nowS / TF) * TF;
-  const end = start + TF;
+  const TFp = pc.tf; // this market's window length (300 or 3600)
+  const start = opts.forceStart ?? Math.floor(nowS / TFp) * TFp;
+  const end = start + TFp;
   const log = (x: Record<string, unknown>) =>
     sql`insert into pump_log ${sql({ window_start: start, at_sec: Date.now() / 1000 - start, ...x })}`.catch(() => {});
   const beat = (x: Record<string, unknown>) =>
@@ -4652,9 +4678,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
   const ticks: [number, number][] = [];
   const btcAbort = { stop: false };
   try {
-    const market = await findMarket(start);
+    const market = await findMarket(start, TFp);
     if (!market) {
-      await beat({ did: "no Polymarket market for this window" });
+      await beat({ did: `no Polymarket ${TFp === 3600 ? "hourly" : "5-minute"} market for this window${lastSearch ? `: ${lastSearch.slice(0, 300)}` : ""}` });
       return "no market";
     }
     const tape = new MarketTape(market.slug, market.longIs);
@@ -4821,7 +4847,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
         }`;
       pos = (await sql`insert into pump_trades ${sql({
         window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: tgt, stake: shares * price,
-        shares, price, fees, opened_sec: TF - left, p_pump: j.pPump, order_id: orderId, reason,
+        shares, price, fees, opened_sec: TFp - left, p_pump: j.pPump, order_id: orderId, reason, tf: TFp,
         features: sql.json({ ...f, score: sc } as never),
       })} returning *`)[0];
       entries++;
@@ -4924,7 +4950,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           const reason = `seesaw: ${jevNote}score ${ss.score} (${Object.entries(ss.parts).map(([k, v]) => `${k} ${v}`).join(", ")}) → $${bet} ${!opts.direct && pc.inverse ? `${tgt} (INVERSE of ${sd})` : sd}: ${shares.toFixed(2)} @ ${(price * 100).toFixed(1)}¢, ${Math.round(left)} s left; holding to resolution`;
           const row = (await sql`insert into pump_trades ${sql({
             window_start: start, mode, market_slug: market.slug, long_is: market.longIs, side: tgt, stake: shares * price,
-            shares, price, fees, opened_sec: TF - left, p_pump: pJev, order_id: orderId, reason, kind: "seesaw",
+            shares, price, fees, opened_sec: TFp - left, p_pump: pJev, order_id: orderId, reason, kind: "seesaw", tf: TFp,
             features: sql.json({ ...fs, score: ss } as never),
           })} returning *`)[0];
           seeOpen.push(row);
@@ -4961,7 +4987,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           const row = snapRow(tape, sd, left, { price: ticks.length ? ticks[ticks.length - 1][1] : null, ref, ticks }, end, fs, nowMs);
           // Saved only with the recorder on; the read itself (fair value, flow) still feeds Jev and the Live read.
           if (pc.recorder) snaps.push({
-            window_start: start, at_sec: Math.round((nowMs / 1000 - start) * 10) / 10, slug: market.slug,
+            window_start: start, at_sec: Math.round((nowMs / 1000 - start) * 10) / 10, slug: market.slug, tf: TFp,
             long_is: market.longIs, side: sd, ask: row.ask, bid: row.bid, fill10: row.fill10, fill20: row.fill20,
             fair: row.fair, gap: row.gap, features: sql.json(row.features as never),
           });
@@ -5391,7 +5417,7 @@ async function pumpExport(from: number, to: number) {
   await setup();
   await setupPump();
   to = Math.min(to, from + 6 * 3600);
-  const rows = await db()`select window_start, at_sec, side, ask, bid, fill10, fill20, fair, gap, won, features
+  const rows = await db()`select window_start, coalesce(tf, 300) as tf, at_sec, side, ask, bid, fill10, fill20, fair, gap, won, features
     from pump_snap where window_start >= ${from} and window_start < ${to} order by window_start, at_sec, side`;
   const flat = (o: unknown, pre: string, out: Record<string, unknown>) => {
     if (o && typeof o === "object" && !Array.isArray(o)) {
@@ -5401,7 +5427,7 @@ async function pumpExport(from: number, to: number) {
   };
   const recs = rows.map((r) => {
     const { features, ...rest } = r;
-    return { ...rest, seconds_left: Math.round((TF - Number(r.at_sec)) * 10) / 10, ...(features ? flat(features, "", {}) : {}) };
+    return { ...rest, seconds_left: Math.round((Number(r.tf) - Number(r.at_sec)) * 10) / 10, ...(features ? flat(features, "", {}) : {}) };
   });
   const cols: string[] = [];
   for (const r of recs) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);

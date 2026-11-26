@@ -1224,6 +1224,7 @@ export interface PumpStatus {
     jevDir?: "below" | "above";
     jevRange?: { lo: number; hi: number } | null;
     seesaw?: boolean;
+    tf?: number;
     recorder?: boolean;
     inverse?: boolean;
     seesawScore?: number;
