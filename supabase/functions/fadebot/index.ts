@@ -134,6 +134,7 @@ import {
   pumpScore,
   breakEvenBid,
   seesawStopFires,
+  netSellPlan,
   snapRow,
   DEFAULT_SCORE_CFG,
   type PumpScore,
@@ -4781,6 +4782,8 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const seeBlocked: Record<Side, boolean> = { up: false, down: false };
     // Each side's open position, after fees, as of the last check (null = nothing open on that side).
     const seeSideGain: Record<Side, number | null> = { up: null, down: null };
+    // When a "netted, not sold" note was last logged per side (so a standing condition doesn't log twice a second).
+    const netLogAt: Record<Side, number> = { up: 0, down: 0 };
     if (pc.seesaw) {
       const b = (await sql`select v from pump_kv where k = 'seesaw_block'`)[0]?.v as { window?: number; sides?: Side[] } | undefined;
       if (b?.window === start) for (const sd of b.sides ?? []) seeBlocked[sd] = true;
@@ -5028,9 +5031,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
             return { leftSh, full: w.sold >= leftSh - 1e-6, net, gain: Number(p.stake) > 0 ? net / Number(p.stake) : 0 };
           };
           // deno-lint-ignore no-explicit-any
-          const sellSee = async (p: any, why: string, floor: number) => {
+          const sellSee = async (p: any, why: string, floor: number, maxSh = Infinity) => {
             const sd = p.side as Side;
-            const leftSh = Number(p.shares) - Number(p.sold_shares);
+            const leftSh = Math.min(Number(p.shares) - Number(p.sold_shares), maxSh);
+            if (!(leftSh > 1e-6)) return;
             const bid = tape.books()[sd].bids[0]?.[0] ?? 0;
             let sold = 0, px = 0, fees = 0;
             if (pc.live) {
@@ -5064,6 +5068,27 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               await log({ side: sd, bid, did: `seesaw ${why}: sold ${sold.toFixed(2)} of ${leftSh.toFixed(2)} ${sd} @ ${(px * 100).toFixed(1)}¢` });
             }
           };
+          // Polymarket US nets a market's Up and Down into ONE position: buying Down while holding Up reduces the Up.
+          // So a side can only be sold for its excess over the opposite side's open shares; the matched shares are
+          // pairs that settle for exactly $1 and stay as they are. Sells `items` (a side's buys) up to that excess.
+          // deno-lint-ignore no-explicit-any
+          const sellNet = async (sd: Side, items: any[], why: string, floor: number) => {
+            const openSh = (x: Side) => seeOpen.filter((o) => o.side === x)
+              .reduce((a, o) => a + Number(o.shares) - Number(o.sold_shares), 0);
+            const other: Side = sd === "up" ? "down" : "up";
+            const excess = openSh(sd) - openSh(other);
+            if (excess <= 1e-6) {
+              if (Date.now() - netLogAt[sd] < 60_000) return;
+              netLogAt[sd] = Date.now();
+              await log({ side: sd, did: `seesaw ${sd} ${why}: not sold — its ${openSh(sd).toFixed(2)} shares are netted against ${openSh(other).toFixed(2)} ${other} (Polymarket holds them as one position); the matched pairs settle for $1 each` });
+              return;
+            }
+            if (openSh(other) > 1e-6) {
+              await log({ side: sd, did: `seesaw ${sd} ${why}: selling only the net ${excess.toFixed(2)} of ${openSh(sd).toFixed(2)} shares (${openSh(other).toFixed(2)} are netted against ${other})` });
+            }
+            const plan = netSellPlan(items.map((p) => Number(p.shares) - Number(p.sold_shares)), openSh(sd), openSh(other));
+            for (let i = 0; i < items.length; i++) if (plan[i] > 1e-6) await sellSee(items[i], why, floor, plan[i]);
+          };
           busy = true;
           try {
             let marks = seeOpen.map((p) => ({ p, m: mark(p) }));
@@ -5075,7 +5100,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
             // ── Stop-loss per side (whole position, after fees).
             for (const sd of ["up", "down"] as Side[]) {
               const grp = marks.filter((x) => x.p.side === sd);
-              if (!grp.length) continue;
+              if (!grp.length || seeBlocked[sd]) continue; // already stopped out this window
               const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
               const g = stake > 0 ? grp.reduce((a, x) => a + x.m.net, 0) / stake : 0;
               if (!seesawStopFires({
@@ -5087,7 +5112,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                   ${sql.json({ window: start, sides: (["up", "down"] as Side[]).filter((x) => seeBlocked[x]) })}, now())
                 on conflict (k) do update set v = excluded.v, at = now()`;
               await log({ side: sd, did: `seesaw ${sd} STOP LOSS: ${grp.length} buy${grp.length > 1 ? "s" : ""} down ${(g * 100).toFixed(1)}% together after fees (stop −${Math.round(pc.seesawSl * 100)}%${pc.avg && pc.seesawSlWait ? `, averaging done: ${seeAdds[sd]}/${pc.avgAdds} adds${avgDeclined[sd] ? ", last add declined" : ""}` : ""}) → selling all, no more ${sd} buys this window` });
-              for (const { p } of grp) await sellSee(p, `stop loss ${(g * 100).toFixed(1)}%`, 0.01);
+              await sellNet(sd, grp.map((x) => x.p), `stop loss ${(g * 100).toFixed(1)}%`, 0.01);
             }
             marks = marks.filter((x) => seeOpen.some((o) => o.id === x.p.id));
             const total = seeRealized + marks.reduce((a, x) => a + x.m.net, 0);
@@ -5098,7 +5123,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               await sql`insert into pump_kv (k, v, at) values ('seesaw_lock', ${sql.json({ window: start })}, now())
                 on conflict (k) do update set v = excluded.v, at = now()`;
               await log({ did: `seesaw window target: +${(pct * 100).toFixed(1)}% on $${seeDeployed.toFixed(2)} in (target ${Math.round(pc.seesawTarget * 100)}%) → selling ${marks.length} open, no more buys this window` });
-              for (const { p } of marks) await sellSee(p, "window target", 0.01);
+              for (const sd of ["up", "down"] as Side[]) {
+                await sellNet(sd, marks.filter((x) => x.p.side === sd).map((x) => x.p), "window target", 0.01);
+              }
             } else if (pc.avg) {
               for (const sd of ["up", "down"] as Side[]) {
                 const grp = marks.filter((x) => x.p.side === sd);
@@ -5109,7 +5136,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 // The side's buys together are up PUMP_AVG_TP % after fees: sell them all.
                 if (pc.avgTp > 0 && g >= pc.avgTp && grp.every((x) => x.m.full)) {
                   await log({ side: sd, did: `seesaw ${sd}: ${grp.length} buy${grp.length > 1 ? "s" : ""} up ${(g * 100).toFixed(1)}% together after fees (target ${Math.round(pc.avgTp * 100)}%) → selling all` });
-                  for (const { p } of grp) await sellSee(p, `${sd} position +${(g * 100).toFixed(1)}%`, 0.01);
+                  await sellNet(sd, grp.map((x) => x.p), `${sd} position +${(g * 100).toFixed(1)}%`, 0.01);
                   continue;
                 }
                 // Average down: the ask is PUMP_AVG_DROP % under the last fill on this side → buy another $PUMP_AVG_BET.
@@ -5216,7 +5243,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 // Floor: never below the price that still breaks even after fees on what's left.
                 const costLeft = (Number(p.stake) + Number(p.fees) + Number(p.exit_fees) - Number(p.proceeds)) / m.leftSh;
                 const floor = Math.min(0.99, costLeft / (1 - 0.095 * (1 - Math.min(0.99, costLeft))));
-                await sellSee(p, `take profit +${(m.gain * 100).toFixed(1)}%`, floor);
+                await sellNet(p.side as Side, [p], `take profit +${(m.gain * 100).toFixed(1)}%`, floor);
               }
             }
           } catch (e) {

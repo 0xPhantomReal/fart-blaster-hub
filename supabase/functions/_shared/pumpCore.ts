@@ -595,3 +595,17 @@ export function seesawStopFires(o: {
   if (!o.avgOn || !o.waitForAdds) return true;
   return o.addsUsed >= o.addsMax || o.lastAddDeclined;
 }
+
+/**
+ * Polymarket US nets a market's Up and Down into one position, so a side can only be sold for its excess over the
+ * opposite side's open shares. Given the remaining shares of the buys being sold (in order), the side's total open
+ * shares and the opposite side's, returns how many shares to sell from each buy (0 = netted, nothing to send).
+ */
+export function netSellPlan(left: number[], sideOpen: number, otherOpen: number): number[] {
+  let excess = Math.max(0, sideOpen - otherOpen);
+  return left.map((l) => {
+    const take = Math.max(0, Math.min(l, excess));
+    excess -= take;
+    return take;
+  });
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   breakEvenBid,
   seesawStopFires,
+  netSellPlan,
   btcVolPerSec,
   feePerShare,
   MarketTape,
@@ -171,5 +172,16 @@ describe("seesaw stop-loss", () => {
   it("fires right away without averaging or without the wait", () => {
     expect(seesawStopFires({ ...base, gain: -0.5, avgOn: false })).toBe(true);
     expect(seesawStopFires({ ...base, gain: -0.6, waitForAdds: false })).toBe(true);
+  });
+});
+
+describe("seesaw sells on the net position (Polymarket nets Up and Down)", () => {
+  it("sells nothing when the side is smaller than (or equal to) the opposite side", () => {
+    expect(netSellPlan([4], 4, 10)).toEqual([0]);
+    expect(netSellPlan([5, 5], 10, 10)).toEqual([0, 0]);
+  });
+  it("sells only the excess, across the buys in order", () => {
+    expect(netSellPlan([6, 4], 10, 3)).toEqual([6, 1]); // 7 net: all of the first buy, 1 of the second
+    expect(netSellPlan([2, 8], 10, 0)).toEqual([2, 8]); // nothing opposite: sell everything
   });
 });
