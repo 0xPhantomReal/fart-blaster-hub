@@ -292,6 +292,7 @@ const Pump = () => {
               pad(`PUMP_AVG_SCORE=${st?.avgScore ?? 0}`, "score needed for an add too (0 = not needed)"),
               pad(`PUMP_SEESAW_SL=${st?.seesawSl !== undefined ? Math.round(st.seesawSl * 100) : 50}`, "seesaw: stop a side at −this % together after fees (0 = off)"),
               pad(`PUMP_SEESAW_SL_WAIT=${st?.seesawSlWait === false ? "0" : "1"}`, "1 = stop only once averaging down has given up; 0 = right away"),
+              pad(`PUMP_SEESAW_NOADD=${st?.seesawNoAdd !== undefined ? Math.round(st.seesawNoAdd * 100) : 10}`, "seesaw: no new buys on a side down this % (DCA adds still allowed; 0 = off)"),
               pad(`PUMP_SEESAW_TP=${st?.seesawTp !== undefined ? Math.round(st.seesawTp * 100) : 3}`, "seesaw: sell a buy at +this % after fees (0 = off)"),
               pad(`PUMP_SEESAW_TARGET=${st?.seesawTarget !== undefined ? Math.round(st.seesawTarget * 100) : 5}`, "seesaw: window up this % in total → sell all, stop (0 = off)"),
               pad(`PUMP_SEESAW_JEV=${st?.seesawJev === false ? "0" : "1"}`, "seesaw: ask Jev to grade each buy (0 = off)"),

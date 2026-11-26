@@ -1243,6 +1243,7 @@ export interface PumpStatus {
     avgScore?: number;
     seesawSl?: number;
     seesawSlWait?: boolean;
+    seesawNoAdd?: number;
     seesawJevMin?: number;
     seesawJevRange?: { lo: number; hi: number }[] | null;
     maxLeft?: number;

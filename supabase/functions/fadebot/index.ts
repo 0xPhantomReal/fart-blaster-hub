@@ -4418,6 +4418,9 @@ function pumpSettings() {
     // averaging has given up on the side (adds used up, or the last add declined) unless PUMP_SEESAW_SL_WAIT=0.
     seesawSl: Math.max(0, n("PUMP_SEESAW_SL", 50) / 100),
     seesawSlWait: env("PUMP_SEESAW_SL_WAIT") !== "0",
+    // No regular seesaw buys on a side whose open position (all its buys, after fees) is down PUMP_SEESAW_NOADD %
+    // or more (0 = off). Average-down adds are not affected.
+    seesawNoAdd: Math.max(0, n("PUMP_SEESAW_NOADD", 10) / 100),
     seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
     // Bands instead (override the minimum): PUMP_SEESAW_JEV_RANGE=10-20,40-60 buys only when Jev says 10–20% or
     // 40–60% (ends included). Any unreadable part makes the whole setting unreadable (then the minimum applies).
@@ -4735,6 +4738,8 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     // Was the last average-down add on a side declined (Jev / score)? And sides stopped out this window.
     const avgDeclined: Record<Side, boolean> = { up: false, down: false };
     const seeBlocked: Record<Side, boolean> = { up: false, down: false };
+    // Each side's open position, after fees, as of the last check (null = nothing open on that side).
+    const seeSideGain: Record<Side, number | null> = { up: null, down: null };
     if (pc.seesaw) {
       const b = (await sql`select v from pump_kv where k = 'seesaw_block'`)[0]?.v as { window?: number; sides?: Side[] } | undefined;
       if (b?.window === start) for (const sd of b.sides ?? []) seeBlocked[sd] = true;
@@ -5021,6 +5026,11 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           busy = true;
           try {
             let marks = seeOpen.map((p) => ({ p, m: mark(p) }));
+            for (const sd of ["up", "down"] as Side[]) {
+              const grp = marks.filter((x) => x.p.side === sd);
+              const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
+              seeSideGain[sd] = grp.length && stake > 0 ? grp.reduce((a, x) => a + x.m.net, 0) / stake : null;
+            }
             // ── Stop-loss per side (whole position, after fees).
             for (const sd of ["up", "down"] as Side[]) {
               const grp = marks.filter((x) => x.p.side === sd);
@@ -5193,7 +5203,10 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           const hot = ss.score >= pc.seesawScore;
           // Not on a side that was stopped out this window (in inverse mode, the side that would be bought).
           const buySide: Side = pc.inverse ? (sd === "up" ? "down" : "up") : sd;
-          const fire = hot && canBuy && !seeBlocked[buySide] && !busy && nowMs - runStart >= 5000 && entries < pc.seesawMax &&
+          // …and not on a side whose open position is already down PUMP_SEESAW_NOADD % (average-down adds still allowed).
+          const sideDown = pc.seesawNoAdd > 0 && seeOpen.some((p) => p.side === buySide) &&
+            (seeSideGain[buySide] ?? 0) <= -pc.seesawNoAdd;
+          const fire = hot && canBuy && !seeBlocked[buySide] && !sideDown && !busy && nowMs - runStart >= 5000 && entries < pc.seesawMax &&
             today > -pc.dailyLoss && (!wasHot[sd] || nowMs - lastFire[sd] >= pc.seesawEvery * 1000);
           wasHot[sd] = hot;
           if (!fire) continue;
