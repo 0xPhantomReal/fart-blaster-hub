@@ -89,7 +89,7 @@ const Pump = () => {
                   st?.live ? "bg-[#3d1d1d] text-[#ef5350]" : "bg-[#21262d] text-[#8b949e]"
                 }`}
               >
-                {st?.on === false ? "OFF" : st?.live ? "LIVE" : "TEST"}{st?.inverse ? " · INVERSE" : ""}{st?.tf === 3600 ? " · 1H" : " · 5M"}
+                {st?.on === false ? "OFF" : st?.live ? "LIVE" : "TEST"}{st?.inverse ? " · INVERSE" : ""}{st?.tf === 3600 ? " · 1H" : st?.tf === 900 ? " · 15M" : " · 5M"}
               </span>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
@@ -275,7 +275,7 @@ const Pump = () => {
               pad(`PUMP_AUTO_FLOW=${st?.autoFlow ?? 15}`, "…and buying pressure at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_AUTO_TURN=${st?.autoTurn ?? 10}`, "…and price turning up at/above this (of 20; 0 = not needed)"),
               pad(`PUMP_THIN=${st?.thin ?? "20-300"}`, "offers up to 2× ($): at/under the first = thin (full points)"),
-              pad(`PUMP_TF=${st?.tf === 3600 ? "1h" : "5m"}`, "which market: 5m (5-minute) or 1h (hourly)"),
+              pad(`PUMP_TF=${st?.tf === 3600 ? "1h" : st?.tf === 900 ? "15m" : "5m"}`, "which market: 5m, 15m or 1h"),
               pad(`PUMP_RECORDER=${st?.recorder ? "1" : "0"}`, "1 = record every second for analysis (off by default)"),
               pad(`PUMP_INVERSE=${st?.inverse ? "1" : "0"}`, "1 = buy the OPPOSITE side of every buy decision"),
               pad(`PUMP_SEESAW=${st?.seesaw ? "1" : "0"}`, "1 = seesaw mode (replaces auto-buy/Jev buys)"),

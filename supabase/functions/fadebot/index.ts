@@ -681,6 +681,7 @@ async function marketsOf(e: Ev) {
 /** The BTC 5-minute Up/Down market covering [start, start + 300). */
 async function findMarket(start: number, tf = TF): Promise<WindowMarket | null> {
   const hourly = tf === 3600;
+  const quarter = tf === 900;
   const client = pm();
   const seen = new Map<string, Ev>();
   // 1. Direct slugs. Polymarket US: btc-updown-5m-2026-11-04-1915z (window start, UTC); the international site
@@ -690,6 +691,8 @@ async function findMarket(start: number, tf = TF): Promise<WindowMarket | null> 
   // end-time list and search below (which find the 5-minute market the same way).
   const directSlugs = hourly
     ? [`btc-updown-1h-${slugTime(start)}`, `btc-updown-60m-${slugTime(start)}`, `btc-updown-1h-${start}`, `btc-updown-hourly-${slugTime(start)}`]
+    : quarter
+    ? [`btc-updown-15m-${slugTime(start)}`, `btc-updown-15m-${start}`]
     : [`btc-updown-5m-${slugTime(start)}`, `btc-updown-5m-${start}`];
   for (const slug of directSlugs) {
     const r = await client.events.retrieveBySlug(slug).catch((e) => {
@@ -718,6 +721,8 @@ async function findMarket(start: number, tf = TF): Promise<WindowMarket | null> 
   for (
     const query of hourly
       ? ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down Hourly", "BTC Up or Down Hourly", "BTC 1h"]
+      : quarter
+      ? ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 15 minutes", "BTC 15m"]
       : ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin Up or Down 5 minutes", "BTC 5m"]
   ) {
     const r = await client.search.query({ query, limit: 100 }).catch(() => ({ events: [] }));
@@ -728,6 +733,12 @@ async function findMarket(start: number, tf = TF): Promise<WindowMarket | null> 
     const s = e.startTime ? Date.parse(e.startTime) / 1000 : NaN;
     const en = e.endTime ? Date.parse(e.endTime) / 1000 : NaN;
     const text = `${e.slug} ${e.title ?? ""}`;
+    if (quarter) {
+      // The 15-minute market: labelled 15m / 15 min, or (no label) lasting 15 minutes. Not 5/10/30-minute or longer.
+      if (/(^|[^0-9])(5|10|30|60)\s?(m|min)|\b(1h|4h|hour|hourly|daily|1d)\b/i.test(text)) return false;
+      if (/(^|[^0-9])15\s?(m|min)/i.test(text)) return true;
+      return Math.abs(en - s - tf) < 5;
+    }
     if (hourly) {
       // The hourly market: labelled 1h / 60m / hourly, or (no label) lasting an hour. Not 5/15/30-minute, 4h or daily.
       if (/(^|[^0-9])(5|1[05]|30)\s?(m|min)|\b(4h|daily|1d)\b/i.test(text)) return false;
@@ -4377,7 +4388,11 @@ function pumpSettings() {
     live: env("PUMP_MODE") === "live",
     // Which bitcoin up/down market: PUMP_TF=5m (default) or 1h. Time settings (PUMP_MIN_LEFT etc.) stay in seconds
     // of that market's window; "per window" limits become per hour on 1h.
-    tf: /^\s*(1h|60m?|3600|hour|hourly)\s*$/i.test(env("PUMP_TF")) ? 3600 : 300,
+    tf: /^\s*(1h|60m?|3600|hour|hourly)\s*$/i.test(env("PUMP_TF"))
+      ? 3600
+      : /^\s*(15m?|900|15min)\s*$/i.test(env("PUMP_TF"))
+      ? 900
+      : 300,
     bet: Math.max(1, n("PUMP_BET", 1)),
     // % of the balance per trade (0 = off → the fixed PUMP_BET). At least $1.
     betPct: Math.min(100, Math.max(0, n("PUMP_BET_PCT", 0))),
@@ -4557,9 +4572,9 @@ async function pumpSellShares(m: WindowMarket, side: Side, shares: number, expec
 async function pumpWinner(slug: string, longIs: Side, start: number, quick: boolean, tf = TF): Promise<Side | null> {
   const won = await settledSide({ slug, longIs } as WindowMarket).catch(() => null);
   if (won) return won;
-  // The BRTI fallback copies the 5-minute market's rule; the hourly market waits for Polymarket's own result.
-  if (tf !== TF) return null;
-  const end = start + TF;
+  // The BRTI fallback copies the 5- and 15-minute markets' rule; the hourly market waits for Polymarket's own result.
+  if (tf === 3600) return null;
+  const end = start + tf;
   const [fin, before] = await Promise.all([period(end - 60), period(start - 60)]);
   if (fin && before && fin.n >= 20 && before.n >= 20 && (quick || Date.now() / 1000 > end + 900)) {
     return winner(before.avg, fin.avg);
@@ -4591,10 +4606,10 @@ async function pumpSettle() {
   for (const t of open) {
     const ttf = Number(t.tf ?? 300);
     let won: Side | null = await settledSide({ slug: t.market_slug, longIs: t.long_is } as WindowMarket).catch(() => null);
-    if (!won && ttf === TF) {
+    if (!won && ttf !== 3600) {
       // Like the main bot: fall back to BRTI the way Polymarket settles (last minute's average vs the minute before
       // the window) — at once in test mode, after 15 minutes live (giving the official result time to arrive).
-      const end = Number(t.window_start) + TF;
+      const end = Number(t.window_start) + ttf;
       const [fin, before] = await Promise.all([period(end - 60), period(Number(t.window_start) - 60)]);
       if (fin && before && fin.n >= 20 && before.n >= 20 && (t.mode === "dry" || now > end + 900)) {
         won = winner(before.avg, fin.avg);
@@ -4602,7 +4617,7 @@ async function pumpSettle() {
     }
     if (!won) {
       // Give the official result time (hourly results can take longer): 1 h after a 5-minute window, 6 h after an hour.
-      if (now > Number(t.window_start) + ttf + (ttf === TF ? 3600 : 6 * 3600)) {
+      if (now > Number(t.window_start) + ttf + (ttf === 3600 ? 6 * 3600 : 3600)) {
         await sql`update pump_trades set status = 'void', result = 'could not settle', closed_at = now() where id = ${t.id}`;
       }
       continue;
@@ -4680,7 +4695,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
   try {
     const market = await findMarket(start, TFp);
     if (!market) {
-      await beat({ did: `no Polymarket ${TFp === 3600 ? "hourly" : "5-minute"} market for this window${lastSearch ? `: ${lastSearch.slice(0, 300)}` : ""}` });
+      await beat({ did: `no Polymarket ${TFp === 3600 ? "hourly" : TFp === 900 ? "15-minute" : "5-minute"} market for this window${lastSearch ? `: ${lastSearch.slice(0, 300)}` : ""}` });
       return "no market";
     }
     const tape = new MarketTape(market.slug, market.longIs);
