@@ -576,3 +576,22 @@ export function breakEvenBid(fill: number, rate = 0.095) {
   const a = rate, b = 1 - rate;
   return (-b + Math.sqrt(b * b + 4 * a * k)) / (2 * a);
 }
+
+/**
+ * Seesaw stop-loss on one side's whole position (all its open buys together, after fees). `gain` and `sl` are
+ * fractions (−0.5 = down 50%). With averaging down on and `waitForAdds`, it only fires once averaging has given up
+ * on the side: every add used, or the last add was declined (Jev or the score said no).
+ */
+export function seesawStopFires(o: {
+  gain: number;
+  sl: number;
+  avgOn: boolean;
+  waitForAdds: boolean;
+  addsUsed: number;
+  addsMax: number;
+  lastAddDeclined: boolean;
+}) {
+  if (!(o.sl > 0) || o.gain > -o.sl) return false;
+  if (!o.avgOn || !o.waitForAdds) return true;
+  return o.addsUsed >= o.addsMax || o.lastAddDeclined;
+}

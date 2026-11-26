@@ -133,6 +133,7 @@ import {
   pumpFeatures,
   pumpScore,
   breakEvenBid,
+  seesawStopFires,
   snapRow,
   DEFAULT_SCORE_CFG,
   type PumpScore,
@@ -4412,6 +4413,11 @@ function pumpSettings() {
     avgJev: env("PUMP_AVG_JEV") !== "0",
     avgJevMin: Math.min(1, Math.max(0, n("PUMP_AVG_JEV_MIN", 50) / 100)),
     avgScore: Math.min(100, Math.max(0, n("PUMP_AVG_SCORE", 0))),
+    // Seesaw stop-loss: sell a side's whole position (all its buys, after fees) once it's down PUMP_SEESAW_SL %
+    // (0 = off), then stop buying that side for the rest of the window. With averaging down on, it waits until
+    // averaging has given up on the side (adds used up, or the last add declined) unless PUMP_SEESAW_SL_WAIT=0.
+    seesawSl: Math.max(0, n("PUMP_SEESAW_SL", 50) / 100),
+    seesawSlWait: env("PUMP_SEESAW_SL_WAIT") !== "0",
     seesawJevMin: Math.min(1, Math.max(0, n("PUMP_SEESAW_JEV_MIN", 50) / 100)),
     // Bands instead (override the minimum): PUMP_SEESAW_JEV_RANGE=10-20,40-60 buys only when Jev says 10–20% or
     // 40–60% (ends included). Any unreadable part makes the whole setting unreadable (then the minimum applies).
@@ -4726,6 +4732,13 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     const seeAdds: Record<Side, number> = { up: 0, down: 0 };
     // When an add was last considered per side (so a "no" isn't re-asked every half second).
     const avgAskedAt: Record<Side, number> = { up: 0, down: 0 };
+    // Was the last average-down add on a side declined (Jev / score)? And sides stopped out this window.
+    const avgDeclined: Record<Side, boolean> = { up: false, down: false };
+    const seeBlocked: Record<Side, boolean> = { up: false, down: false };
+    if (pc.seesaw) {
+      const b = (await sql`select v from pump_kv where k = 'seesaw_block'`)[0]?.v as { window?: number; sides?: Side[] } | undefined;
+      if (b?.window === start) for (const sd of b.sides ?? []) seeBlocked[sd] = true;
+    }
     if (pc.seesaw) {
       for (const r of await sql`select side, count(*)::int as n from pump_trades where coalesce(kind, 'pump') = 'seesaw'
           and window_start = ${start} and reason like 'seesaw: average down%' group by side`) {
@@ -5007,7 +5020,25 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           };
           busy = true;
           try {
-            const marks = seeOpen.map((p) => ({ p, m: mark(p) }));
+            let marks = seeOpen.map((p) => ({ p, m: mark(p) }));
+            // ── Stop-loss per side (whole position, after fees).
+            for (const sd of ["up", "down"] as Side[]) {
+              const grp = marks.filter((x) => x.p.side === sd);
+              if (!grp.length) continue;
+              const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
+              const g = stake > 0 ? grp.reduce((a, x) => a + x.m.net, 0) / stake : 0;
+              if (!seesawStopFires({
+                gain: g, sl: pc.seesawSl, avgOn: pc.avg, waitForAdds: pc.seesawSlWait, addsUsed: seeAdds[sd],
+                addsMax: pc.avgAdds, lastAddDeclined: avgDeclined[sd],
+              })) continue;
+              seeBlocked[sd] = true;
+              await sql`insert into pump_kv (k, v, at) values ('seesaw_block',
+                  ${sql.json({ window: start, sides: (["up", "down"] as Side[]).filter((x) => seeBlocked[x]) })}, now())
+                on conflict (k) do update set v = excluded.v, at = now()`;
+              await log({ side: sd, did: `seesaw ${sd} STOP LOSS: ${grp.length} buy${grp.length > 1 ? "s" : ""} down ${(g * 100).toFixed(1)}% together after fees (stop −${Math.round(pc.seesawSl * 100)}%${pc.avg && pc.seesawSlWait ? `, averaging done: ${seeAdds[sd]}/${pc.avgAdds} adds${avgDeclined[sd] ? ", last add declined" : ""}` : ""}) → selling all, no more ${sd} buys this window` });
+              for (const { p } of grp) await sellSee(p, `stop loss ${(g * 100).toFixed(1)}%`, 0.01);
+            }
+            marks = marks.filter((x) => seeOpen.some((o) => o.id === x.p.id));
             const total = seeRealized + marks.reduce((a, x) => a + x.m.net, 0);
             const pct = seeDeployed > 0 ? total / seeDeployed : 0;
             if (pc.seesawTarget > 0 && !seeLocked && seeDeployed > 0 && pct >= pc.seesawTarget && marks.every((x) => x.m.full)) {
@@ -5034,7 +5065,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 const last = grp.reduce((a, x) => (Number(x.p.id) > Number(a.p.id) ? x : a)).p;
                 const askNow = tape.books()[sd].asks[0]?.[0];
                 const leftNow = end - Date.now() / 1000;
-                const eligible = askNow !== undefined && askNow >= 0.02 &&
+                const eligible = !seeBlocked[sd] && askNow !== undefined && askNow >= 0.02 &&
                   askNow <= Number(last.price) * (1 - pc.avgDrop) + 1e-9 && seeAdds[sd] < pc.avgAdds && !seeLocked &&
                   entries < pc.seesawMax && leftNow >= pc.minLeft && today > -pc.dailyLoss && !seeAsking[sd] &&
                   Date.now() - avgAskedAt[sd] >= pc.seesawEvery * 1000;
@@ -5045,6 +5076,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                   const ssA = pumpScore(fsA, tape, Date.now(), pc.thin);
                   const drop = `ask ${Math.round(askNow * 100)}¢ is ${Math.round((1 - askNow / Number(last.price)) * 100)}% under the last fill ${(Number(last.price) * 100).toFixed(1)}¢; ${sd} position ${(g * 100).toFixed(1)}%`;
                   if (pc.avgScore > 0 && ssA.score < pc.avgScore) {
+                    avgDeclined[sd] = true;
                     await log({ side: sd, ask: askNow, did: `seesaw ${sd}: ${drop}, but score ${ssA.score} < ${pc.avgScore}: no add` });
                   } else {
                     // The whole position's after-fee break-even bid if we add $PUMP_AVG_BET now:
@@ -5072,6 +5104,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                       busy = true;
                       try {
                         seeAdds[sd]++;
+                        avgDeclined[sd] = false;
                         await seeBuy(
                           sd, fsA, ssA,
                           `average down (add ${seeAdds[sd]}/${pc.avgAdds}: ${drop}; ${jevNote}position break-even ${beC}¢, avg ${avgC}¢) → `,
@@ -5109,6 +5142,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                           const pct = Math.round(j.p * 1000) / 10;
                           const note = `Jev ${pct}% to recover to ${beC}¢; `;
                           if (j.p < pc.avgJevMin) {
+                            avgDeclined[sd] = true;
                             await log({ side: sd, ask: askNow, p_pump: j.p, did: `seesaw ${sd}: ${drop}; ${note}(need ${Math.round(pc.avgJevMin * 100)}%): no add`, features: sql.json({ ...fsA, score: ssA } as never) });
                           } else {
                             await addNow(note, j.p);
@@ -5157,7 +5191,9 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
             saveLive({ side: sd, ask: a, bid: fs.bid_c, seconds_left: Math.round(left), score: ss, features: fs, seesaw: true });
           }
           const hot = ss.score >= pc.seesawScore;
-          const fire = hot && canBuy && !busy && nowMs - runStart >= 5000 && entries < pc.seesawMax &&
+          // Not on a side that was stopped out this window (in inverse mode, the side that would be bought).
+          const buySide: Side = pc.inverse ? (sd === "up" ? "down" : "up") : sd;
+          const fire = hot && canBuy && !seeBlocked[buySide] && !busy && nowMs - runStart >= 5000 && entries < pc.seesawMax &&
             today > -pc.dailyLoss && (!wasHot[sd] || nowMs - lastFire[sd] >= pc.seesawEvery * 1000);
           wasHot[sd] = hot;
           if (!fire) continue;

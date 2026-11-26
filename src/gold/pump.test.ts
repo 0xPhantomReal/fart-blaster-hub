@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   breakEvenBid,
+  seesawStopFires,
   btcVolPerSec,
   feePerShare,
   MarketTape,
@@ -153,5 +154,22 @@ describe("break-even bid after fees", () => {
       expect(b).toBeGreaterThan(f);
     }
     expect(breakEvenBid(0.21)).toBeCloseTo(0.243, 2); // a 21¢ fill needs a ~24.3¢ bid
+  });
+});
+
+describe("seesaw stop-loss", () => {
+  const base = { sl: 0.5, avgOn: true, waitForAdds: true, addsUsed: 0, addsMax: 5, lastAddDeclined: false };
+  it("doesn't fire above the stop or when off", () => {
+    expect(seesawStopFires({ ...base, gain: -0.4 })).toBe(false);
+    expect(seesawStopFires({ ...base, gain: -0.9, sl: 0 })).toBe(false);
+  });
+  it("waits for averaging down to give up", () => {
+    expect(seesawStopFires({ ...base, gain: -0.6 })).toBe(false); // adds left, none declined
+    expect(seesawStopFires({ ...base, gain: -0.6, addsUsed: 5 })).toBe(true); // all adds used
+    expect(seesawStopFires({ ...base, gain: -0.6, lastAddDeclined: true })).toBe(true); // Jev said no
+  });
+  it("fires right away without averaging or without the wait", () => {
+    expect(seesawStopFires({ ...base, gain: -0.5, avgOn: false })).toBe(true);
+    expect(seesawStopFires({ ...base, gain: -0.6, waitForAdds: false })).toBe(true);
   });
 });

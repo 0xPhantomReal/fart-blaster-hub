@@ -73,6 +73,7 @@ const Pump = () => {
                         `${st.avgScore ? ` with score ${st.avgScore}+` : ""}, adds $${st.avgBet} (up to ${st.avgAdds}), and sells all of a side once its buys are +${Math.round((st.avgTp ?? 0.02) * 100)}% together after fees; `
                       : `${st.seesawTp ? `Sells a buy at +${Math.round(st.seesawTp * 100)}% after fees; ` : ""}`) +
                     `${st.seesawTarget ? `once the window's buys are +${Math.round(st.seesawTarget * 100)}% in total it sells the rest and stops; ` : ""}` +
+                    `${st.seesawSl ? `Stops a side out at −${Math.round(st.seesawSl * 100)}% together after fees${st.avg && st.seesawSlWait !== false ? " (once averaging down has given up)" : ""} and stops buying it that window; ` : ""}` +
                     "anything left holds to resolution."
                   : st
                   ? `Scores every cheap side (under ${st.maxAsk}¢) from the live book, trades and BTC. At ${st.minScore ?? 50}+ it asks Jev ` +
@@ -289,6 +290,8 @@ const Pump = () => {
               pad(`PUMP_AVG_JEV=${st?.avgJev === false ? "0" : "1"}`, "ask Jev before each add (0 = add on the drop alone)"),
               pad(`PUMP_AVG_JEV_MIN=${st?.avgJevMin !== undefined ? Math.round(st.avgJevMin * 100) : 50}`, "Jev's chance of a bounce to the position's break-even needed (%)"),
               pad(`PUMP_AVG_SCORE=${st?.avgScore ?? 0}`, "score needed for an add too (0 = not needed)"),
+              pad(`PUMP_SEESAW_SL=${st?.seesawSl !== undefined ? Math.round(st.seesawSl * 100) : 50}`, "seesaw: stop a side at −this % together after fees (0 = off)"),
+              pad(`PUMP_SEESAW_SL_WAIT=${st?.seesawSlWait === false ? "0" : "1"}`, "1 = stop only once averaging down has given up; 0 = right away"),
               pad(`PUMP_SEESAW_TP=${st?.seesawTp !== undefined ? Math.round(st.seesawTp * 100) : 3}`, "seesaw: sell a buy at +this % after fees (0 = off)"),
               pad(`PUMP_SEESAW_TARGET=${st?.seesawTarget !== undefined ? Math.round(st.seesawTarget * 100) : 5}`, "seesaw: window up this % in total → sell all, stop (0 = off)"),
               pad(`PUMP_SEESAW_JEV=${st?.seesawJev === false ? "0" : "1"}`, "seesaw: ask Jev to grade each buy (0 = off)"),
