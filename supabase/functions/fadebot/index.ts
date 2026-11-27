@@ -121,6 +121,7 @@ import { candleStrength } from "../_shared/candleStrength.ts";
 import { askJevTrader } from "../_shared/jevTrader.ts";
 import { askJevBreakeven, askJevPump } from "../_shared/jevPump.ts";
 import { BtcFlow } from "../_shared/btcFlow.ts";
+import { TickRecorder } from "../_shared/tickTape.ts";
 import {
   type BtcCtx,
   feePerShare,
@@ -5527,6 +5528,107 @@ async function pumpStatus() {
   };
 }
 
+// ── Jerico: every tick of the 5-minute market (page /jerico) ─────────────
+// Runs inside the pump bot's cron (every minute, whatever the pump bot's own settings), or on its own cron with
+// {"action":"ticks"}. JERICO_TICKS=0 turns it off. Ticks are stored as small chunks (one row every ~3 s).
+
+let ticksReady = false;
+async function setupTicks() {
+  if (ticksReady) return;
+  const sql = db();
+  await sql`create table if not exists pm_ticks (
+    id bigserial primary key, window_start bigint not null, slug text, long_is text, seq int not null,
+    t0 bigint not null, rows jsonb not null, created_at timestamptz default now())`;
+  await sql`create index if not exists pm_ticks_window on pm_ticks (window_start, seq)`;
+  await sql.unsafe(`alter table pm_ticks enable row level security`);
+  ticksReady = true;
+}
+
+/** Record every tick of this minute of the current 5-minute window, until `until`. */
+async function tickRun(until: number) {
+  if (env("JERICO_TICKS") === "0") return "jerico ticks off (JERICO_TICKS=0)";
+  await setup();
+  await setupTicks();
+  const sql = db();
+  const start = Math.floor(Date.now() / 1000 / 300) * 300;
+  const market = await findMarket(start, 300);
+  if (!market) return "jerico: no 5-minute market for this window";
+  const rec = new TickRecorder(market.slug);
+  let seq = Number((await sql`select coalesce(max(seq), -1) + 1 as n from pm_ticks where window_start = ${start}`)[0].n);
+  const flush = async () => {
+    const c = rec.flush();
+    if (!c) return;
+    await sql`insert into pm_ticks ${sql({ window_start: start, slug: market.slug, long_is: market.longIs, seq: seq++, t0: c.t0, rows: sql.json(c.rows as never) })}`
+      .catch((e) => console.error("jerico insert:", (e as Error).message));
+  };
+  let sock: { close(): void } | null = null;
+  try {
+    const ws = pm().ws.markets() as unknown as {
+      on(e: string, f: (m: Record<string, unknown>) => void): unknown;
+      connect(): Promise<void>;
+      subscribeMarketData(id: string, s: string[]): void;
+      subscribeTrades(id: string, s: string[]): void;
+      subscribeMarketDataLite(id: string, s: string[]): void;
+      close(): void;
+    };
+    ws.on("marketData", (m) => rec.takeBook(m?.marketData as Record<string, unknown>));
+    ws.on("trade", (m) => rec.takeTrade(m?.trade as Record<string, unknown>));
+    ws.on("marketDataLite", (m) => rec.takeLite(m?.marketDataLite as Record<string, unknown>));
+    ws.on("error", () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      ws.connect(),
+      new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("no connection after 5 s")), 5000))),
+    ]).finally(() => clearTimeout(timer));
+    ws.subscribeMarketData(`jerico-book-${start}`, [market.slug]);
+    ws.subscribeTrades(`jerico-trades-${start}`, [market.slug]);
+    ws.subscribeMarketDataLite(`jerico-lite-${start}`, [market.slug]);
+    sock = ws;
+    while (Date.now() / 1000 < until - 0.2) {
+      await new Promise((r) => setTimeout(r, 3000));
+      await flush();
+    }
+    await flush();
+  } catch (e) {
+    await flush();
+    return `jerico: websocket failed (${(e as Error).message.slice(0, 100)})`;
+  } finally {
+    try {
+      sock?.close();
+    } catch { /* closed */ }
+  }
+  // Keep 2 days; clean up once an hour on the indexed column.
+  if (new Date().getUTCMinutes() === 1) {
+    await sql`delete from pm_ticks where window_start < ${start - 2 * 86400}`.catch(() => {});
+  }
+  return `jerico: ${rec.ticks} book ticks, ${rec.trades} trades`;
+}
+
+/** Read-only: one window's ticks (all, or the chunks after `since`), plus the list of recorded windows. */
+async function jericoData(window: number | null, since: number | null, withList: boolean) {
+  await setup();
+  await setupTicks();
+  const sql = db();
+  const now = Date.now() / 1000;
+  const cur = Math.floor(now / 300) * 300;
+  const w = window ?? cur;
+  const chunks = await sql`select seq, t0, rows, slug, long_is from pm_ticks where window_start = ${w}
+    ${since !== null ? sql`and seq > ${since}` : sql``} order by seq`;
+  const list = withList
+    ? await sql`select window_start, count(*)::int as chunks, sum(jsonb_array_length(rows))::int as ticks from pm_ticks
+        where window_start > ${cur - 86400} group by window_start order by window_start desc limit 300`
+    : [];
+  return {
+    now,
+    window: w,
+    live: w === cur,
+    slug: chunks[0]?.slug ?? null,
+    longIs: chunks[0]?.long_is ?? null,
+    chunks: chunks.map((c) => ({ seq: c.seq, t0: Number(c.t0), rows: c.rows })),
+    windows: list.map((r) => ({ start: Number(r.window_start), chunks: r.chunks, ticks: r.ticks })),
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   try {
@@ -5534,6 +5636,12 @@ Deno.serve(async (req) => {
     if (body?.action === "status") return json(await status());
     // Read-only: the pump bot's page.
     if (body?.action === "pump-status") return json(await pumpStatus());
+    // Read-only: Jerico's recorded ticks for one window (page /jerico).
+    if (body?.action === "jerico") {
+      const w = Number(body.window);
+      const since = body.since === undefined || body.since === null ? null : Number(body.since);
+      return json(await jericoData(Number.isFinite(w) && w > 0 ? w : null, Number.isFinite(since) ? since : null, !!body.list));
+    }
     // Read-only: the recorder's data as CSV (≤ 6 hours per call).
     if (body?.action === "pump-export") {
       const now = Math.floor(Date.now() / 1000);
@@ -5613,7 +5721,20 @@ Deno.serve(async (req) => {
       const now = Date.now() / 1000;
       const start = Math.floor(now / TF) * TF;
       const m = Math.floor((now - start) / 60);
-      return json({ ok: true, done: await pumpRun(start + m * 60 + 58) });
+      // Jerico's tick recorder runs alongside in the same cron call.
+      const until = start + m * 60 + 58;
+      const [done, ticks] = await Promise.all([
+        pumpRun(until),
+        tickRun(until).catch((e) => `jerico error: ${(e as Error).message.slice(0, 120)}`),
+      ]);
+      return json({ ok: true, done, ticks });
+    }
+    if (body?.action === "ticks") {
+      // Jerico's recorder on its own cron (every minute), if you'd rather not tie it to the pump cron.
+      const now = Date.now() / 1000;
+      const start = Math.floor(now / TF) * TF;
+      const m = Math.floor((now - start) / 60);
+      return json({ ok: true, ticks: await tickRun(start + m * 60 + 58) });
     }
     if (body?.action === "test-pump" && env("FADEBOT_ALLOW_TEST") === "1") {
       if (body.reset) {

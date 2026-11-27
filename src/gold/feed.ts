@@ -1377,3 +1377,27 @@ export async function fetchPumpStatus(): Promise<PumpStatus | null> {
   if (!res || !res.ok) return null;
   return (await res.json()) as PumpStatus;
 }
+
+/** Jerico (page /jerico): recorded ticks of one 5-minute window. */
+export interface JericoData {
+  now: number;
+  window: number;
+  live: boolean;
+  slug: string | null;
+  longIs: "up" | "down" | null;
+  chunks: { seq: number; t0: number; rows: number[][] }[];
+  windows: { start: number; chunks: number; ticks: number }[];
+}
+export async function fetchJerico(o: { window?: number | null; since?: number | null; list?: boolean }): Promise<JericoData | null> {
+  if (!FN_URL) return null;
+  const res = await fetch(FN_URL.replace(/\/gold$/, "/fadebot"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ANON_KEY ? { Authorization: `Bearer ${ANON_KEY}`, apikey: ANON_KEY } : {}),
+    },
+    body: JSON.stringify({ action: "jerico", window: o.window ?? undefined, since: o.since ?? undefined, list: !!o.list }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json()) as JericoData;
+}

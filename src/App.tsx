@@ -11,6 +11,7 @@ import { lazy, Suspense } from "react";
 const Gold = lazy(() => import("./pages/Gold.tsx"));
 const Bot = lazy(() => import("./pages/Bot.tsx"));
 const Pump = lazy(() => import("./pages/Pump.tsx"));
+const Jerico = lazy(() => import("./pages/Jerico.tsx"));
 
 const queryClient = new QueryClient();
 
@@ -43,6 +44,14 @@ const App = () => (
             element={
               <Suspense fallback={<div className="h-screen bg-[#0e1116]" />}>
                 <Pump />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/jerico"
+            element={
+              <Suspense fallback={<div className="h-screen bg-[#0e1116]" />}>
+                <Jerico />
               </Suspense>
             }
           />
