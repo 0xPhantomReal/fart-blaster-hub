@@ -1244,6 +1244,7 @@ export interface PumpStatus {
     avgScore?: number;
     seesawSl?: number;
     seesawSlWait?: boolean;
+    seesawSlBlock?: boolean;
     seesawNoAdd?: number;
     seesawJevMin?: number;
     seesawJevRange?: { lo: number; hi: number }[] | null;

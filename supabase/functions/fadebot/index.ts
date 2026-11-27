@@ -4454,6 +4454,9 @@ function pumpSettings() {
     // averaging has given up on the side (adds used up, or the last add declined) unless PUMP_SEESAW_SL_WAIT=0.
     seesawSl: Math.max(0, n("PUMP_SEESAW_SL", 50) / 100),
     seesawSlWait: env("PUMP_SEESAW_SL_WAIT") !== "0",
+    // After a stop, no more buys on that side this window (default). PUMP_SEESAW_SL_BLOCK=0 keeps buying it: the
+    // side starts a fresh count, so its stop, take-profits and averaging only look at buys made after the stop.
+    seesawSlBlock: env("PUMP_SEESAW_SL_BLOCK") !== "0",
     // No regular seesaw buys on a side whose open position (all its buys, after fees) is down PUMP_SEESAW_NOADD %
     // or more (0 = off). Average-down adds are not affected.
     seesawNoAdd: Math.max(0, n("PUMP_SEESAW_NOADD", 10) / 100),
@@ -4781,17 +4784,26 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
     // Was the last average-down add on a side declined (Jev / score)? And sides stopped out this window.
     const avgDeclined: Record<Side, boolean> = { up: false, down: false };
     const seeBlocked: Record<Side, boolean> = { up: false, down: false };
+    // With PUMP_SEESAW_SL_BLOCK=0: the last trade id on each side when it was stopped out. Buys up to it are the old,
+    // stopped position (only netted pairs are left of it); the side's stop, take-profits and averaging count only newer buys.
+    const seeCut: Record<Side, number> = { up: 0, down: 0 };
     // Each side's open position, after fees, as of the last check (null = nothing open on that side).
     const seeSideGain: Record<Side, number | null> = { up: null, down: null };
     // When a "netted, not sold" note was last logged per side (so a standing condition doesn't log twice a second).
     const netLogAt: Record<Side, number> = { up: 0, down: 0 };
     if (pc.seesaw) {
-      const b = (await sql`select v from pump_kv where k = 'seesaw_block'`)[0]?.v as { window?: number; sides?: Side[] } | undefined;
-      if (b?.window === start) for (const sd of b.sides ?? []) seeBlocked[sd] = true;
+      const b = (await sql`select v from pump_kv where k = 'seesaw_block'`)[0]?.v as
+        | { window?: number; sides?: Side[]; cut?: Partial<Record<Side, number>> }
+        | undefined;
+      if (b?.window === start) {
+        for (const sd of b.sides ?? []) seeBlocked[sd] = true;
+        for (const sd of ["up", "down"] as Side[]) seeCut[sd] = Number(b.cut?.[sd] ?? 0);
+      }
     }
     if (pc.seesaw) {
       for (const r of await sql`select side, count(*)::int as n from pump_trades where coalesce(kind, 'pump') = 'seesaw'
-          and window_start = ${start} and reason like 'seesaw: average down%' group by side`) {
+          and window_start = ${start} and reason like 'seesaw: average down%'
+          and id > (case when side = 'up' then ${seeCut.up}::bigint else ${seeCut.down}::bigint end) group by side`) {
         seeAdds[r.side as Side] = r.n;
       }
     }
@@ -5093,14 +5105,17 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
           busy = true;
           try {
             let marks = seeOpen.map((p) => ({ p, m: mark(p) }));
+            // A side's current position: its buys after its last stop (all of them if it was never stopped).
+            // deno-lint-ignore no-explicit-any
+            const fresh = (x: { p: any }) => Number(x.p.id) > seeCut[x.p.side as Side];
             for (const sd of ["up", "down"] as Side[]) {
-              const grp = marks.filter((x) => x.p.side === sd);
+              const grp = marks.filter((x) => x.p.side === sd && fresh(x));
               const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
               seeSideGain[sd] = grp.length && stake > 0 ? grp.reduce((a, x) => a + x.m.net, 0) / stake : null;
             }
             // ── Stop-loss per side (whole position, after fees).
             for (const sd of ["up", "down"] as Side[]) {
-              const grp = marks.filter((x) => x.p.side === sd);
+              const grp = marks.filter((x) => x.p.side === sd && fresh(x));
               if (!grp.length || seeBlocked[sd]) continue; // already stopped out this window
               const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
               const g = stake > 0 ? grp.reduce((a, x) => a + x.m.net, 0) / stake : 0;
@@ -5108,11 +5123,18 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
                 gain: g, sl: pc.seesawSl, avgOn: pc.avg, waitForAdds: pc.seesawSlWait, addsUsed: seeAdds[sd],
                 addsMax: pc.avgAdds, lastAddDeclined: avgDeclined[sd],
               })) continue;
-              seeBlocked[sd] = true;
+              if (pc.seesawSlBlock) seeBlocked[sd] = true;
+              // Keep buying this side (PUMP_SEESAW_SL_BLOCK=0), from a fresh count: everything up to here is the stopped position.
+              else seeCut[sd] = Math.max(seeCut[sd], ...grp.map((x) => Number(x.p.id)));
               await sql`insert into pump_kv (k, v, at) values ('seesaw_block',
-                  ${sql.json({ window: start, sides: (["up", "down"] as Side[]).filter((x) => seeBlocked[x]) })}, now())
+                  ${sql.json({ window: start, sides: (["up", "down"] as Side[]).filter((x) => seeBlocked[x]), cut: seeCut })}, now())
                 on conflict (k) do update set v = excluded.v, at = now()`;
-              await log({ side: sd, did: `seesaw ${sd} STOP LOSS: ${grp.length} buy${grp.length > 1 ? "s" : ""} down ${(g * 100).toFixed(1)}% together after fees (stop −${Math.round(pc.seesawSl * 100)}%${pc.avg && pc.seesawSlWait ? `, averaging done: ${seeAdds[sd]}/${pc.avgAdds} adds${avgDeclined[sd] ? ", last add declined" : ""}` : ""}) → selling all, no more ${sd} buys this window` });
+              await log({ side: sd, did: `seesaw ${sd} STOP LOSS: ${grp.length} buy${grp.length > 1 ? "s" : ""} down ${(g * 100).toFixed(1)}% together after fees (stop −${Math.round(pc.seesawSl * 100)}%${pc.avg && pc.seesawSlWait ? `, averaging done: ${seeAdds[sd]}/${pc.avgAdds} adds${avgDeclined[sd] ? ", last add declined" : ""}` : ""}) → selling all, ${pc.seesawSlBlock ? `no more ${sd} buys this window` : `then ${sd} buys start a fresh count`}` });
+              if (!pc.seesawSlBlock) {
+                seeAdds[sd] = 0;
+                avgDeclined[sd] = false;
+                avgAskedAt[sd] = 0;
+              }
               await sellNet(sd, grp.map((x) => x.p), `stop loss ${(g * 100).toFixed(1)}%`, 0.01);
             }
             marks = marks.filter((x) => seeOpen.some((o) => o.id === x.p.id));
@@ -5129,7 +5151,7 @@ async function pumpRun(until: number, opts: { forceStart?: number } = {}) {
               }
             } else if (pc.avg) {
               for (const sd of ["up", "down"] as Side[]) {
-                const grp = marks.filter((x) => x.p.side === sd);
+                const grp = marks.filter((x) => x.p.side === sd && fresh(x));
                 if (!grp.length) continue;
                 const stake = grp.reduce((a, x) => a + Number(x.p.stake), 0);
                 const net = grp.reduce((a, x) => a + x.m.net, 0);
